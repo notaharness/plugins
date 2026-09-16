@@ -1,0 +1,8 @@
+# Test files
+TEST*.md
+
+# Local settings
+.claude/
+
+# Python bytecode
+__pycache__/

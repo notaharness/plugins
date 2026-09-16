@@ -1,0 +1,19 @@
+{
+  "name": "notaharness",
+  "owner": {
+    "name": "notaharness",
+    "url": "https://github.com/notaharness"
+  },
+  "description": "Agent-agnostic skills and plugins from notaharness",
+  "plugins": [
+    {
+      "name": "orchestra",
+      "source": "./orchestra",
+      "description": "Run parallel coding agents (players) in tmux sessions and git worktrees, supervised by an orchestrator that receives their reports",
+      "version": "1.0.0",
+      "author": {
+        "name": "notaharness"
+      }
+    }
+  ]
+}
