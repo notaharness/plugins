@@ -23,15 +23,111 @@ nl=$'\n'                                  # assigned once: ANSI-C quoting inside
 # display-message, respawn-pane, set-option, capture-pane) reject it; `=name:` is exact for all.
 tmux_target() { printf '=%s:' "$1"; }
 
+# --- Machine selection ---------------------------------------------------------------------
+# ORCH_MACHINE selects which machine tmux_on and g (_lib.sh) act on. Unset, empty, or the literal
+# "local" means this machine — exactly the behaviour every script had before beam existed, byte
+# for byte. Anything else is a beam peer label or peerId, and every tmux/git call below is run
+# there through `beam exec` instead of run here. Scripts set this from --machine, defaulting to
+# $ORCHESTRA_MACHINE; report.sh and relay.sh never set it (a player and the relay always act on
+# their own machine).
+ORCH_MACHINE="${ORCH_MACHINE:-${ORCHESTRA_MACHINE:-}}"
+is_local_machine() { [ -z "$ORCH_MACHINE" ] || [ "$ORCH_MACHINE" = local ]; }
+machine_label() { is_local_machine && printf 'this machine' || printf '%s' "$ORCH_MACHINE"; }
+
+# --- beam executor ---------------------------------------------------------------------------
+# beam_cmd: resolve how to invoke beam into the BEAM_CMD array (so a two-word form like "n10 beam"
+# is never re-split by a shell). First hit wins: $ORCHESTRA_BEAM, `beam` on PATH, `n10 beam`.
+# Fails, leaving BEAM_CMD unset, when none resolve — callers must not fall back to running
+# anything locally on that failure, which would silently act on the wrong machine.
+beam_cmd() {
+  if [ -n "${ORCHESTRA_BEAM:-}" ]; then BEAM_CMD=("$ORCHESTRA_BEAM"); return 0; fi
+  if command -v beam >/dev/null 2>&1; then BEAM_CMD=(beam); return 0; fi
+  if command -v n10 >/dev/null 2>&1; then BEAM_CMD=(n10 beam); return 0; fi
+  return 1
+}
+beam_unresolved_message() {
+  printf "no beam binary found to reach machine '%s' (tried \$ORCHESTRA_BEAM, 'beam' on PATH, 'n10 beam')" "$1"
+}
+# beam_exec <machine> <argv…>: run argv on <machine> via `beam exec <machine> -- <argv…>`. Neither
+# this function nor beam_cmd touches stdin, so it is forwarded to the remote process exactly as
+# bash would forward it to any other subprocess — which is what lets a paste buffer loaded from
+# stdin (tmux's ~16 KiB command-line cap) still work against a remote session.
+beam_exec() {
+  local machine="$1"; shift
+  beam_cmd || { echo "orchestra: $(beam_unresolved_message "$machine") — refusing to run this locally" >&2; return 1; }
+  "${BEAM_CMD[@]}" exec "$machine" -- "$@"
+}
+# beam_own_peer_id: this machine's own peerId, from `beam status --json`, run locally regardless
+# of ORCH_MACHINE (asking "who am I" is never a remote operation).
+beam_own_peer_id() {
+  local status
+  beam_cmd || { echo "orchestra: $(beam_unresolved_message "this machine")" >&2; return 1; }
+  status="$("${BEAM_CMD[@]}" status --json 2>/dev/null)" || { echo "orchestra: 'beam status --json' failed; is a beam node running on this machine?" >&2; return 1; }
+  json_string_field "$status" peerId
+}
+
+# --- Dependency-free JSON string extraction ---------------------------------------------------
+# Beam prints JSON (peer/status/send responses, mailbox envelopes) and payloads travel through it
+# as JSON strings. jq is not a listed dependency, and a payload can hold arbitrary report text
+# (quotes, newlines, unicode), so field values are decoded here rather than shelled out to a tool
+# that may not be installed.
+# json_unescape <raw>: decode the standard JSON string escapes a scanner already isolated
+# (\" \\ \/ \b \f \n \r \t; \uXXXX is passed through literally — Orchestra never emits one).
+json_unescape() {
+  local s="$1" out="" i=0 len c n
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    c="${s:$i:1}"
+    if [ "$c" = '\' ]; then
+      n="${s:$((i+1)):1}"
+      case "$n" in
+        n) out+=$'\n';; t) out+=$'\t';; r) out+=$'\r';; b) out+=$'\b';; f) out+=$'\f';;
+        '"') out+='"';; '\') out+='\';; /) out+='/';;
+        *) out+="\\$n";;
+      esac
+      i=$((i+2))
+    else out+="$c"; i=$((i+1)); fi
+  done
+  printf '%s' "$out"
+}
+# json_string_field <json> <field>: the decoded value of "<field>":"<value>" found anywhere in one
+# line of JSON (object nesting elsewhere in the line is not a concern: field names here are never
+# reused at another depth). Fails when the field or its closing quote is not found.
+json_string_field() {
+  local json="$1" field="$2" marker rest i c len out=""
+  marker="\"$field\""
+  case "$json" in *"$marker"*) ;; *) return 1;; esac
+  rest="${json#*"$marker"}"; rest="${rest#*:}"
+  while [ -n "$rest" ] && [ "${rest:0:1}" != '"' ]; do rest="${rest:1}"; done
+  [ -n "$rest" ] || return 1
+  rest="${rest:1}"
+  len=${#rest}; i=0
+  while [ "$i" -lt "$len" ]; do
+    c="${rest:$i:1}"
+    case "$c" in
+      '\') out+="$c${rest:$((i+1)):1}"; i=$((i+2));;
+      '"') json_unescape "$out"; return 0;;
+      *) out+="$c"; i=$((i+1));;
+    esac
+  done
+  return 1
+}
+
 # tmux sanitizes what it prints unless the client is in UTF-8 mode, which it infers from the names
 # of LC_ALL/LC_CTYPE/LANG: outside a UTF-8 locale control characters (such as the tabs between
 # listing fields) and non-ASCII come back as "_". `tmux -u` forces UTF-8 output whatever the locale, so every call goes through it.
 # tmux_on <socket> <args…>: tmux on one server. An empty socket means the current server (the
 # one $TMUX names, else the default); a path is passed as -S so a process whose tmux environment
-# is redirected (every player pane) still reaches the server that holds its session.
+# is redirected (every player pane) still reaches the server that holds its session. On the local
+# machine (ORCH_MACHINE unset/empty/"local") this is exactly today's invocation, unchanged; on any
+# other machine the identical argv runs there instead, through beam_exec.
 tmux_on() {
   local sock="$1"; shift
-  if [ -n "$sock" ]; then tmux -u -S "$sock" "$@"; else tmux -u "$@"; fi
+  if is_local_machine; then
+    if [ -n "$sock" ]; then tmux -u -S "$sock" "$@"; else tmux -u "$@"; fi
+  else
+    if [ -n "$sock" ]; then beam_exec "$ORCH_MACHINE" tmux -u -S "$sock" "$@"; else beam_exec "$ORCH_MACHINE" tmux -u "$@"; fi
+  fi
 }
 # tag_get <socket> <session> <tag>: the value, empty when unset or unreachable; never fails.
 tag_get()   { tmux_on "$1" show-options -qv -t "$(tmux_target "$2")" "$3" 2>/dev/null || :; }
@@ -54,13 +150,31 @@ player_session_context() {
 }
 
 # --- Reporting targets -----------------------------------------------------------------------
-# codex:<thread-id> or tmux:<session>; nothing else. Never infer a parent from a player's own ID.
+# codex:<thread-id>, tmux:<session>, or beam:<orchestrator peerId>/<one of those two>, when the
+# orchestrator is on another machine. Nothing else. Never infer a parent from a player's own ID.
 # tmux session names: tmux itself rewrites "." and ":" but otherwise allows most characters.
+# peerId: the first 16 hex characters of the SHA-256 of the peer's public key (beam.md).
+_valid_local_target() {
+  case "$1" in
+    codex:*) [[ "${1#codex:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]];;
+    tmux:*) [[ -n "${1#tmux:}" && ! "${1#tmux:}" =~ [:[:cntrl:]] ]];;
+    *) return 1;;
+  esac
+}
 normalize_target() {
   case "$1" in
-    codex:*) [[ "${1#codex:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { echo "invalid Codex thread ID: ${1#codex:}" >&2; return 2; };;
-    tmux:*) [[ -n "${1#tmux:}" && ! "${1#tmux:}" =~ [:[:cntrl:]] ]] || { echo "invalid tmux session name: ${1#tmux:}" >&2; return 2; };;
-    *) echo "invalid orchestrator target: $1 (use codex:<thread-id> or tmux:<session>)" >&2; return 2;;
+    codex:*) _valid_local_target "$1" || { echo "invalid Codex thread ID: ${1#codex:}" >&2; return 2; };;
+    tmux:*) _valid_local_target "$1" || { echo "invalid tmux session name: ${1#tmux:}" >&2; return 2; };;
+    beam:*/*)
+      local rest peer local_part
+      rest="${1#beam:}"; peer="${rest%%/*}"; local_part="${rest#*/}"
+      [[ "$peer" =~ ^[0-9a-fA-F]{16}$ ]] || { echo "invalid beam peerId: $peer" >&2; return 2; }
+      case "$local_part" in
+        codex:*) _valid_local_target "$local_part" || { echo "invalid Codex thread ID: ${local_part#codex:}" >&2; return 2; };;
+        tmux:*) _valid_local_target "$local_part" || { echo "invalid tmux session name: ${local_part#tmux:}" >&2; return 2; };;
+        *) echo "invalid beam-qualified target: $1 (the local part must be codex:<thread-id> or tmux:<session>)" >&2; return 2;;
+      esac;;
+    *) echo "invalid orchestrator target: $1 (use codex:<thread-id>, tmux:<session>, or beam:<peerId>/codex:<thread-id>|tmux:<session>)" >&2; return 2;;
   esac
   printf '%s' "$1"
 }
@@ -113,4 +227,41 @@ pane_owned_by_agent() {
       pane_has_agent "$pid";;
     *) return 0;;
   esac
+}
+
+# --- Shared local delivery ---------------------------------------------------------------------
+# The one place a report (or a relayed envelope) is actually delivered to a local target: the
+# codex queue path, or the tmux load-buffer/paste-buffer/send-keys sequence, gated by
+# pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux: target)
+# and relay.sh (an envelope's embedded local target) both call this; a message that arrived from
+# another machine gets exactly the same scrutiny as one typed locally. <target> carries its
+# codex:/tmux: prefix; on failure the reason is left in DELIVER_REASON rather than printed here,
+# so each caller keeps its own error wording (report.sh's "delivery failed" block, relay.sh's log
+# line).
+DELIVER_REASON=""
+deliver_to_local_target() {
+  local sock="$1" target="$2" msg="$3" tt
+  case "$target" in
+    codex:*)
+      codex queue --thread "${target#codex:}" --message "$msg" && return 0
+      DELIVER_REASON='Codex queue refused the message; inspect before retrying to avoid duplicate reports'
+      return 1;;
+    tmux:*) target="${target#tmux:}";;
+    *) DELIVER_REASON="unroutable local target: $target"; return 1;;
+  esac
+  tmux_on "$sock" has-session -t "=$target" 2>/dev/null || { DELIVER_REASON="orchestrator session $target is gone or unreachable"; return 1; }
+  # Would the paste be run as a shell command? Only an agent at the terminal may receive it.
+  pane_owned_by_agent "$sock" "$target" || { DELIVER_REASON="a shell owns $target now, not an agent"; return 1; }
+  # One bracketed paste (-p) keeps embedded newlines from submitting early; the buffer is loaded
+  # from stdin because tmux rejects command lines over ~16 KiB. The pause lets a slow UI ingest
+  # the paste before Enter.
+  tt="$(tmux_target "$target")"
+  printf '%s' "$msg" | tmux_on "$sock" load-buffer -b "player-$$" - || { DELIVER_REASON="tmux could not load the message"; return 1; }
+  # errexit is live inside callers with `set -e`: cleanup must not exit before the reason is set.
+  tmux_on "$sock" paste-buffer -p -d -b "player-$$" -t "$tt" ||
+    { tmux_on "$sock" delete-buffer -b "player-$$" 2>/dev/null || :; DELIVER_REASON="tmux could not paste into $target"; return 1; }
+  sleep 0.3
+  tmux_on "$sock" send-keys -t "$tt" Enter ||
+    { DELIVER_REASON="tmux could not submit the message in $target; the paste succeeded, inspect before retrying"; return 1; }
+  return 0
 }

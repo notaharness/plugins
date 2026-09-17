@@ -3,15 +3,47 @@
 set -u
 
 # The repo a script acts on: --repo <path> (parsed by each script into ORCH_REPO) or the
-# current directory. Every git call goes through g so both cases behave the same.
+# current directory. Every git call goes through g so both cases behave the same. On the local
+# machine (the default, and every user's behaviour until they name a --machine) this is exactly
+# today's invocation, unchanged; ORCH_MACHINE and is_local_machine come from _routing.sh, sourced
+# below. A remote --repo must be absolute or start with "~/": relative paths cannot be resolved
+# against this machine's working directory on another machine, so g refuses rather than guessing.
 ORCH_REPO="${ORCH_REPO:-}"
-g() { if [ -n "$ORCH_REPO" ]; then git -C "$ORCH_REPO" "$@"; else git "$@"; fi; }
+# A remote --repo must be absolute or start with "~/": a relative path cannot be resolved against
+# this machine's working directory on another machine. Scripts call this right after parsing
+# --repo/--machine so the error is specific rather than being swallowed by a later "not a git
+# repo" check; g() calls it too, as a backstop for anything that reaches git without going
+# through a script's own argument parsing.
+require_valid_repo_for_machine() {
+  is_local_machine && return 0
+  case "$ORCH_REPO" in
+    ""|/*|"~/"*) return 0;;
+    *) echo "orchestra: --repo must be an absolute path or start with ~/ when --machine is set (got '$ORCH_REPO'); it cannot be resolved against this machine's working directory on $ORCH_MACHINE" >&2; return 1;;
+  esac
+}
+g() {
+  if is_local_machine; then
+    if [ -n "$ORCH_REPO" ]; then git -C "$ORCH_REPO" "$@"; else git "$@"; fi
+    return
+  fi
+  require_valid_repo_for_machine || return 1
+  # git's -C does not itself expand "~/"; beam's own --cwd resolves it on the target machine
+  # (docs/beam.md), so the repo location travels as exec's cwd rather than as a literal -C
+  # argument that a shell-less remote exec would never expand.
+  if [ -n "$ORCH_REPO" ]; then
+    beam_cmd || { echo "orchestra: $(beam_unresolved_message "$ORCH_MACHINE")" >&2; return 1; }
+    "${BEAM_CMD[@]}" exec "$ORCH_MACHINE" --cwd "$ORCH_REPO" -- git "$@"
+  else
+    beam_exec "$ORCH_MACHINE" git "$@"
+  fi
+}
 in_repo() { g rev-parse --git-dir >/dev/null 2>&1; }
 
 # Root of the MAIN checkout, even when run from inside a linked worktree: the common git dir
 # lives in the main checkout, so its parent is the main root. Falling back to --show-toplevel
 # covers repos too old for --path-format. Symlink-resolved: the string is compared for equality
-# with the @orchestra-repo tag, which the contract defines as the resolved path.
+# with the @orchestra-repo tag, which the contract defines as the resolved path — on a remote
+# machine that means resolved there, since that is the machine the worktree lives on.
 repo_root() {
   local common root
   if common="$(g rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
@@ -19,7 +51,20 @@ repo_root() {
   else
     root="$(g rev-parse --show-toplevel 2>/dev/null)" || { [ -n "$ORCH_REPO" ] && root="$ORCH_REPO" || root="$PWD"; }
   fi
-  realpath "$root" 2>/dev/null || printf %s "$root"
+  if is_local_machine; then
+    realpath "$root" 2>/dev/null || printf %s "$root"
+  else
+    beam_exec "$ORCH_MACHINE" realpath "$root" 2>/dev/null || printf %s "$root"
+  fi
+}
+
+# The tmux server an orchestrator's own session lives on: $TMUX's socket path when running inside
+# tmux (spawn.sh, adopt.sh and relay.sh may all run from an orchestrator's own pane), else the
+# default per-user socket tmux itself would pick. Shared so relay.sh (which is not necessarily
+# started from inside tmux) resolves a local target's session on the same server spawn.sh used.
+default_orchestrator_socket() {
+  local sock="${TMUX:-}"; sock="${sock%%,*}"
+  printf '%s' "${sock:-${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default}"
 }
 
 # The repository's default branch as a remote ref (origin/master, origin/main, …),
@@ -110,20 +155,21 @@ resolve_session() {
   if in_repo; then
     root="$(repo_root)"
     find_player_session "$root" "$arg" && return
-    echo "resolve_session: no player session named $arg, and no player for branch $arg in $root (sessions.sh --all lists every repo's; pass --repo or the exact session name)" >&2; exit 1
+    echo "resolve_session: no player session named $arg, and no player for branch $arg in $root on $(machine_label) (sessions.sh --all lists every repo's and, with more than one machine registered, every machine's; pass --repo, --machine, or the exact session name)" >&2; exit 1
   fi
   cand="$(player_sessions | awk -F "$TAB" -v branch="$arg" '$7 == branch { print $1 "  (repo " $5 ")" }')"
   case "$(printf '%s\n' "$cand" | grep -c .)" in
     1) printf %s "${cand%%  (repo *}";;
-    0) echo "resolve_session: no player session named $arg and no player for branch $arg on this machine" >&2; exit 1;;
-    *) echo "resolve_session: branch $arg is ambiguous; pass --repo or the exact session name:" >&2; printf '  %s\n' "$cand" >&2; exit 1;;
+    0) echo "resolve_session: no player session named $arg and no player for branch $arg on $(machine_label)" >&2; exit 1;;
+    *) echo "resolve_session: branch $arg is ambiguous on $(machine_label); pass --repo or the exact session name. Session names are only unique per machine, so once several machines are in play also pass --machine:" >&2; printf '  %s\n' "$cand" >&2; exit 1;;
   esac
 }
-# Exact-match check for a resolved name; prints a uniform error.
-session_exists() { tmux has-session -t "=$1" 2>/dev/null || { echo "no such session: $1" >&2; return 1; }; }
+# Exact-match check for a resolved name; prints a uniform error. Routed through tmux_on (not a
+# bare `tmux`) so it honours ORCH_MACHINE like every other read here.
+session_exists() { tmux_on "" has-session -t "=$1" 2>/dev/null || { echo "no such session: $1" >&2; return 1; }; }
 
 # Visible pane text, trailing whitespace trimmed, runs of blank lines collapsed.
-screen_text() { tmux capture-pane -p -t "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2'; }
+screen_text() { tmux_on "" capture-pane -p -t "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2'; }
 
 # Every agent runs with TMUX unset and TMUX_TMPDIR on a scratch dir, so nothing it runs —
 # tests included — can reach the socket that hosts the user's live sessions.
@@ -141,13 +187,14 @@ PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION
 
 # Deliver multi-line text to a pane as one bracketed paste. The text goes through load-buffer on
 # stdin: tmux rejects command lines over ~16 KiB, which set-buffer/-e/send-keys all count against.
-# Usage: paste_into <session> <text> [tmux args…]   (extra args select a socket: -S PATH)
+# Goes through tmux_on (the default/current server, like every other orchestrator-side call here),
+# so it honours ORCH_MACHINE too. Usage: paste_into <session> <text>
 paste_into() {
-  local session="$1" text="$2"; shift 2
-  printf '%s' "$text" | tmux "$@" load-buffer -b "orch-$$" - || return 1
-  tmux "$@" paste-buffer -p -d -b "orch-$$" -t "$(tmux_target "$session")" || { tmux "$@" delete-buffer -b "orch-$$" 2>/dev/null || :; return 1; }
+  local session="$1" text="$2"
+  printf '%s' "$text" | tmux_on "" load-buffer -b "orch-$$" - || return 1
+  tmux_on "" paste-buffer -p -d -b "orch-$$" -t "$(tmux_target "$session")" || { tmux_on "" delete-buffer -b "orch-$$" 2>/dev/null || :; return 1; }
   sleep 0.3
-  tmux "$@" send-keys -t "$(tmux_target "$session")" Enter
+  tmux_on "" send-keys -t "$(tmux_target "$session")" Enter
 }
 
 # Resolve links created by skills installers before finding the sibling player skill.
