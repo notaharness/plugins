@@ -26,13 +26,15 @@ Every `report.sh` call below uses the command resolved above.
 ## Reporting target
 
 Your orchestrator is recorded on your own tmux session as the session user option (tag)
-`@orchestra-orchestrator`: `codex:<thread-id>` or `tmux:<session>`. The scripts that spawn
-or adopt you set it. `report.sh` finds your own session through `ORCHESTRA_SESSION` and
-`ORCHESTRA_SOCKET` (the tmux server socket that holds it), which `spawn.sh` injects; in a pane
-`spawn.sh` did not start (a session another tool created that an orchestrator adopted) it
-derives them from tmux's own `TMUX` variable instead. You cannot change the target and do
-not need to know it: `report.sh --orchestrator` prints the current value when asked. Never
-substitute your own `CODEX_THREAD_ID` for the orchestrator. Nothing is stored in files.
+`@orchestra-orchestrator`: `codex:<thread-id>` or `tmux:<session>`, or, when your orchestrator is
+on a different machine than you, `beam:<orchestrator peerId>/` followed by one of those two. The
+scripts that spawn or adopt you set it. `report.sh` finds your own session through
+`ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` (the tmux server socket that holds it), which
+`spawn.sh` injects; in a pane `spawn.sh` did not start (a session another tool created that an
+orchestrator adopted) it derives them from tmux's own `TMUX` variable instead. You cannot change
+the target and do not need to know it: `report.sh --orchestrator` prints the current value when
+asked. Never substitute your own `CODEX_THREAD_ID` for the orchestrator. Nothing is stored in
+files.
 
 What follows the invocation decides what to do:
 - Task text: carry out the task.
@@ -62,11 +64,28 @@ Answer routine decisions yourself. After asking questions, continue independent 
 if nothing remains independent, finish the turn and await the reply. Finish each task
 with one DONE or BLOCKED report. Handoffs may legitimately resend the terminal report.
 
-`report.sh` prints `queued for …` or `sent to …` only when the transport accepted the
-message; it then records `<KIND> <timestamp>` in your session's `@orchestra-last-report`
-tag. On failure it exits nonzero and prints `report.sh: delivery failed`, the destination
-(or `<unknown>` if it cannot be read), the reason, and the complete original report to stderr.
-Surface the delivery failure in your response and quote the full report so the result remains
-visible in your conversation. Inspect the destination before retrying: a paste may have
+`report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a tmux orchestrator, or a
+beam delivery the far side acknowledged) only when the transport accepted the message; it then
+records `<KIND> <timestamp> <delivered|queued>` in your session's `@orchestra-last-report` tag —
+a third field beyond the kind and timestamp.
+
+When your orchestrator is on another machine and that machine is not connected right now, beam
+still accepts the report — it is durably queued on disk and will be delivered the moment that
+machine reconnects — and `report.sh` prints exactly this, verbatim except for the machine's label:
+
+```
+queued for <label> — that machine is not connected right now. beam will deliver this report
+when it comes back online. Do not send it again.
+```
+
+This exits 0 and sets `@orchestra-last-report`'s third field to `queued`. Treat it exactly like
+`sent to …`: the report is done, nothing was lost, and sending it again would duplicate it once
+the machine reconnects.
+
+On failure — a local target gone or unreachable, or beam's own `rejected` (unknown peer, revoked
+peer, or the report too large) — it exits nonzero and prints `report.sh: delivery failed`, the
+destination (or `<unknown>` if it cannot be read), the reason, and the complete original report to
+stderr. Surface the delivery failure in your response and quote the full report so the result
+remains visible in your conversation. Inspect the destination before retrying: a paste may have
 succeeded before submission failed, so another attempt could duplicate the report. Do not
 claim that the orchestrator received a report when delivery failed.
