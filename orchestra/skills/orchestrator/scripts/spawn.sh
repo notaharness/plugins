@@ -13,6 +13,9 @@
 #                 [--from REF]                base for a new branch; default origin/HEAD
 #                 [--orchestrator TARGET]     codex:<thread-id> or tmux:<session>
 #                                             auto: current Codex ID, then current tmux
+#                 [--machine NAME]            beam peer label or peerId to spawn the player on;
+#                                             default $ORCHESTRA_MACHINE, else this machine. A
+#                                             remote --repo must be absolute or start with ~/.
 #                 [--no-node-modules] [--dry-run]
 # Fresh defaults: Claude opus/high (fable/high for --model fable), Codex gpt-6-astra/medium,
 # other Codex models high. --dry-run resolves local refs without fetching or writing.
@@ -52,11 +55,12 @@ while [ $# -gt 0 ]; do case "$1" in
   --branch) BRANCH="$2"; shift;; --prompt-file) PFILE="$2"; shift;; --prompt) PROMPT="$2"; shift;;
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
-  --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,48p' "$0"; exit 0;;
+  --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,51p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 [ -n "$BRANCH" ] || { echo "spawn.sh: --branch is required" >&2; exit 2; }
 git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
+require_valid_repo_for_machine || exit 2
 in_repo || { echo "spawn.sh: ${ORCH_REPO:-$PWD} is not inside a git repo; pass --repo <path>" >&2; exit 1; }
 if [ -n "$PFILE" ]; then PROMPT="$(cat "$PFILE")" || exit 1; fi
 if [ -z "$PROMPT" ] && [ $RESUME = 0 ]; then echo "spawn.sh: task prompt is required (--prompt or --prompt-file)" >&2; exit 2; fi
@@ -67,10 +71,26 @@ if [ -n "$EFFORT" ]; then
   case "${AGENT:-claude}" in claude|codex) ;; *) echo "spawn.sh: --effort only supports claude and codex" >&2; exit 2;; esac
 fi
 
-# Resolve before stripping parent identity from the player's environment.
+# Resolve before stripping parent identity from the player's environment. A remote player cannot
+# reach this orchestrator by a bare tmux:/codex: target (that is only meaningful on this machine),
+# so it is qualified with this machine's own peerId, learned from `beam status --json` run here
+# (never through the executor: "who am I" is always a local question). An already-qualified
+# --orchestrator (an explicit handoff to some other beam-qualified target) is left as given.
 ORCH="$(resolve_orchestrator "$ORCH")" || exit 2
-ORCH_SOCK="${TMUX:-}"; ORCH_SOCK="${ORCH_SOCK%%,*}"
-ORCH_SOCK="${ORCH_SOCK:-${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default}"
+case "$ORCH" in
+  beam:*) ;;
+  *) is_local_machine || { own_peer="$(beam_own_peer_id)" || exit 1; ORCH="beam:$own_peer/$ORCH"; };;
+esac
+# The socket the player's session will live on. Locally this is $TMUX's socket (the orchestrator's
+# own pane) or the default per-user path. $TMUX describes only this process's own binding, so it
+# never applies to a remote machine; beam's exec has no shell to expand "$(id -u)" itself, so the
+# remote uid is fetched with its own call and the same default-path convention built from it here.
+if is_local_machine; then
+  ORCH_SOCK="$(default_orchestrator_socket)"
+else
+  remote_uid="$(beam_exec "$ORCH_MACHINE" id -u)" || { echo "spawn.sh: could not determine the default tmux socket on $ORCH_MACHINE (id -u failed)" >&2; exit 1; }
+  ORCH_SOCK="/tmp/tmux-$remote_uid/default"
+fi
 t() { tmux_on "$ORCH_SOCK" "$@"; }        # -u -S: reads are exact in any locale
 tag() { tag_set "$ORCH_SOCK" "$name" "$@"; }
 
