@@ -83,7 +83,7 @@ echo "# report.sh from the player to tmux:parent"
 check "report exits 0" "[ $? = 0 ] && grep -q 'sent to parent' '$T/report.out'"
 sleep 0.5
 check "parent received report under the session name" "grep -q '\[player $S1\] PROGRESS: hello from smoke' '$T/received-claude'"
-check "last-report tag set" "tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP\$'"
+check "last-report tag set" "tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP delivered\$'"
 check "--orchestrator prints the tag" "[ \"\$(player --orchestrator)\" = tmux:parent ]"
 (cd "$W1" && player --orchestrator tmux:other >/dev/null 2>&1); check "player cannot rebind itself" "[ $? = 2 ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
 (unset TMUX; tm kill-session -t "=parent")
@@ -103,7 +103,7 @@ check "no mailbox written" "[ ! -e '$HOME/.claude/orchestrator-mail' ] || [ -z \
 
 echo "# listing"
 bash "$O/sessions.sh" --all --json > "$T/sessions.json" 2>/dev/null
-check "sessions.sh --json shows tags" "jq -e '.[] | select(.session == \"$S1\") | .name == \"$S1\" and .agent == \"claude\" and .orchestrator == \"tmux:parent\" and .branch == \"feature/x\" and .repo == \"$REPO\" and (.last_report | test(\"^PROGRESS $STAMP\$\"))' '$T/sessions.json' >/dev/null"
+check "sessions.sh --json shows tags" "jq -e '.[] | select(.session == \"$S1\") | .name == \"$S1\" and .agent == \"claude\" and .orchestrator == \"tmux:parent\" and .branch == \"feature/x\" and .repo == \"$REPO\" and (.last_report | test(\"^PROGRESS $STAMP delivered\$\"))' '$T/sessions.json' >/dev/null"
 check "sessions.sh --json never lists the untagged parent" "! jq -e '.[] | select(.session == \"parent\")' '$T/sessions.json' >/dev/null"
 check "sessions.sh columns" "bash '$O/sessions.sh' --repo '$T/repo' | head -n1 | grep -q 'SESSION *BRANCH *AGENT' && bash '$O/sessions.sh' --repo '$T/repo' | grep -q '$S1 *feature/x .*tmux:parent'"
 
@@ -170,7 +170,7 @@ sleep 0.5
 bash "$O/adopt.sh" adopted --repo "$T/repo" --orchestrator tmux:parent >/dev/null 2>&1; check "adopt of a Kirby pane by branch" "[ $? = 0 ] && [ \"\$(tag $SA @orchestra-orchestrator)\" = tmux:parent ]"
 bash "$O/send.sh" adopted --repo "$T/repo" --raw "REPORT" >/dev/null 2>&1; sleep 1.5
 check "report.sh inside the pane delivered under the session name" "grep -q 'sent to parent' '$T/inside.out' && grep -q '\[player $SA\] DONE: from inside' '$T/received-claude'"
-check "last-report on the adopted session" "tag $SA @orchestra-last-report | grep -Eq '^DONE $STAMP\$'"
+check "last-report on the adopted session" "tag $SA @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
 tm kill-session -t "=$SA"
 
 echo "# resume: dead pane, restart note only, no task replay"
@@ -237,5 +237,74 @@ bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume --agent claude >
 sleep 1
 check "resume recreates under the next label" "[ $rc = 0 ] && grep -q '^started *$S2\$' '$T/resume2.out' && grep -qx 'env ORCHESTRA_SESSION=$S2' '$T/last-claude' && [ \"\$(tag $S2 @orchestra-branch)\" = feature/x ]"
 check "stranger untouched" "tm has-session -t '=$S1' && [ -z \"\$(tag $S1 @orchestra-spawner)\" ]"
+
+echo "# machines: a fake beam, real tmux behind it"
+# Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd
+# to --cwd first, if given) so it reaches the real tmux/codex fakes with stdin forwarded intact —
+# the same property the mock in test_port.py proves, here against a real tmux server.
+cat > "$T/bin/beam" <<FAKEBEAM
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$T/beam-log"
+case "\$1" in
+  exec)
+    shift; machine="\$1"; shift
+    cwd=""
+    if [ "\$1" = --cwd ]; then cwd="\$2"; shift 2; fi
+    [ "\$1" = -- ] && shift
+    if [ -n "\$cwd" ]; then cd "\$cwd" || exit 1; fi
+    exec "\$@"
+    ;;
+  status)
+    printf '{"peerId":"%s","label":"orchestrator-host"}\n' "\${FAKE_BEAM_PEER_ID:-aaaaaaaaaaaaaaaa}"
+    ;;
+  msg)
+    case "\$2" in
+      send)
+        peer="\$3"; cat > "$T/beam-sent-payload"
+        printf '%s\n' "\$peer" > "$T/beam-sent-peer"
+        outcome="\${FAKE_BEAM_OUTCOME:-delivered}"; label="\${FAKE_BEAM_LABEL:-\$peer}"
+        case "\$outcome" in
+          delivered) printf '{"status":"delivered","to":"%s","label":"%s"}\n' "\$peer" "\$label";;
+          queued) printf '{"status":"queued","to":"%s","label":"%s","reason":"peer not connected"}\n' "\$peer" "\$label"; ;;
+          *) printf '{"status":"rejected","to":"%s","label":"%s","reason":"%s"}\n' "\$peer" "\$label" "\${FAKE_BEAM_REJECT_REASON:-unknown peer}"; exit 1;;
+        esac
+        ;;
+      listen) [ -f "$T/beam-inbox" ] && cat "$T/beam-inbox";;
+    esac
+    ;;
+esac
+FAKEBEAM
+chmod +x "$T/bin/beam"
+
+check "--machine routes tmux argv through beam exec, stdin intact" \
+  "bash '$O/send.sh' feature/x --repo '$T/repo' --machine workbox 'via-machine' >/dev/null 2>&1 && sleep 0.6 && grep -q via-machine '$T/received-claude' && grep -q '^exec workbox -- tmux' '$T/beam-log'"
+
+env PATH=/usr/bin:/bin bash -c '. "'"$P"'/_routing.sh"; ORCH_MACHINE=ghost tmux_on "" list-sessions' >"$T/missing-beam.out" 2>"$T/missing-beam.err"; mbrc=$?
+check "missing beam binary fails loudly, names three options, runs nothing locally" \
+  "[ $mbrc != 0 ] && [ ! -s '$T/missing-beam.out' ] && grep -q ORCHESTRA_BEAM '$T/missing-beam.err' && grep -q \"'beam' on PATH\" '$T/missing-beam.err' && grep -q \"'n10 beam'\" '$T/missing-beam.err' && grep -q 'refusing to run this locally' '$T/missing-beam.err'"
+
+echo "# report.sh over beam: delivered, queued, rejected"
+tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00d/tmux:parent"
+export FAKE_BEAM_LABEL=laptop FAKE_BEAM_OUTCOME=delivered
+(cd "$W1" && player DONE "over beam") >"$T/beam-report.out" 2>&1; brc=$?
+check "beam delivered: today's 'sent to' phrasing, tag carries a third field" \
+  "[ $brc = 0 ] && grep -q 'sent to laptop' '$T/beam-report.out' && grep -q 'target: tmux:parent' '$T/beam-sent-payload' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
+export FAKE_BEAM_OUTCOME=queued
+(cd "$W1" && player PROGRESS "still working") >"$T/beam-queued.out" 2>&1; brc=$?
+check "beam queued: success, exact wording, tag says queued" \
+  "[ $brc = 0 ] && grep -qF 'queued for laptop — that machine is not connected right now. beam will deliver this report' '$T/beam-queued.out' && grep -qF 'Do not send it again.' '$T/beam-queued.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP queued\$'"
+export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown peer"
+before_opts="$(tm show-options -t "=$S1:")"
+(cd "$W1" && player BLOCKED "need help") >"$T/beam-rejected.out" 2>"$T/beam-rejected.err"; brc=$?
+check "beam rejected: today's failure behaviour, unchanged" \
+  "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: unknown peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
+unset FAKE_BEAM_LABEL FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
+tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
+
+echo "# relay.sh delivers a beamed-in envelope to a real local pane"
+printf '{"id":"e1","from":"p","to":"q","seq":1,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:parent\\n\\n[player relayed] DONE: via relay"}\n' > "$T/beam-inbox"
+bash "$O/relay.sh" >"$T/relay.out" 2>"$T/relay.err"      # $TMUX is already exported above, as it would be from an orchestrator's own pane
+check "relay.sh delivers the envelope's local target" \
+  "grep -q 'relay.sh: delivered to tmux:parent' '$T/relay.err' && sleep 0.5 && grep -qF '[player relayed] DONE: via relay' '$T/received-claude'"
 
 echo; echo "passed $pass, failed $fail"; [ $fail = 0 ]

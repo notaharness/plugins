@@ -26,6 +26,7 @@ def player_invocation():
 INV = player_invocation()
 ID = '11111111-2222-3333-4444-555555555555'
 UUID = '0199a000-1111-7000-8000-000000000042'
+PEER = '1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-orchestrator',
@@ -167,6 +168,54 @@ if me == 'claude' and os.environ.get('TEST_CLAUDE_NOCONV'): print('No conversati
 sys.exit(int(os.environ.get('TEST_%s_EXIT' % me.upper(), os.environ.get('TEST_CLI_EXIT', '0'))))
 '''
 
+# Mock beam: records every invocation's argv (one JSON line per call, to beam-log) and, for
+# `exec`, actually runs the given argv (through the same PATH, so it reaches the tmux/git/codex
+# mocks) with stdin forwarded byte for byte — this is what lets a single test prove both "the
+# same argv reached the target" and "stdin of any size arrived intact" in one step, the way a
+# real `beam exec` would. `msg send`/`msg listen`/`status`/`peers` are controlled by the
+# TEST_BEAM_* environment variables a test sets before calling the script under test.
+BEAM_MOCK = r'''#!/usr/bin/env python3
+import os, sys, json, subprocess
+from pathlib import Path
+b = Path(os.environ['ORCH_TEST_TMP']); a = sys.argv[1:]
+with (b/'beam-log').open('a') as f: f.write(json.dumps(a)+'\n')
+if a[:1] == ['exec']:
+    machine = a[1]; rest = a[2:]
+    dd = a.index('--')
+    cwd = a[a.index('--cwd')+1] if '--cwd' in a[:dd] else None
+    argv = a[dd+1:]
+    stdin_data = sys.stdin.buffer.read()
+    (b/'beam-exec-stdin').write_bytes(stdin_data); (b/'beam-exec-machine').write_text(machine)
+    r = subprocess.run(argv, cwd=cwd, input=stdin_data)
+    sys.exit(r.returncode)
+if a[:1] == ['status']:
+    print(json.dumps({'peerId': os.environ.get('TEST_BEAM_PEER_ID', 'aaaaaaaaaaaaaaaa'),
+                       'label': os.environ.get('TEST_BEAM_LABEL_SELF', 'thishost'), 'running': True}))
+    sys.exit(0)
+if a[:1] == ['peers']:
+    peers = []
+    for item in os.environ.get('TEST_BEAM_PEERS', '').split(','):
+        if not item: continue
+        parts = item.split(':'); pid = parts[0]
+        peers.append({'peerId': pid, 'label': parts[1] if len(parts) > 1 else pid,
+                       'state': parts[2] if len(parts) > 2 else 'connected', 'endpoint': '', 'queued': 0})
+    print(json.dumps(peers)); sys.exit(0)
+if a[:2] == ['msg', 'send']:
+    peer = a[2]; stdin_data = sys.stdin.buffer.read().decode()
+    with (b/'beam-sent').open('a') as f: f.write(json.dumps({'peer': peer, 'payload': stdin_data})+'\n')
+    outcome = os.environ.get('TEST_BEAM_OUTCOME', 'delivered'); label = os.environ.get('TEST_BEAM_LABEL', peer)
+    if outcome == 'delivered': print(json.dumps({'status': 'delivered', 'to': peer, 'label': label})); sys.exit(0)
+    if outcome == 'queued':
+        print(json.dumps({'status': 'queued', 'to': peer, 'label': label, 'queueDepth': 1, 'reason': 'peer not connected'})); sys.exit(0)
+    print(json.dumps({'status': 'rejected', 'to': peer, 'label': label,
+                       'reason': os.environ.get('TEST_BEAM_REJECT_REASON', 'unknown peer')})); sys.exit(1)
+if a[:2] == ['msg', 'listen']:
+    inbox = b/'beam-inbox'
+    if inbox.exists(): sys.stdout.write(inbox.read_text())
+    sys.exit(0)
+sys.exit(0)
+'''
+
 class PortTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='orch-test.')
@@ -198,9 +247,17 @@ class PortTests(unittest.TestCase):
     def calls(self):
         f = self.base/'calls'
         return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
-    def tmux_log(self): return (self.base/'tmux-log').read_text()
+    def tmux_log(self):
+        f = self.base/'tmux-log'
+        return f.read_text() if f.exists() else ''
     def tmux_calls(self): return [json.loads(l) for l in self.tmux_log().splitlines()]
     def clear_log(self): (self.base/'tmux-log').unlink()
+    def beam_calls(self):
+        f = self.base/'beam-log'
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+    def beam_sent(self):
+        f = self.base/'beam-sent'
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
     def state(self): return json.loads((self.base/'tmux-state.json').read_text())
     def buffers(self):
         f = self.base/'tmux-buffers.json'
@@ -234,8 +291,8 @@ class PortTests(unittest.TestCase):
         for f in ('player-orchestrator', 'player-prompt', 'player-agent'): self.assertFalse((self.gitdir()/f).exists(), f)
         self.assertFalse((self.base/'mail').exists())
         self.assertEqual([p.name for p in self.gitdir().glob('player-*')], [])
-    def lib(self, snippet, *args):      # a snippet run with _lib.sh sourced ($0 must be one of its scripts)
-        return self.run_cmd(['bash', '-c', '. "$0"; '+snippet, self.script('_lib.sh'), *args], cwd=self.base).stdout
+    def lib(self, snippet, *args, ok=True):      # a snippet run with _lib.sh sourced ($0 must be one of its scripts)
+        return self.run_cmd(['bash', '-c', '. "$0"; '+snippet, self.script('_lib.sh'), *args], cwd=self.base, ok=ok).stdout
 
     # --- fresh launches -------------------------------------------------------------
     def test_codex_spawn_prompt_and_isolation(self):
@@ -496,7 +553,7 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex')
         x = self.report('PROGRESS', 'one\ntwo $(touch BAD)')
         self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player repo-feature-test] PROGRESS: one\ntwo $(touch BAD)']); self.assertIn('queued for', x.stdout)
-        self.assertRegex(self.last_report(), '^PROGRESS '+STAMP+'$')
+        self.assertRegex(self.last_report(), '^PROGRESS '+STAMP+' delivered$')
         before = self.state(); n = len(self.calls())
         self.env['TEST_CLI_EXIT'] = '1'; text = 'two\nlines\twith tab'
         x = self.report('BLOCKED', text, ok=False)
@@ -549,7 +606,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.report('--orchestrator', env=inside).stdout.strip(), 'codex:'+ID)
         self.clear_log(); x = self.report('PROGRESS', 'derived', env=inside); self.assertIn('queued for', x.stdout)
         self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player label-chosen-elsewhere] PROGRESS: derived'])
-        self.assertRegex(self.tag('@orchestra-last-report', 'label-chosen-elsewhere'), '^PROGRESS '+STAMP+'$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
+        self.assertRegex(self.tag('@orchestra-last-report', 'label-chosen-elsewhere'), '^PROGRESS '+STAMP+' delivered$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
         self.assertIn('["-u", "-S", "/tmp/custom-socket", "display-message"', self.tmux_log())        # the session lookup goes through tmux_on too
         x = self.report('DONE', 'derived fail', env=dict(inside, TEST_CLI_EXIT='1'), ok=False)
         self.assert_delivery_failed(x, 'codex:'+ID, 'Codex queue refused', 'DONE', 'derived fail', session='label-chosen-elsewhere')
@@ -583,7 +640,7 @@ class PortTests(unittest.TestCase):
         self.report('PROGRESS', 'tmux delivery', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket')); log = self.tmux_log()
         self.assertIn('"-S", "/tmp/custom-socket", "load-buffer"', log); self.assertIn('paste-buffer', log); self.assertIn('"=parent:"', log)
         self.assertEqual((self.base/'buffer').read_text(), '[player repo-feature-test] PROGRESS: tmux delivery')
-        self.assertRegex(self.last_report(), '^PROGRESS '+STAMP+'$')
+        self.assertRegex(self.last_report(), '^PROGRESS '+STAMP+' delivered$')
         self.run_cmd(['tmux', 'kill-session', '-t', '=parent'])
         x = self.report('DONE', 'gone', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket'), ok=False)
         self.assert_delivery_failed(x, 'tmux:parent', 'orchestrator session parent is gone', 'DONE', 'gone')
@@ -638,7 +695,7 @@ class PortTests(unittest.TestCase):
             self.assertEqual((r['session'], r['name'], r['agent'], r['orchestrator'], r['last_report'], r['branch'], r['repo']),
                              (self.session, self.session, 'codex', 'codex:'+ID, '', 'feature/test', str(self.repo.resolve())))
         self.report('DONE', 'finished')
-        r = self.sessions('--all')[0]; self.assertRegex(r['last_report'], '^DONE '+STAMP+'$')
+        r = self.sessions('--all')[0]; self.assertRegex(r['last_report'], '^DONE '+STAMP+' delivered$')
         self.env['TEST_PANE_TITLE'] = 'left\tright'
         r = self.sessions('--all')[0]; self.assertEqual(r['title'], 'left\tright'); del self.env['TEST_PANE_TITLE']
         text = self.orch('sessions.sh', '--all').stdout.splitlines()
@@ -659,6 +716,126 @@ class PortTests(unittest.TestCase):
         self.assertEqual(sorted(self.state()), [self.session]); self.assertEqual(self.buffers(), {})
         self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assert_reads_pass_utf8()
 
+    # --- machines: the executor, beam-qualified targets, relay ------------------------------
+    def test_tmux_on_local_argv_unchanged(self):
+        # The regression test protecting every existing user: with no machine given, tmux_on's
+        # argv is exactly what it always was, whatever the socket.
+        self.lib('tmux_on "" list-sessions -F "#{session_name}"')
+        self.assertEqual(self.tmux_calls()[-1], ['-u', 'list-sessions', '-F', '#{session_name}'])
+        self.lib('tmux_on "/tmp/sock" has-session -t "=x"', ok=False)
+        self.assertEqual(self.tmux_calls()[-1], ['-u', '-S', '/tmp/sock', 'has-session', '-t', '=x'])
+    def test_machine_flag_routes_through_beam_exec_with_large_stdin(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
+        big = 'y' * 20000       # over tmux's ~16 KiB command-line cap: only load-buffer on stdin survives
+        x = self.orch('send.sh', self.session, '--machine', 'workbox', big)
+        self.assertEqual(x.returncode, 0, x.stderr)
+        exec_calls = [c for c in self.beam_calls() if c[:1] == ['exec']]
+        self.assertTrue(exec_calls, self.beam_calls())
+        load = next(c for c in exec_calls if 'load-buffer' in c)
+        self.assertEqual(load, ['exec', 'workbox', '--', 'tmux', '-u', 'load-buffer', '-b', load[-2], '-'])
+        self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] ' + big)     # stdin reached the mock intact
+    def test_missing_beam_binary_fails_names_three_options_and_runs_nothing_locally(self):
+        calls_before = len(self.tmux_calls())
+        x = self.run_cmd(['bash', '-c', '. "$0"; ORCH_MACHINE=ghost tmux_on "" list-sessions', self.script('_lib.sh')], cwd=self.base, ok=False)
+        self.assertNotEqual(x.returncode, 0)
+        self.assertIn('$ORCHESTRA_BEAM', x.stderr); self.assertIn("'beam' on PATH", x.stderr); self.assertIn("'n10 beam'", x.stderr)
+        self.assertIn('refusing to run this locally', x.stderr)
+        self.assertEqual(len(self.tmux_calls()), calls_before)
+    def test_relative_repo_with_machine_rejected(self):
+        self.stub('beam', BEAM_MOCK)
+        x = self.orch('spawn.sh', '--repo', 'relative/path', '--machine', 'workbox', '--branch', 'feature/x', '--prompt', 'p', ok=False)
+        self.assertNotEqual(x.returncode, 0)
+        self.assertIn('--repo must be an absolute path or start with ~/', x.stderr)
+        self.assertEqual(self.beam_calls(), [])          # rejected before anything reached the executor
+    def test_report_beam_target_delivered_queued_rejected(self):
+        self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
+        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'beam:%s/tmux:controller' % PEER])
+        self.env['TEST_BEAM_LABEL'] = 'laptop'
+        self.env['TEST_BEAM_OUTCOME'] = 'delivered'
+        x = self.report('DONE', 'finished work')
+        self.assertEqual(x.returncode, 0); self.assertIn('sent to laptop', x.stdout)
+        self.assertRegex(self.last_report(), r'^DONE '+STAMP+r' delivered$')
+        sent = self.beam_sent()[-1]
+        self.assertEqual(sent['peer'], PEER)
+        self.assertTrue(sent['payload'].startswith('target: tmux:controller\n\n'), sent['payload'])
+        self.assertIn('[player %s] DONE: finished work' % self.session, sent['payload'])
+
+        self.env['TEST_BEAM_OUTCOME'] = 'queued'
+        x = self.report('PROGRESS', 'still going')
+        self.assertEqual(x.returncode, 0)
+        self.assertEqual(x.stdout,
+            'queued for laptop — that machine is not connected right now. beam will deliver this report\n'
+            'when it comes back online. Do not send it again.\n')
+        self.assertRegex(self.last_report(), r'^PROGRESS '+STAMP+r' queued$')
+
+        self.env['TEST_BEAM_OUTCOME'] = 'rejected'; self.env['TEST_BEAM_REJECT_REASON'] = 'unknown peer'
+        before = self.state()
+        x = self.report('BLOCKED', 'need input', ok=False)
+        self.assert_delivery_failed(x, 'beam:%s/tmux:controller' % PEER, 'unknown peer', 'BLOCKED', 'need input')
+        self.assertEqual(self.state(), before)      # rejected: nothing was stored, no session write, no retry
+    def test_last_report_third_field_backward_compatible(self):
+        self.spawn('--agent', 'codex'); self.report('DONE', 'ok')
+        val = self.last_report(); self.assertRegex(val, r'^DONE '+STAMP+r' delivered$')
+        kind, ts = val.split()[:2]          # a parser reading only the first two fields still works
+        self.assertEqual(kind, 'DONE'); self.assertRegex(ts, r'^'+STAMP+r'$')
+    def test_normalize_target_beam_qualified(self):
+        def norm(t): return self.run_cmd(['bash', '-c', '. "$0"; normalize_target "$1"', str(ROOT/'player/scripts/_routing.sh'), t], ok=False)
+        for good in ('beam:%s/tmux:controller' % PEER, 'beam:%s/codex:%s' % (PEER, ID)):
+            x = norm(good); self.assertEqual(x.returncode, 0, good); self.assertEqual(x.stdout, good)
+        for bad in ('beam:/tmux:controller', 'beam:%s' % PEER, 'beam:%s/ssh:host' % PEER,
+                    'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'ssh:host'):
+            x = norm(bad); self.assertNotEqual(x.returncode, 0, bad)
+    def test_relay_delivers_to_tmux_target(self):
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
+        envelope = json.dumps({'id': 'e1', 'from': 'p', 'to': 'q', 'seq': 1, 'topic': 'orchestra', 'encoding': 'utf8',
+                                'payload': 'target: tmux:parent\n\n[player %s] DONE: relayed' % self.session, 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(envelope+'\n')
+        self.clear_log()
+        x = self.orch('relay.sh', cwd=self.base)
+        self.assertIn('relay.sh: delivered to tmux:parent', x.stderr)
+        self.assertEqual((self.base/'buffer').read_text(), '[player %s] DONE: relayed' % self.session)
+    def test_relay_delivers_to_codex_target(self):
+        self.stub('beam', BEAM_MOCK)
+        envelope = json.dumps({'id': 'e2', 'from': 'p', 'to': 'q', 'seq': 2, 'topic': 'orchestra', 'encoding': 'utf8',
+                                'payload': 'target: codex:%s\n\nhello from relay' % ID, 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(envelope+'\n')
+        x = self.orch('relay.sh', cwd=self.base)
+        self.assertIn('relay.sh: delivered to codex:'+ID, x.stderr)
+        self.assertEqual(self.calls()[-1]['args'][:4], ['queue', '--thread', ID, '--message'])
+        self.assertEqual(self.calls()[-1]['args'][4], 'hello from relay')
+    def test_relay_decodes_base64_payload(self):
+        import base64
+        self.stub('beam', BEAM_MOCK)
+        msg = 'target: codex:%s\n\nb64 message' % ID
+        envelope = json.dumps({'id': 'e3', 'from': 'p', 'to': 'q', 'seq': 3, 'topic': 'orchestra', 'encoding': 'base64',
+                                'payload': base64.b64encode(msg.encode()).decode(), 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(envelope+'\n')
+        self.orch('relay.sh', cwd=self.base)
+        self.assertEqual(self.calls()[-1]['args'][4], 'b64 message')
+    def test_relay_refuses_shell_owned_pane(self):
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
+        self.env['TEST_PANE_COMMAND'] = 'bash'
+        envelope = json.dumps({'id': 'e4', 'from': 'p', 'to': 'q', 'seq': 4, 'topic': 'orchestra', 'encoding': 'utf8',
+                                'payload': 'target: tmux:parent\n\n[player x] DONE: hi', 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(envelope+'\n')
+        self.clear_log()
+        x = self.orch('relay.sh', cwd=self.base)
+        self.assertIn('a shell owns', x.stderr); self.assertNotIn('paste-buffer', self.tmux_log())
+    def test_adopt_remote_writes_beam_qualified_orchestrator_tag(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
+        self.env['TEST_BEAM_PEER_ID'] = PEER
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:new-parent', '--machine', 'workbox')
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:%s/tmux:new-parent' % PEER)
+        # an already beam-qualified --orchestrator is left exactly as given
+        self.orch('adopt.sh', self.session, '--orchestrator', 'beam:deadbeefcafef00d/tmux:elsewhere', '--machine', 'workbox')
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:deadbeefcafef00d/tmux:elsewhere')
+    def test_repo_root_resolves_remotely(self):
+        self.stub('beam', BEAM_MOCK)
+        out = self.lib('ORCH_MACHINE=workbox; ORCH_REPO="$1"; repo_root', str(self.repo))
+        self.assertEqual(out.strip(), str(self.repo.resolve()))
+        self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'realpath' in c for c in self.beam_calls()), self.beam_calls())
+
     # --- the contract itself ------------------------------------------------------------
     def test_scripts_carry_no_legacy_names(self):
         scripts = list(ROOT.glob('*/scripts/*.sh')); self.assertGreaterEqual(len(scripts), 9)
@@ -673,7 +850,8 @@ class PortTests(unittest.TestCase):
         for tag in TAGS: self.assertIn(tag, text, tag)
         self.assertEqual(sorted(set(re.findall(r'@orchestra-[a-z-]+', text))), sorted(TAGS))
         self.assertEqual(sorted(set(re.findall(r'\bORCHESTRA_[A-Z_]+', text))),
-                         ['ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_HARNESS', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
+                         ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_HARNESS',
+                          'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
                           'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_SESSION', 'ORCHESTRA_SOCKET'])
         self.assertNotIn('list-sessions -f', text); self.assertNotIn('ls -F', text)
 
