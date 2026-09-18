@@ -71,11 +71,27 @@ here, which would create or act on a player on the wrong machine.
 
 ### relay.sh
 
-`relay.sh` (no `--machine`: it always acts on this, the orchestrator's, machine) runs
-`beam msg listen --topic orchestra` and delivers each arriving envelope to the local target named
-inside it, through the same paste sequence and `pane_owned_by_agent` check `report.sh` uses for a
-local report — a message that arrived from another machine gets no more trust than one typed
-here. Run it directly only when supervising remote players from a plain terminal with nothing
+`relay.sh` (no `--machine`; it has none, and always acts on this, the orchestrator's, machine —
+even if `$ORCHESTRA_MACHINE` is set in the environment it happens to inherit, which it ignores
+unconditionally) runs `beam msg listen --require-ack --topic orchestra` and delivers each
+arriving envelope to a local target, through the same paste sequence and `pane_owned_by_agent`
+check `report.sh` uses for a local report — a message that arrived from another machine gets no
+more trust than one typed here.
+
+Two things it does not do, on purpose:
+
+- **It never trusts the envelope for *where* to deliver.** The envelope names a target, but the
+  set of targets `relay.sh` may actually act on comes only from how it was started: with no
+  argument, the single session it was started from; `--allow <target>` (repeatable) names others.
+  An envelope naming anything outside that allowlist is refused, logged with the sending peer's
+  id, and not delivered — any paired peer could otherwise paste arbitrary text into any tmux
+  session on this machine that has an agent at the prompt, the user's own session included.
+- **It only acks a message once delivery has actually succeeded.** An envelope that fails
+  delivery, or that the allowlist refuses, is left unacknowledged, so it stays in the sender's
+  queue and is redelivered — acknowledging first and then failing to deliver would destroy a
+  report the sender was already told had arrived.
+
+Run it directly only when supervising remote players from a plain terminal with nothing
 else already relaying that topic; N10 Desktop runs its own relay, so do not run this alongside it.
 
 ## Session tags

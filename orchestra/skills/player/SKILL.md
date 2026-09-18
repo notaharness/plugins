@@ -74,8 +74,8 @@ still accepts the report — it is durably queued on disk and will be delivered 
 machine reconnects — and `report.sh` prints exactly this, verbatim except for the machine's label:
 
 ```
-queued for <label> — that machine is not connected right now. beam will deliver this report
-when it comes back online. Do not send it again.
+queued for <label> — that machine is not connected right now. beam will deliver this
+message the next time it comes online. Do not send it again.
 ```
 
 This exits 0 and sets `@orchestra-last-report`'s third field to `queued`. Treat it exactly like
