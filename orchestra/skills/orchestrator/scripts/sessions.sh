@@ -52,22 +52,40 @@ scope=""; [ $ALL = 1 ] || scope="$(repo_root)"
 # --all, its repo tag equals this repo.
 in_scope() { [ -n "$1" ] && [ "$2" = "$SESSION_TYPE_WORKTREE" ] && [ -n "$3" ] && { [ $ALL = 1 ] || [ "$3" = "$scope" ]; }; }
 
-# Machines to list: an explicit --machine names exactly one. --all with no --machine adds every
-# registered peer to "local", cheaply (one `beam peers --json` call, then one listing per machine);
-# beam not resolving, or having no peers, leaves MACHINES at ("local") — today's behaviour exactly.
-MACHINES=(local)
+# Machines to list: an explicit --machine names exactly one, shown exactly as given. --all with
+# no --machine adds every registered peer to "local", cheaply (one `beam peers --json` call, then
+# one listing per machine); beam not resolving, or having no peers, leaves MACHINES at ("local") —
+# today's behaviour exactly. MACHINE_LABEL carries each discovered peer's label (`beam peers`
+# already returns one), so the MACHINE column reads a name a person chose, not a peerId.
+MACHINES=(local); declare -A MACHINE_LABEL
 if [ $EXPLICIT_MACHINE = 1 ]; then MACHINES=("$ORCH_MACHINE")
 elif [ $ALL = 1 ] && beam_cmd 2>/dev/null; then
   peers_json="$("${BEAM_CMD[@]}" peers --json 2>/dev/null)" || peers_json=""
-  while IFS= read -r peer_id; do
-    [ -n "$peer_id" ] && MACHINES+=("$peer_id")
-  done < <(printf '%s\n' "$peers_json" | grep -o '"peerId"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]\{16\}"' | sed -E 's/.*"([0-9a-fA-F]{16})"/\1/')
+  rest="$peers_json"
+  while :; do
+    case "$rest" in *'{'*'}'*) ;; *) break;; esac
+    obj="${rest#*\{}"; obj="{${obj%%\}*}}"; rest="${rest#*\{*\}}"
+    pid="$(json_string_field "$obj" peerId 2>/dev/null || :)"
+    [ -n "$pid" ] || continue
+    lbl="$(json_string_field "$obj" label 2>/dev/null || :)"
+    MACHINES+=("$pid"); MACHINE_LABEL["$pid"]="${lbl:-$pid}"
+  done
 fi
 MULTI_MACHINE=0; [ "${#MACHINES[@]}" -gt 1 ] && MULTI_MACHINE=1
 
+# --sample keys its before/after screenshot by machine AND name: with --all across several
+# machines, a name is only unique per machine (D2), and the baseline has to come from the same
+# machine the later comparison reads, not just whichever machine ORCH_MACHINE happened to be
+# before this loop — otherwise every remote row reads a stale (or wrong-session's) baseline and
+# compares as permanently busy.
 declare -A before
 if [ "$SAMPLE" -gt 0 ]; then
-  while IFS= read -r n; do before[$n]="$(screen_text "=$n:" | md5sum)"; done < <(all_player_sessions)
+  SAMPLE_STARTING_MACHINE="$ORCH_MACHINE"
+  for machine_iter in "${MACHINES[@]}"; do
+    ORCH_MACHINE="$machine_iter"; [ "$machine_iter" = local ] && ORCH_MACHINE=""
+    while IFS= read -r n; do before["$machine_iter$TAB$n"]="$(screen_text "=$n:" | md5sum)"; done < <(all_player_sessions)
+  done
+  ORCH_MACHINE="$SAMPLE_STARTING_MACHINE"
   sleep "$SAMPLE"
 fi
 
@@ -88,7 +106,7 @@ now=$(date +%s); rows=0; first=1
 STARTING_MACHINE="$ORCH_MACHINE"
 for machine_iter in "${MACHINES[@]}"; do
   ORCH_MACHINE="$machine_iter"; [ "$machine_iter" = local ] && ORCH_MACHINE=""
-  machine_disp="$machine_iter"
+  machine_disp="${MACHINE_LABEL[$machine_iter]:-$machine_iter}"
   while IFS= read -r line; do
     split_tabs "$line"; set -- "${F[@]}"
     name="${1:-}"; dead="${2:-}"; cmd="${3:-}"; activity="${4:-}"; agent="${5:-}"; orch="${6:-}"; last="${7:-}"; tag_repo="${8:-}"; branch="${9:-}"; spawner="${10:-}"; type="${11:-}"
@@ -98,7 +116,7 @@ for machine_iter in "${MACHINES[@]}"; do
     quiet=$(( now - ${activity:-$now} )); [ $quiet -lt 0 ] && quiet=0
     if [ "${dead:-1}" = 1 ]; then state=dead
     elif [ "$SAMPLE" -gt 0 ]; then
-      if [ "${before[$name]:-}" != "$(screen_text "=$name:" | md5sum)" ]; then state=busy; else state=idle; fi
+      if [ "${before["$machine_iter$TAB$name"]:-}" != "$(screen_text "=$name:" | md5sum)" ]; then state=busy; else state=idle; fi
     elif [ $quiet -lt "$QUIET" ]; then state=busy
     else state=idle; fi
     repo="$tag_repo"
