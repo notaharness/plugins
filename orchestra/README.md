@@ -1,10 +1,12 @@
 # Orchestra
 
-Orchestra lets one coding agent delegate work to other coding agents on the same machine. The **orchestrator** supervises the work; each **player** runs in a tmux session and works on a branch in a git worktree. Players send progress, questions, and results back to the supervising agent.
+Orchestra lets one coding agent delegate work to other coding agents. The **orchestrator** supervises the work; each **player** runs in a tmux session and works on a branch in a git worktree. Players send progress, questions, and results back to the supervising agent.
+
+Players run on the orchestrator's machine by default. With [beam](#machines) installed, `--machine` puts a player on another machine you have paired with, and its reports come back over the same pairing. Without beam nothing changes: the same commands, the same Git and tmux operations, the same output.
 
 Orchestra provides two skills backed by Bash scripts. The skills tell the agents how to coordinate; the scripts perform the Git and tmux operations. Use Claude Code in tmux or a Codex desktop/CLI conversation as the orchestrator. You can attach to any player's session to inspect its work or talk to it directly.
 
-[Install](#install) · [Start a task](#start-a-task) · [Architecture](#architecture) · [Scripts](#scripts) · [Reporting](#reporting) · [Resume and handoff](#resume-or-hand-off-a-player) · [Requirements](#requirements)
+[Install](#install) · [Start a task](#start-a-task) · [Architecture](#architecture) · [Machines](#machines) · [Scripts](#scripts) · [Reporting](#reporting) · [Resume and handoff](#resume-or-hand-off-a-player) · [Requirements](#requirements)
 
 ## Install
 
@@ -165,11 +167,58 @@ If tmux refuses to launch a newly created pane, `spawn.sh` removes its placehold
 
 Session options disappear when the tmux session ends. `kill.sh` stops the session and leaves its branch and worktree in place. The agent CLI manages its own conversation history, which resume uses to continue work.
 
+## Machines
+
+Every orchestrator script accepts `--machine NAME`, defaulting to `$ORCHESTRA_MACHINE`, else this
+machine. `NAME` is a [beam](https://github.com/notaharness/n10) peer label or peer id — beam is
+n10's pairing-and-streams tool, and the seam through which a player can run somewhere other than
+its orchestrator. Omitting the flag, or the literal `local`, means this machine.
+
+Naming a machine runs the same Git and tmux commands, with the same arguments, over
+`beam exec <machine>` instead of locally. The `beam` binary is resolved in order:
+`$ORCHESTRA_BEAM`, `beam` on `PATH`, then `n10 beam`. If a machine was named and none of the three
+resolve, the script fails and says so — it never falls back to running here, which would create or
+act on a player on the wrong machine.
+
+- `--repo` on a remote machine must be absolute or start with `~/`. A relative path is refused
+  rather than resolved against this machine's working directory.
+- Session names are unique only *per machine*. Once more than one machine is registered, a bare
+  name no longer identifies one player and `--machine` may be needed alongside it.
+- `sessions.sh --all` lists this machine plus, when beam resolves and peers are registered, every
+  peer's players — one listing call per machine, with a MACHINE column (`--json`: a `machine`
+  field). With no beam or no peers, the output is unchanged.
+- A player on another machine reports back over beam: its `@orchestra-orchestrator` tag holds
+  `beam:<orchestrator peer id>/tmux:<session>` (or `codex:<thread-id>`) instead of the bare local
+  form.
+
+### Receiving reports from another machine: `relay.sh`
+
+A player on another machine hands its report to beam, which delivers it to this machine. Something
+here has to put it in front of the orchestrator, and that is `relay.sh`:
+
+```bash
+skills/orchestrator/scripts/relay.sh            # deliver to the session it was started in
+skills/orchestrator/scripts/relay.sh --allow tmux:planning
+```
+
+It runs `beam msg listen --require-ack --topic orchestra` and delivers each envelope through the
+same paste sequence, and the same pane-ownership check, that a local report uses — a message that
+crossed a machine boundary is not trusted any further than one that did not.
+
+Two properties are deliberate. It acknowledges a message only *after* delivering it, so a failed
+delivery leaves the message queued for redelivery rather than destroying a report the player was
+already told had arrived. And the targets it may deliver to come only from how it was started (the
+session it runs in, plus any `--allow`), never from the envelope — otherwise any paired machine
+could paste into any session here that has an agent at the prompt, including your own.
+
+N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
+
 ## Requirements
 
 - Linux or macOS with Bash, Git, coreutils (`realpath`, `sha256sum`), and `ps`/`pgrep`. Tested on Linux.
 - tmux 3.x; tested with 3.4.
 - An authenticated `claude` or `codex` CLI for each type of player you want to run.
+- `beam` only if you want players on other machines; see [Machines](#machines).
 - `jq` for JSON session listings.
 - util-linux `script` for automatic CLI detection during resume.
 
@@ -190,7 +239,7 @@ Resume passes model and effort options only when you supply them. Codex otherwis
 
 ## Scripts
 
-The orchestrator uses the scripts in `skills/orchestrator/scripts/`. All accept `--repo PATH` to select a repository from elsewhere.
+The orchestrator uses the scripts in `skills/orchestrator/scripts/`. All accept `--repo PATH` to select a repository from elsewhere, and `--machine NAME` to act on a machine other than this one (see [Machines](#machines)).
 
 | Command | Purpose |
 | --- | --- |
@@ -201,6 +250,7 @@ The orchestrator uses the scripts in `skills/orchestrator/scripts/`. All accept 
 | `adopt.sh SESSION` | Connect an idle player to the current orchestrator. Optional text gives it a new assignment. |
 | `spawn.sh --branch B --resume` | Restart a stopped player in its existing worktree. |
 | `kill.sh SESSION` | Stop one player's tmux session. Its branch and worktree remain. |
+| `relay.sh` | Deliver reports arriving from players on other machines into a local session. See [Machines](#machines). |
 
 New branches start from the freshly fetched default branch. Use `--from REF` to choose another starting point, or `--dry-run` to preview a spawn without writes or fetching.
 
@@ -222,10 +272,10 @@ tmux -u show-options -qv -t '=shop-feature-search:' @orchestra-agent
 | `@orchestra-repo` | Absolute, symlink-resolved path of the main checkout. |
 | `@orchestra-session-type` | `worktree` for every player. Sessions with other types, such as `shell` or `agent`, are outside player management. |
 | `@orchestra-branch` | The branch the session was spawned under, unsanitized (`feature/x`). |
-| `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`. Set by `spawn.sh`, replaced by `adopt.sh`. |
+| `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
 | `@orchestra-agent` | Harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom`. The launcher records what actually started. |
 | `@orchestra-launching` | `1` only while the placeholder pane exists. |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp>` of the last report a transport accepted. |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <delivered|queued>` of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
 
 The first four tags record the session's origin and are written at creation. Spawning or adopting a player sets its supervisor independently.
 
@@ -246,7 +296,20 @@ Players send four kinds of report:
 | `BLOCKED` | Something prevents further progress. |
 | `DONE` | The task is complete, with results and any limitations. |
 
-Successful delivery prints `queued for …` or `sent to …` and sets `@orchestra-last-report` to the kind and timestamp. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
+Successful delivery prints `queued for …` or `sent to …` and records the kind, the timestamp and the outcome in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
+
+When the orchestrator is on another machine, delivery has three outcomes rather than two, and the
+middle one is a success:
+
+| Outcome | Exit | What the player is told |
+| --- | --- | --- |
+| Delivered | 0 | `sent to …`, as for a local report. |
+| Queued | 0 | That machine is not connected; beam will deliver the report when it comes back online, and the player should not send it again. |
+| Rejected | non-zero | The failure output below, unchanged. |
+
+Queued is a success because the report is on disk and will go out. It is stated in those terms
+because the reader is usually a coding agent, which would otherwise conclude its report was lost
+and either duplicate it or wait for an answer that cannot arrive yet.
 
 A failed delivery exits nonzero and prints the destination, reason, and complete original report to stderr:
 
@@ -316,6 +379,13 @@ Known limitations:
 
 - Sessions created by pre-release builds of orchestra (from the old `hermannbjorgvin` marketplace), which kept state in files and named sessions after a hash of the repository path, are not recognised; there are no compatibility shims. Kill or finish those players with the version that created them.
 - The test suites use fake agent CLIs. They do not verify live model sessions or delivery from a real player through `codex queue`.
+- A remote spawn is not covered end to end. The suites fake a second machine by isolating its
+  `PATH`, `HOME` and tmux state, which catches an operation that acts locally while claiming to act
+  remotely, but not a genuine second machine's filesystem or environment.
+- The pre-flight check that an agent CLI exists is skipped for a remote spawn, because checking
+  costs a round trip. A missing CLI on the remote machine fails at launch instead of before it.
+- A `relay.sh` allowlist that never matches causes beam to redeliver without backoff. Refusing
+  loudly is deliberate; the retry interval is not tuned.
 - Codex resume finds conversations by the worktree path in rollout files; paths requiring JSON escaping do not match.
 - OpenCode resume is untested. Gemini and Copilot resume are unsupported.
 - Automatic CLI detection during resume keeps a `script` transcript in `/tmp` for the Claude session's lifetime.
