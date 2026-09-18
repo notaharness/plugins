@@ -64,7 +64,9 @@ require_valid_repo_for_machine || exit 2
 in_repo || { echo "spawn.sh: ${ORCH_REPO:-$PWD} is not inside a git repo; pass --repo <path>" >&2; exit 1; }
 if [ -n "$PFILE" ]; then PROMPT="$(cat "$PFILE")" || exit 1; fi
 if [ -z "$PROMPT" ] && [ $RESUME = 0 ]; then echo "spawn.sh: task prompt is required (--prompt or --prompt-file)" >&2; exit 2; fi
-command -v tmux >/dev/null || { echo "spawn.sh: tmux is not installed" >&2; exit 1; }
+# tmux itself is only ever invoked through tmux_on/beam_exec; on a remote machine this process
+# never runs it directly, so only the local case needs tmux on this PATH.
+is_local_machine && { command -v tmux >/dev/null || { echo "spawn.sh: tmux is not installed" >&2; exit 1; }; }
 case "$AGENT" in ""|claude|codex|gemini|copilot|opencode) ;; *) echo "spawn.sh: unknown --agent $AGENT (use --cmd for other harnesses)" >&2; exit 2;; esac
 if [ -n "$EFFORT" ]; then
   case "$EFFORT" in low|medium|high|xhigh|max) ;; *) echo "spawn.sh: invalid --effort: $EFFORT" >&2; exit 2;; esac
@@ -98,6 +100,10 @@ LAUNCHER="$(realpath "$ORCH_SCRIPTS/_launch.sh")"
 CLAUDE_INVOCATION="$(claude_player_invocation)"
 root="$(repo_root)"
 dir="$(worktree_dir_for_branch "$BRANCH")"
+# Existence of the worktree directory is a question for ORCH_MACHINE, not this one.
+if is_local_machine; then dir_exists() { [ -d "$root/$dir" ]; }
+else dir_exists() { r test -d "$root/$dir"; }
+fi
 
 # Resolve first: the session for (repo, branch) is whatever carries those tags, under any name.
 # What already exists: a dead pane (resumable), a live placeholder from a failed launch
@@ -113,15 +119,15 @@ case "$EXISTING" in
   running) echo "spawn.sh: session already exists and is running: $name (kill.sh it first, or adopt.sh it)" >&2; exit 1;;
   dead) [ $RESUME = 1 ] || { echo "spawn.sh: $name has a dead player; use --resume, or kill.sh it for a fresh start" >&2; exit 1; };;
 esac
-if [ $RESUME = 1 ] && [ ! -d "$root/$dir" ]; then
-  echo "spawn.sh: nothing to resume: worktree $root/$dir does not exist" >&2; exit 1
+if [ $RESUME = 1 ]; then
+  dir_exists || { echo "spawn.sh: nothing to resume: worktree $root/$dir does not exist on $(machine_label)" >&2; exit 1; }
 fi
 
 # New branches start from the repository's default branch (freshly fetched), never
 # from whatever the invoking checkout happens to have as HEAD — the orchestrator
 # often runs inside a feature worktree whose commits must not leak into the agent's
 # branch. --from overrides for deliberate stacking. Resume never creates a branch.
-if [ -z "$FROM" ] && [ $RESUME = 0 ] && [ ! -d "$root/$dir" ]; then
+if [ -z "$FROM" ] && [ $RESUME = 0 ] && ! dir_exists; then
   FROM="$(default_branch_ref)"
   [ -n "$FROM" ] || { echo "spawn.sh: could not resolve the default branch; pass --from <ref>" >&2; exit 1; }
 fi
@@ -141,11 +147,18 @@ if [ $RESUME = 0 ]; then
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
-case "$HARNESS" in
-  auto) command -v claude >/dev/null || command -v codex >/dev/null || { echo "spawn.sh: neither claude nor codex is on PATH" >&2; exit 1; };;
-  custom) ;;
-  *) command -v "$HARNESS" >/dev/null || { echo "spawn.sh: $HARNESS is not on PATH" >&2; exit 1; };;
-esac
+# The harness has to be on PATH where the player will actually run. On this machine that is
+# checkable now; on another one there is no cheap way to ask without a round trip for a check
+# that respawn-pane will make anyway (a missing binary there fails loudly, just later, with a dead
+# pane rather than this message) — so the check is skipped rather than answered from this
+# machine's PATH, which would refuse a harness that is perfectly installed on the target.
+if is_local_machine; then
+  case "$HARNESS" in
+    auto) command -v claude >/dev/null || command -v codex >/dev/null || { echo "spawn.sh: neither claude nor codex is on PATH" >&2; exit 1; };;
+    custom) ;;
+    *) command -v "$HARNESS" >/dev/null || { echo "spawn.sh: $HARNESS is not on PATH" >&2; exit 1; };;
+  esac
+fi
 
 # Environment: the launcher runs under env(1) with the parent-session markers removed and
 # tmux redirected to the scratch server. Nothing user-controlled enters this command string.
@@ -164,25 +177,47 @@ printf 'repo      %s\nbranch    %s%s\nworktree  %s/%s\ntmux      %s (%s)\nreport
   "$root" "$BRANCH" "${FROM:+ (from $FROM)}" "$root" "$dir" "$name" "$EXISTING" "$ORCH" "$MODE" "$desc" "$(printf %s "$PROMPT" | head -c 80 | tr '\n' ' ')" | cut -c1-200
 [ $DRY = 1 ] && exit 0
 
-cd "$root" || exit 1
-if [ -d "$dir" ]; then
-  [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] &&
-  [ "$(git -C "$dir" branch --show-current)" = "$BRANCH" ] || {
-    echo 'spawn.sh: existing worktree does not match requested branch' >&2; exit 1;
-  }
+# Everything below that is not a tmux call (git, the node_modules copy, the scratch tmux
+# directory) has to land on ORCH_MACHINE, never on this one just because this process happens to
+# run here. Local behaviour is unchanged (still a plain `cd` and bare commands against this
+# machine's filesystem); a remote machine has no shell of its own to `cd` for, so `g` and `r`
+# carry an explicit --cwd/-C instead (see _lib.sh; D12 — no "$(id -u)", no "~" left for a shell).
+if is_local_machine; then
+  cd "$root" || exit 1
+  if dir_exists; then
+    [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] &&
+    [ "$(git -C "$dir" branch --show-current)" = "$BRANCH" ] || {
+      echo 'spawn.sh: existing worktree does not match requested branch' >&2; exit 1;
+    }
+  else
+    # New branch from FROM; if the branch already exists, check it out instead.
+    git worktree add -b "$BRANCH" "$dir" "$FROM" 2>/dev/null || git worktree add "$dir" "$BRANCH" || exit 1
+  fi
 else
-  # New branch from FROM; if the branch already exists, check it out instead.
-  git worktree add -b "$BRANCH" "$dir" "$FROM" 2>/dev/null || git worktree add "$dir" "$BRANCH" || exit 1
+  if dir_exists; then
+    [ "$(r --cwd "$root/$dir" git rev-parse --show-toplevel)" = "$root/$dir" ] &&
+    [ "$(r --cwd "$root/$dir" git branch --show-current)" = "$BRANCH" ] || {
+      echo "spawn.sh: existing worktree does not match requested branch on $ORCH_MACHINE" >&2; exit 1;
+    }
+  else
+    r --cwd "$root" git worktree add -b "$BRANCH" "$dir" "$FROM" 2>/dev/null ||
+    r --cwd "$root" git worktree add "$dir" "$BRANCH" || { echo "spawn.sh: could not create the worktree on $ORCH_MACHINE" >&2; exit 1; }
+  fi
 fi
 # Independent copy (reflinks when available); dependency writes cannot affect another checkout.
 # npm keeps version-conflicting deps in per-workspace node_modules (apps/x/node_modules,
-# libs/y/node_modules); missing those reads as a broken library, so copy them too.
-if [ $LINK_NM = 1 ] && [ -d node_modules ]; then
-  while IFS= read -r nm; do
-    [ -e "$dir/$nm" ] || { mkdir -p "$dir/$(dirname "$nm")"; cp -a --reflink=auto "$nm" "$dir/$nm"; }
-  done < <(find . -maxdepth 4 -type d -name node_modules -not -path './node_modules/*' -not -path './.claude/*' -not -path '*/node_modules/*/node_modules' | sed 's#^\./##')
+# libs/y/node_modules); missing those reads as a broken library, so copy them too. The whole
+# find/cp loop travels as one remote command (positional $1, not interpolation, carries the
+# worktree dir across) so it runs as a unit on ORCH_MACHINE instead of one round trip per file.
+if [ $LINK_NM = 1 ]; then
+  nm_script='[ -d node_modules ] || exit 0
+dir="$1"
+while IFS= read -r nm; do
+  [ -e "$dir/$nm" ] || { mkdir -p "$dir/$(dirname "$nm")"; cp -a --reflink=auto "$nm" "$dir/$nm"; }
+done < <(find . -maxdepth 4 -type d -name node_modules -not -path "./node_modules/*" -not -path "./.claude/*" -not -path "*/node_modules/*/node_modules" | sed "s#^\./##")'
+  r --cwd "$root" bash -c "$nm_script" bash "$dir" || echo "spawn.sh: could not copy node_modules on $(machine_label)" >&2
 fi
-mkdir -p "$AGENT_TMUX_TMPDIR"
+r mkdir -p "$AGENT_TMUX_TMPDIR" || { echo "spawn.sh: could not create $AGENT_TMUX_TMPDIR on $(machine_label)" >&2; exit 1; }
 
 unset TMUX TMUX_PANE
 # Created DETACHED under the first free label. 220x50 is only the initial size; whatever
@@ -196,7 +231,15 @@ if [ "$EXISTING" = none ]; then
   label="$name"
   while :; do
     name="$(free_session_name "$ORCH_SOCK" "$label")"
-    env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -s "$name" -c "$root/$dir" -x 220 -y 50 && break
+    # The call that starts the tmux SERVER (when none is running yet) if one is needed: local
+    # behaviour is unchanged, marker-stripped exactly as before. On a remote machine there is no
+    # inherited orchestrator session to leak markers from in the first place, but the same strip
+    # travels with it for consistency; -u matches every other tmux_on call there.
+    if is_local_machine; then
+      env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -s "$name" -c "$root/$dir" -x 220 -y 50 && break
+    else
+      beam_exec "$ORCH_MACHINE" env "${strip[@]}" tmux -u -S "$ORCH_SOCK" new-session -d -s "$name" -c "$root/$dir" -x 220 -y 50 && break
+    fi
     # Lost a race for the name (it exists now): probe again from the preferred label, so a second
     # lost race yields -3, not -2-2. Anything else is fatal.
     t has-session -t "=$name" 2>/dev/null || { echo "spawn.sh: tmux could not create session $name" >&2; exit 1; }
@@ -215,8 +258,14 @@ t set-option -t "$tt" remain-on-exit on
 # The task body, from stdin. tmux never creates an empty buffer, so a newline is appended
 # (the launcher's command substitution drops it again); an empty body is then still a buffer.
 printf '%s\n' "$PROMPT" | t load-buffer -b "$buf" - || { echo "spawn.sh: tmux could not load the task prompt into buffer $buf" >&2; exit 1; }
+# PATH and HOME are this (the orchestrator's) process's own values, only right for a local pane;
+# on a remote machine they would overwrite the correct, already-remote-native values the target's
+# own tmux server captured when beam_exec started it above, with this machine's — the harness
+# would then not be found on what is now the wrong PATH. Left unset there, the pane keeps what
+# its own server gave it, same as every other user option this call does not name.
+path_env=(); is_local_machine && path_env=(-e "PATH=$PATH" -e "HOME=$HOME")
 if ! t respawn-pane -k -t "$tt" -c "$root/$dir" \
-  -e "PATH=$PATH" -e "HOME=$HOME" \
+  "${path_env[@]}" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
   -e "ORCHESTRA_MODE=$MODE" -e "ORCHESTRA_HARNESS=$HARNESS" -e "ORCHESTRA_MODEL=$MODEL" -e "ORCHESTRA_EFFORT=$EFFORT" \
   -e "ORCHESTRA_PERMISSION_MODE=$PERM" -e "ORCHESTRA_COMMAND=$CMD" -e "ORCHESTRA_CLAUDE_SKILL=$CLAUDE_INVOCATION" \

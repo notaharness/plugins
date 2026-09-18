@@ -39,6 +39,29 @@ g() {
 }
 in_repo() { g rev-parse --git-dir >/dev/null 2>&1; }
 
+# r [--cwd PATH] <argv…>: run one non-git command on ORCH_MACHINE — this machine, exactly as
+# before, or the target machine through beam_exec. Unlike a bare invocation, this is never
+# silently local when a machine is set: every non-tmux, non-git side effect a script has (cd,
+# mkdir, cp, test -d, a small bash -c script) must go through this or g(), never a bare command,
+# or "--machine" spawns/adopts/kills work against this machine while claiming to act on another.
+# --cwd is the one thing a shell would otherwise give for free (`cd` then run): locally it is a
+# subshell cd; remotely it becomes the same --cwd exec() itself accepts (beam expands "~/" there,
+# see docs/beam.md; a caller must not build "~/..." into argv[0] itself — see D12).
+r() {
+  local cwd=""
+  if [ "${1:-}" = --cwd ]; then cwd="$2"; shift 2; fi
+  if is_local_machine; then
+    if [ -n "$cwd" ]; then (cd "$cwd" && "$@"); else "$@"; fi
+  else
+    if [ -n "$cwd" ]; then
+      beam_cmd || { echo "orchestra: $(beam_unresolved_message "$ORCH_MACHINE")" >&2; return 1; }
+      "${BEAM_CMD[@]}" exec "$ORCH_MACHINE" --cwd "$cwd" -- "$@"
+    else
+      beam_exec "$ORCH_MACHINE" "$@"
+    fi
+  fi
+}
+
 # Root of the MAIN checkout, even when run from inside a linked worktree: the common git dir
 # lives in the main checkout, so its parent is the main root. Falling back to --show-toplevel
 # covers repos too old for --path-format. Symlink-resolved: the string is compared for equality
@@ -178,12 +201,17 @@ AGENT_TMUX_TMPDIR=/tmp/orchestra-agent-tmux
 # Parent-session markers that must not reach a player. A Claude started under its parent's
 # CLAUDECODE/CLAUDE_CODE_CHILD_SESSION treats itself as a nested child and stops saving its
 # transcript (so --continue later finds nothing); CODEX_THREAD_ID would masquerade as the player's
-# parent. Only these known markers are removed: configuration and credentials such as
-# CLAUDE_CONFIG_DIR (selected per directory by the user's claude wrapper), ANTHROPIC_API_KEY and
-# CODEX_HOME are deliberately inherited.
+# parent. ORCHESTRA_MACHINE (the documented way to default --machine) must not reach a player
+# either: report.sh and relay.sh run there, and it would send their local "what is my orchestrator"
+# lookup over beam instead of asking their own machine (see _routing.sh's ORCHESTRA_FORCE_LOCAL,
+# which is the other half of this fix — that one covers a value inherited any other way, this one
+# stops it being captured into the tmux server's global environment in the first place). Only
+# these known markers are removed: configuration and credentials such as CLAUDE_CONFIG_DIR
+# (selected per directory by the user's claude wrapper), ANTHROPIC_API_KEY and CODEX_HOME are
+# deliberately inherited.
 PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ATTENDED
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
-  CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID)
+  CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)
 
 # Deliver multi-line text to a pane as one bracketed paste. The text goes through load-buffer on
 # stdin: tmux rejects command lines over ~16 KiB, which set-buffer/-e/send-keys all count against.
