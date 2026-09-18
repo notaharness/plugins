@@ -269,7 +269,20 @@ case "\$1" in
           *) printf '{"status":"rejected","to":"%s","label":"%s","reason":"%s"}\n' "\$peer" "\$label" "\${FAKE_BEAM_REJECT_REASON:-unknown peer}"; exit 1;;
         esac
         ;;
-      listen) [ -f "$T/beam-inbox" ] && cat "$T/beam-inbox";;
+      listen)
+        [ -f "$T/beam-inbox" ] && cat "$T/beam-inbox"
+        case " \$* " in
+          *' --require-ack '*)
+            # Close stdout so the envelope side of relay.sh's pipeline sees EOF right away instead
+            # of waiting for this process to exit; then poll stdin for acked ids with a short
+            # per-read timeout and give up once nothing new arrives, the same shape as a real ack
+            # timeout (docs/beam.md).
+            exec 1>&-
+            : > "$T/beam-acked"
+            while IFS= read -r -t 1.2 ackid; do printf '%s\n' "\$ackid" >> "$T/beam-acked"; done
+            ;;
+        esac
+        ;;
     esac
     ;;
 esac
@@ -283,6 +296,15 @@ env PATH=/usr/bin:/bin bash -c '. "'"$P"'/_routing.sh"; ORCH_MACHINE=ghost tmux_
 check "missing beam binary fails loudly, names three options, runs nothing locally" \
   "[ $mbrc != 0 ] && [ ! -s '$T/missing-beam.out' ] && grep -q ORCHESTRA_BEAM '$T/missing-beam.err' && grep -q \"'beam' on PATH\" '$T/missing-beam.err' && grep -q \"'n10 beam'\" '$T/missing-beam.err' && grep -q 'refusing to run this locally' '$T/missing-beam.err'"
 
+echo "# B4/B5: report.sh ignores an inherited ORCHESTRA_MACHINE; resolve_orchestrator answers locally"
+# $S1 is a stranger by this point (the "resume when a stranger has taken the label" section
+# above); $S2 is the actual current player, still reporting to tmux:parent.
+rm -f "$T/beam-log"
+tm set-option -t "=$S2:" @orchestra-orchestrator "tmux:parent"    # pin it: no dependency on tmux's "current session" fallback drifting by this point in the run
+(cd "$W1" && ORCHESTRA_MACHINE=workbox ORCHESTRA_SESSION="$S2" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" PROGRESS "still local") >"$T/b5.out" 2>"$T/b5.err"
+check "report.sh never asks 'workbox' about anything, even with ORCHESTRA_MACHINE set" \
+  "grep -q 'sent to parent' '$T/b5.out' && [ ! -s '$T/beam-log' ]"
+
 echo "# report.sh over beam: delivered, queued, rejected"
 tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00d/tmux:parent"
 export FAKE_BEAM_LABEL=laptop FAKE_BEAM_OUTCOME=delivered
@@ -292,7 +314,7 @@ check "beam delivered: today's 'sent to' phrasing, tag carries a third field" \
 export FAKE_BEAM_OUTCOME=queued
 (cd "$W1" && player PROGRESS "still working") >"$T/beam-queued.out" 2>&1; brc=$?
 check "beam queued: success, exact wording, tag says queued" \
-  "[ $brc = 0 ] && grep -qF 'queued for laptop — that machine is not connected right now. beam will deliver this report' '$T/beam-queued.out' && grep -qF 'Do not send it again.' '$T/beam-queued.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP queued\$'"
+  "[ $brc = 0 ] && grep -qF 'queued for laptop — that machine is not connected right now. beam will deliver this' '$T/beam-queued.out' && grep -qF 'Do not send it again.' '$T/beam-queued.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP queued\$'"
 export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown peer"
 before_opts="$(tm show-options -t "=$S1:")"
 (cd "$W1" && player BLOCKED "need help") >"$T/beam-rejected.out" 2>"$T/beam-rejected.err"; brc=$?
@@ -302,9 +324,40 @@ unset FAKE_BEAM_LABEL FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
 tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 
 echo "# relay.sh delivers a beamed-in envelope to a real local pane"
+# Without a real attached client, tmux resolves an untargeted "current session" (what
+# tmux_local/display-message without -t falls back to; see _routing.sh) to the most recently
+# active session on the server, not by decoding $TMUX's own fields — harmless for a script that
+# really is running inside the pane it names, but this harness has created many sessions since
+# "parent" was last (re)created, so it is refreshed here to be that session again, the same way
+# the "report.sh from the player" section above already resets it after killing it.
+tm kill-session -t '=parent' 2>/dev/null
+(unset TMUX TMUX_PANE; tm new-session -d -s parent -x 120 -y 30 -- "$T/bin/claude")
+tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 printf '{"id":"e1","from":"p","to":"q","seq":1,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:parent\\n\\n[player relayed] DONE: via relay"}\n' > "$T/beam-inbox"
 bash "$O/relay.sh" >"$T/relay.out" 2>"$T/relay.err"      # $TMUX is already exported above, as it would be from an orchestrator's own pane
 check "relay.sh delivers the envelope's local target" \
   "grep -q 'relay.sh: delivered to tmux:parent' '$T/relay.err' && sleep 0.5 && grep -qF '[player relayed] DONE: via relay' '$T/received-claude'"
+check "relay.sh acked only after the delivery actually succeeded (D13)" \
+  "[ \"\$(cat "$T/beam-acked")\" = e1 ]"
+
+echo "# relay.sh (D14): an envelope naming a target outside the default allowlist is refused, not delivered, not acked"
+# $S1 is still the stranger "sleep 300" session foreign() planted earlier: real tmux reports its
+# pane_current_command as "sleep", not a shell, so pane_owned_by_agent alone would call it fair
+# game — exactly the pane a relay must not touch just because an envelope names it.
+printf '{"id":"e2","from":"attacker","to":"q","seq":2,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:%s\\n\\npaste into the users own session"}\n' "$S1" > "$T/beam-inbox"
+bash "$O/relay.sh" >"$T/refuse.out" 2>"$T/refuse.err"
+check "outside-allowlist envelope is refused, names the sending peer, and never pasted" \
+  "grep -q 'outside this relay' '$T/refuse.err' && grep -q attacker '$T/refuse.err' && ! grep -qF 'paste into the users own session' '$T/received-claude'"
+check "refused envelope is left unacked" "[ ! -s '$T/beam-acked' ]"
+
+echo "# relay.sh --allow adds an explicit extra target"
+printf '{"id":"e3","from":"p","to":"q","seq":3,"topic":"orchestra","encoding":"utf8","payload":"target: codex:%s\\n\\nvia allow"}\n' "$uuid" > "$T/beam-inbox"
+bash "$O/relay.sh" --allow "codex:$uuid" >"$T/allow.out" 2>"$T/allow.err"
+check "explicitly allowed target is delivered" "grep -q 'relay.sh: delivered to codex:'$uuid'' '$T/allow.err'"
+
+echo "# relay.sh refuses to run with no default target and no --allow"
+env -u TMUX bash "$O/relay.sh" --topic orchestra >"$T/noallow.out" 2>"$T/noallow.err"; noallow_rc=$?
+check "relay.sh needs --allow outside a tmux pane" \
+  "[ $noallow_rc = 2 ] && grep -q 'pass --allow' '$T/noallow.err'"
 
 echo; echo "passed $pass, failed $fail"; [ $fail = 0 ]

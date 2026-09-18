@@ -186,7 +186,21 @@ if a[:1] == ['exec']:
     argv = a[dd+1:]
     stdin_data = sys.stdin.buffer.read()
     (b/'beam-exec-stdin').write_bytes(stdin_data); (b/'beam-exec-machine').write_text(machine)
-    r = subprocess.run(argv, cwd=cwd, input=stdin_data)
+    # A faked remote must be an observably different place, not just the same host reached a
+    # second time: when the caller has set ORCH_TEST_REMOTE_TMP (see enable_remote_machine in the
+    # test harness), the argv this call actually runs sees a different ORCH_TEST_TMP (so the tmux
+    # and CLI mocks read/write a separate state directory — a separate tmux "server" and a
+    # separate call log), a different PATH (so a binary present on one side and absent on the
+    # other is testable) and a different HOME. A script that bypasses beam_exec and calls tmux/git
+    # bare still runs under THIS process's own (local) environment, so it still lands in the local
+    # state directory — which is exactly the distinction the invariant tests below rely on.
+    env = os.environ.copy()
+    remote_tmp = os.environ.get('ORCH_TEST_REMOTE_TMP')
+    if remote_tmp:
+        env['ORCH_TEST_TMP'] = remote_tmp
+        if os.environ.get('ORCH_TEST_REMOTE_PATH'): env['PATH'] = os.environ['ORCH_TEST_REMOTE_PATH']
+        if os.environ.get('ORCH_TEST_REMOTE_HOME'): env['HOME'] = os.environ['ORCH_TEST_REMOTE_HOME']
+    r = subprocess.run(argv, cwd=cwd, input=stdin_data, env=env)
     sys.exit(r.returncode)
 if a[:1] == ['status']:
     print(json.dumps({'peerId': os.environ.get('TEST_BEAM_PEER_ID', 'aaaaaaaaaaaaaaaa'),
@@ -212,6 +226,23 @@ if a[:2] == ['msg', 'send']:
 if a[:2] == ['msg', 'listen']:
     inbox = b/'beam-inbox'
     if inbox.exists(): sys.stdout.write(inbox.read_text())
+    sys.stdout.flush()
+    if '--require-ack' in a:
+        # Close stdout so the envelope side of relay.sh's pipeline gets EOF right away (it must
+        # not wait for this process to exit before it can start delivering what it already has);
+        # then poll stdin for ids relay.sh acks back, recording them to beam-acked, and give up
+        # once nothing new arrives for a beat — the real server has an analogous ack timeout
+        # (docs/beam.md's "queued: ... no ack before the timeout").
+        import select
+        sys.stdout.close()
+        acked = []
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 1.2)
+            if not ready: break
+            line = sys.stdin.readline()
+            if not line: break
+            acked.append(line.strip())
+        (b/'beam-acked').write_text(''.join(x+'\n' for x in acked))
     sys.exit(0)
 sys.exit(0)
 '''
@@ -233,7 +264,28 @@ class PortTests(unittest.TestCase):
         path.mkdir(parents=True, exist_ok=True)
         self.run_cmd(['git', 'init', '-q', str(path)], cwd=self.base)
         self.run_cmd(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'initial'], cwd=path)
-    def stub(self, name, text): p = self.bin/name; p.write_text(text); p.chmod(0o755)
+    def stub(self, name, text, in_dir=None): p = (in_dir or self.bin)/name; p.write_text(text); p.chmod(0o755)
+    def enable_remote_machine(self):
+        # Gives beam's exec a genuinely separate place to land, per BEAM_MOCK above: its own tmux
+        # server (state/log/buffers all keyed off a different ORCH_TEST_TMP), its own PATH (so a
+        # binary present on one side and absent on the other is testable) and its own HOME. A
+        # script that still calls tmux/git bare instead of through tmux_on/g/r/beam_exec keeps
+        # landing in THIS machine's state (self.state()/self.calls()), never the remote one — that
+        # gap is what the invariant tests below assert on.
+        self.remote = self.base/'remote'; self.remote_bin = self.remote/'bin'; self.remote_home = self.remote/'home'
+        self.remote_bin.mkdir(parents=True); self.remote_home.mkdir(parents=True)
+        self.stub('tmux', TMUX_MOCK, in_dir=self.remote_bin); self.stub('codex', CLI_MOCK, in_dir=self.remote_bin); self.stub('claude', CLI_MOCK, in_dir=self.remote_bin)
+        self.stub('beam', BEAM_MOCK)   # only the local side ever invokes `beam`
+        system_path = ':'.join(p for p in self.env['PATH'].split(':') if p != str(self.bin))
+        self.env['ORCH_TEST_REMOTE_TMP'] = str(self.remote)
+        self.env['ORCH_TEST_REMOTE_PATH'] = str(self.remote_bin)+':'+system_path
+        self.env['ORCH_TEST_REMOTE_HOME'] = str(self.remote_home)
+    def remote_state(self):
+        f = self.remote/'tmux-state.json'
+        return json.loads(f.read_text()) if f.exists() else {}
+    def remote_calls(self):
+        f = self.remote/'calls'
+        return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
     def run_cmd(self, args, cwd=None, ok=True, env=None, stdin=None):
         x = subprocess.run(args, cwd=cwd or self.repo, env=env or self.env, text=True, capture_output=True, input=stdin)
         if ok: self.assertEqual(x.returncode, 0, x.stderr+'\n'+x.stdout)
@@ -258,6 +310,9 @@ class PortTests(unittest.TestCase):
     def beam_sent(self):
         f = self.base/'beam-sent'
         return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+    def beam_acked(self):
+        f = self.base/'beam-acked'
+        return f.read_text().splitlines() if f.exists() else []
     def state(self): return json.loads((self.base/'tmux-state.json').read_text())
     def buffers(self):
         f = self.base/'tmux-buffers.json'
@@ -481,6 +536,22 @@ class PortTests(unittest.TestCase):
         text = self.orch('sessions.sh', '--repo', str(self.repo)).stdout.splitlines()
         self.assertEqual(text[0].split(), ['STATE', 'QUIET', 'SESSION', 'BRANCH', 'AGENT', 'ORCHESTRATOR', 'LAST-REPORT', 'TITLE'])
         self.assertTrue(any(l.split()[2:4] == ['tab-made-elsewhere', 'feature/other'] for l in text[1:]), text)
+    def test_sessions_sample_keyed_by_machine_and_shows_peer_labels(self):
+        # B8: --sample's before[] snapshot used to be taken once, for the starting (local)
+        # machine only, keyed by bare session name. A remote row then always compared its
+        # (never-populated) baseline as different from the after-shot and read "busy"
+        # unconditionally — wrong regardless of whether anything actually changed there. Keying
+        # by machine+name and taking the baseline per machine fixes that; the mock's capture-pane
+        # never produces different output (see TMUX_MOCK), so a correct baseline reads "idle" on
+        # every machine, the way nothing having changed actually should.
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.stub('beam', BEAM_MOCK); self.env['TEST_BEAM_PEERS'] = PEER+':workbox'
+        rows = self.sessions('--all', '--sample', '1')
+        self.assertEqual(sorted(r['machine'] for r in rows), ['local', 'workbox'])
+        self.assertEqual({r['machine']: r['state'] for r in rows}, {'local': 'idle', 'workbox': 'idle'})
+        text = self.orch('sessions.sh', '--all').stdout.splitlines()
+        self.assertTrue(any('workbox' in l for l in text[1:]), text)                # the label
+        self.assertFalse(any(PEER in l for l in text[1:]), text)                    # never the raw peerId
 
     # --- resume ----------------------------------------------------------------------
     def test_resume_default_restart_note_only_no_replay_no_overrides(self):
@@ -717,13 +788,19 @@ class PortTests(unittest.TestCase):
         self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assert_reads_pass_utf8()
 
     # --- machines: the executor, beam-qualified targets, relay ------------------------------
-    def test_tmux_on_local_argv_unchanged(self):
-        # The regression test protecting every existing user: with no machine given, tmux_on's
-        # argv is exactly what it always was, whatever the socket.
-        self.lib('tmux_on "" list-sessions -F "#{session_name}"')
-        self.assertEqual(self.tmux_calls()[-1], ['-u', 'list-sessions', '-F', '#{session_name}'])
-        self.lib('tmux_on "/tmp/sock" has-session -t "=x"', ok=False)
-        self.assertEqual(self.tmux_calls()[-1], ['-u', '-S', '/tmp/sock', 'has-session', '-t', '=x'])
+    def test_local_new_session_argv_unchanged_by_the_machine_dimension(self):
+        # The review found the prior version of this test near-tautological: it pinned tmux_on's
+        # own argv (which already carried "-u" before the machine dimension existed) without ever
+        # exercising a call site this phase actually touched. spawn.sh's tmux-server-starting call
+        # — the exact site B1 found bypassing the executor for a remote machine — is the one that
+        # matters: prove a LOCAL spawn (no --machine at all) still gets the bare
+        # `env ... tmux -S <sock> new-session ...` invocation it always did, byte for byte, "-u"
+        # included, not added.
+        self.spawn('--agent', 'codex')
+        calls = self.tmux_calls()
+        new_session = next(c for c in calls if 'new-session' in c and self.session in c)
+        self.assertEqual(new_session[:2], ['-S', self.sock], new_session)
+        self.assertNotIn('-u', new_session)
     def test_machine_flag_routes_through_beam_exec_with_large_stdin(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
         big = 'y' * 20000       # over tmux's ~16 KiB command-line cap: only load-buffer on stdin survives
@@ -764,8 +841,8 @@ class PortTests(unittest.TestCase):
         x = self.report('PROGRESS', 'still going')
         self.assertEqual(x.returncode, 0)
         self.assertEqual(x.stdout,
-            'queued for laptop — that machine is not connected right now. beam will deliver this report\n'
-            'when it comes back online. Do not send it again.\n')
+            'queued for laptop — that machine is not connected right now. beam will deliver this\n'
+            'message the next time it comes online. Do not send it again.\n')
         self.assertRegex(self.last_report(), r'^PROGRESS '+STAMP+r' queued$')
 
         self.env['TEST_BEAM_OUTCOME'] = 'rejected'; self.env['TEST_BEAM_REJECT_REASON'] = 'unknown peer'
@@ -791,18 +868,20 @@ class PortTests(unittest.TestCase):
                                 'payload': 'target: tmux:parent\n\n[player %s] DONE: relayed' % self.session, 'createdAt': 0})
         (self.base/'beam-inbox').write_text(envelope+'\n')
         self.clear_log()
-        x = self.orch('relay.sh', cwd=self.base)
+        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
         self.assertIn('relay.sh: delivered to tmux:parent', x.stderr)
         self.assertEqual((self.base/'buffer').read_text(), '[player %s] DONE: relayed' % self.session)
+        self.assertEqual(self.beam_acked(), ['e1'])            # acked only once the paste actually succeeded (D13)
     def test_relay_delivers_to_codex_target(self):
         self.stub('beam', BEAM_MOCK)
         envelope = json.dumps({'id': 'e2', 'from': 'p', 'to': 'q', 'seq': 2, 'topic': 'orchestra', 'encoding': 'utf8',
                                 'payload': 'target: codex:%s\n\nhello from relay' % ID, 'createdAt': 0})
         (self.base/'beam-inbox').write_text(envelope+'\n')
-        x = self.orch('relay.sh', cwd=self.base)
+        x = self.orch('relay.sh', '--allow', 'codex:'+ID, cwd=self.base)
         self.assertIn('relay.sh: delivered to codex:'+ID, x.stderr)
         self.assertEqual(self.calls()[-1]['args'][:4], ['queue', '--thread', ID, '--message'])
         self.assertEqual(self.calls()[-1]['args'][4], 'hello from relay')
+        self.assertEqual(self.beam_acked(), ['e2'])
     def test_relay_decodes_base64_payload(self):
         import base64
         self.stub('beam', BEAM_MOCK)
@@ -810,7 +889,7 @@ class PortTests(unittest.TestCase):
         envelope = json.dumps({'id': 'e3', 'from': 'p', 'to': 'q', 'seq': 3, 'topic': 'orchestra', 'encoding': 'base64',
                                 'payload': base64.b64encode(msg.encode()).decode(), 'createdAt': 0})
         (self.base/'beam-inbox').write_text(envelope+'\n')
-        self.orch('relay.sh', cwd=self.base)
+        self.orch('relay.sh', '--allow', 'codex:'+ID, cwd=self.base)
         self.assertEqual(self.calls()[-1]['args'][4], 'b64 message')
     def test_relay_refuses_shell_owned_pane(self):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
@@ -819,8 +898,41 @@ class PortTests(unittest.TestCase):
                                 'payload': 'target: tmux:parent\n\n[player x] DONE: hi', 'createdAt': 0})
         (self.base/'beam-inbox').write_text(envelope+'\n')
         self.clear_log()
-        x = self.orch('relay.sh', cwd=self.base)
+        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
         self.assertIn('a shell owns', x.stderr); self.assertNotIn('paste-buffer', self.tmux_log())
+        self.assertEqual(self.beam_acked(), [])                # delivery failed: never acked (D13), so it is redelivered
+    def test_relay_default_allowlist_is_its_own_session_only(self):
+        # D14: with no --allow, the only permitted target is the session relay.sh runs from — an
+        # envelope naming any other local target, even a perfectly well-formed one, is refused,
+        # logged with the sender's peer id, and left unacked; the actually-running session it
+        # names is never touched.
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
+        good = json.dumps({'id': 'e5', 'from': 'peerA', 'to': 'q', 'seq': 5, 'topic': 'orchestra', 'encoding': 'utf8',
+                            'payload': 'target: tmux:parent\n\n[player x] DONE: own session', 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(good+'\n')
+        env = dict(self.env, TMUX='/tmp/relay-sock,0,0', TEST_TMUX_SESSION='parent')
+        x = self.run_cmd(['bash', self.script('relay.sh')], cwd=self.base, env=env)
+        self.assertIn('relay.sh: delivered to tmux:parent', x.stderr)
+        self.assertEqual(self.beam_acked(), ['e5'])
+    def test_relay_refuses_target_outside_allowlist(self):
+        # The security hole the phase 6 review demonstrated: an envelope naming the user's own
+        # session (never passed to --allow) must not be pasted into it, whatever pane_owned_by_agent
+        # would otherwise say about that pane.
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.stub('beam', BEAM_MOCK)
+        self.foreign('users-own-session')       # an agent-owned pane the relay was never told it may use
+        envelope = json.dumps({'id': 'e6', 'from': 'attacker-peer', 'to': 'q', 'seq': 6, 'topic': 'orchestra', 'encoding': 'utf8',
+                                'payload': 'target: tmux:users-own-session\n\npaste this into the user', 'createdAt': 0})
+        (self.base/'beam-inbox').write_text(envelope+'\n')
+        self.clear_log()
+        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
+        self.assertEqual(x.returncode, 0)
+        self.assertIn('outside this relay', x.stderr); self.assertIn('attacker-peer', x.stderr)
+        self.assertNotIn('paste-buffer', self.tmux_log())                # nothing was ever typed into it
+        self.assertEqual(self.beam_acked(), [])                          # refused, not acked: redelivered, not dropped
+    def test_relay_requires_allow_or_a_tmux_pane(self):
+        x = self.orch('relay.sh', cwd=self.base, ok=False)
+        self.assertEqual(x.returncode, 2); self.assertIn('pass --allow', x.stderr)
+        self.assertEqual(self.beam_calls(), [])          # refused before it ever touched beam
     def test_adopt_remote_writes_beam_qualified_orchestrator_tag(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
         self.env['TEST_BEAM_PEER_ID'] = PEER
@@ -836,6 +948,130 @@ class PortTests(unittest.TestCase):
         self.assertEqual(out.strip(), str(self.repo.resolve()))
         self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'realpath' in c for c in self.beam_calls()), self.beam_calls())
 
+    # --- the invariant: --machine must never touch this machine ------------------------------
+    # The review's headline finding: the old mock ran a "remote" beam exec on the same host, same
+    # PATH, same tmux state as a local call, so a --machine spawn that created its worktree and
+    # tmux session LOCALLY passed every test. enable_remote_machine (above) gives a correctly
+    # routed call a genuinely different tmux server (a separate state file), PATH and HOME; a
+    # script that still calls tmux/git bare keeps landing in THIS machine's state regardless.
+    def test_machine_spawn_creates_nothing_on_this_machine(self):
+        self.enable_remote_machine()
+        self.env['TEST_PANE_ALIVE'] = '1'
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/remote', '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'codex'])
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertFalse((self.base/'tmux-state.json').exists(), 'a local tmux server was started')
+        self.assertFalse((self.repo/'.claude/worktrees').exists(), 'a worktree was created in the local repo')
+        self.assertFalse((self.base/'calls').exists(), 'a harness ran locally instead of on the remote machine')
+        rname = 'remote-repo-feature-remote'
+        rstate = self.remote_state()
+        self.assertEqual(sorted(rstate), [rname], rstate)
+        self.assertEqual(rstate[rname]['options']['@orchestra-branch'], 'feature/remote')
+        self.assertEqual(rstate[rname]['options']['@orchestra-repo'], str(remote_repo.resolve()))
+        self.assertTrue((remote_repo/'.claude/worktrees/feature-remote').is_dir())
+        self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')
+        self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'new-session' in c for c in self.beam_calls()), self.beam_calls())
+        self.rname = rname; self.remote_repo = remote_repo
+    def test_machine_adopt_send_screen_kill_touch_only_the_remote_machine(self):
+        self.test_machine_spawn_creates_nothing_on_this_machine()      # builds the remote session and asserts spawn's own invariant
+        rname, remote_repo = self.rname, self.remote_repo
+        local_snapshot = (self.base/'tmux-state.json').exists()        # still False: spawn touched nothing locally
+        x = self.orch('adopt.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox', '--orchestrator', 'tmux:new-parent')
+        self.assertEqual(x.returncode, 0, x.stderr)
+        # a remote adoption is beam-qualified with this (the orchestrator's) machine's own peerId,
+        # learned locally (beam_own_peer_id never goes through the executor) — see spawn.sh's
+        # identical treatment and D2's "who am I" rule.
+        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.assertFalse((self.base/'tmux-state.json').exists())
+        x = self.orch('send.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox', '--raw', 'ping')
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertFalse((self.base/'tmux-state.json').exists())
+        x = self.orch('screen.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox')
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertFalse((self.base/'tmux-state.json').exists())
+        x = self.orch('kill.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox')
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertNotIn(rname, self.remote_state())
+        self.assertFalse((self.base/'tmux-state.json').exists())         # the whole sequence never wrote a local tmux server
+        self.assertFalse(local_snapshot)
+        exec_targets = {c[1] for c in self.beam_calls() if c[:1] == ['exec']}
+        self.assertEqual(exec_targets, {'workbox'})
+    def test_machine_sessions_listing_reads_only_the_remote_machine(self):
+        self.test_machine_spawn_creates_nothing_on_this_machine()
+        rows = json.loads(self.orch('sessions.sh', '--machine', 'workbox', '--repo', str(self.remote_repo), '--all', '--json').stdout)
+        self.assertEqual([r['session'] for r in rows], [self.rname], rows)
+        self.assertFalse((self.base/'tmux-state.json').exists())
+        self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'list-panes' in c for c in self.beam_calls()), self.beam_calls())
+    def test_machine_spawn_skips_local_harness_path_check(self):
+        # B1 (the PATH half): a remote spawn's harness check must not be answered from this
+        # machine's PATH — "gemini" is stubbed nowhere in this test, local or remote, so a local
+        # spawn still refuses it up front (first assertion, unchanged behaviour) while a remote
+        # one must get past that check entirely (it fails later, inside the pane, not here).
+        local = self.run_cmd(['bash', self.script('spawn.sh'), '--branch', 'feature/g', '--from', 'HEAD',
+                               '--prompt', 'p', '--no-node-modules', '--agent', 'gemini'], ok=False)
+        self.assertIn('gemini is not on PATH', local.stderr)
+        self.enable_remote_machine(); self.env['TEST_PANE_ALIVE'] = '1'
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/g', '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'gemini'])
+        self.assertEqual(x.returncode, 0, x.stderr)
+        self.assertNotIn('is not on PATH', x.stderr, x.stderr)
+
+    # --- B4, B5: "who/what am I" questions must stay local even when ORCH_MACHINE is set --------
+    def test_resolve_orchestrator_self_question_ignores_machine(self):
+        # B4: auto-detecting the orchestrator target from $TMUX is a question about THIS machine
+        # ("what session am I in"), never the target one — using tmux_on here (which honours
+        # ORCH_MACHINE) would send it over beam and could answer with the remote's own idea of
+        # "current session" instead. beam_calls() is the tell: it must stay empty.
+        self.stub('beam', BEAM_MOCK)
+        env = dict(self.env, CLAUDECODE='1', ORCH_MACHINE='workbox', TMUX='/tmp/x,0,0')
+        out = self.run_cmd(['bash', '-c', '. "$0"; resolve_orchestrator ""', str(ROOT/'player/scripts/_routing.sh')], env=env, ok=False)
+        self.assertEqual(out.stdout.strip(), 'tmux:parent')
+        self.assertEqual(self.beam_calls(), [])
+    def test_orchestra_machine_is_a_parent_session_marker(self):
+        # B5, half 1: ORCHESTRA_MACHINE must be stripped from what a player's tmux server
+        # captures as its global environment, the same way CLAUDECODE/CODEX_THREAD_ID are — or it
+        # reaches every future pane in that session through the tmux server, not just the one
+        # spawn.sh started explicitly.
+        markers = self.lib('printf "%s\\n" "${PARENT_SESSION_MARKERS[@]}"').splitlines()
+        self.assertIn('ORCHESTRA_MACHINE', markers)
+    def test_report_ignores_inherited_orchestra_machine(self):
+        # B5, half 2: even if ORCHESTRA_MACHINE reaches report.sh's environment some other way
+        # (a user's shell exported it; the strip above is defence, not the only layer), report.sh
+        # must still act on this machine — never silently send its own @orchestra-orchestrator
+        # lookup over beam, which tag_get's "never fails" would turn into a bare "unset or
+        # unreachable" with no sign anything went over the network.
+        self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
+        x = self.report('PROGRESS', 'still local', env=self.player_env(ORCHESTRA_MACHINE='workbox'))
+        self.assertIn('queued for', x.stdout)
+        self.assertEqual(self.beam_calls(), [])
+
+    # --- B6, B7: the dependency-free JSON scanner ----------------------------------------------
+    def test_json_string_field_rejects_non_string_value(self):
+        # B6: {"status":null,"label":"pwned"} must not return "pwned" for "status" — the old
+        # scanner, finding no opening quote right after the colon, skipped ahead to the next
+        # quote anywhere in the document and returned that field's value instead, with rc=0.
+        out = self.run_cmd(['bash', '-c', '. "$0"; json_string_field "$1" status', str(ROOT/'player/scripts/_routing.sh'),
+                             '{"status":null,"label":"pwned"}'], ok=False)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(out.stdout, '')
+    def test_json_string_field_is_linear_at_the_payload_cap(self):
+        # B7: json_unescape, and the identical char-by-char accumulation in json_string_field's
+        # own scan, were O(n^2) — about 45s at 100 KiB against beam's 256 KiB payload cap. Bounded
+        # well under that at the cap itself.
+        import time
+        body = 'x' * 262144
+        value = 'target: tmux:p\n\n' + body
+        payload = json.dumps({'payload': value})
+        start = time.time()
+        # Argument-list limits rule out passing 256 KiB as argv; stdin is how a real envelope of
+        # this size would reach a script anyway (beam's own cap, docs/beam.md).
+        out = self.run_cmd(['bash', '-c', '. "$0"; json_string_field "$(cat)" payload', str(ROOT/'player/scripts/_routing.sh')], stdin=payload)
+        elapsed = time.time() - start
+        self.assertEqual(out.stdout, value)
+        self.assertLess(elapsed, 5.0, elapsed)
+
     # --- the contract itself ------------------------------------------------------------
     def test_scripts_carry_no_legacy_names(self):
         scripts = list(ROOT.glob('*/scripts/*.sh')); self.assertGreaterEqual(len(scripts), 9)
@@ -850,8 +1086,8 @@ class PortTests(unittest.TestCase):
         for tag in TAGS: self.assertIn(tag, text, tag)
         self.assertEqual(sorted(set(re.findall(r'@orchestra-[a-z-]+', text))), sorted(TAGS))
         self.assertEqual(sorted(set(re.findall(r'\bORCHESTRA_[A-Z_]+', text))),
-                         ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_HARNESS',
-                          'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
+                         ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_FORCE_LOCAL',
+                          'ORCHESTRA_HARNESS', 'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
                           'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_SESSION', 'ORCHESTRA_SOCKET'])
         self.assertNotIn('list-sessions -f', text); self.assertNotIn('ls -F', text)
 
