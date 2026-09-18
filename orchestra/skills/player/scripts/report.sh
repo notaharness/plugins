@@ -23,6 +23,10 @@
 # to stderr so the player can handle the failure. A failed submit may follow a successful paste;
 # inspect before retrying to avoid duplicates. Nothing retries.
 set -eu
+# A player always acts on its own machine: ORCHESTRA_FORCE_LOCAL pins ORCH_MACHINE to this
+# machine regardless of any --machine/$ORCHESTRA_MACHINE this process happens to inherit (see
+# _routing.sh) — report.sh's own @orchestra-orchestrator lookup must never go over beam.
+ORCHESTRA_FORCE_LOCAL=1
 . "$(dirname "$(realpath "$0")")/_routing.sh"
 player_session_context || { player_session=""; player_socket=""; }
 session="$player_session"; sock="$player_socket"; name="${session:-$(basename "$(pwd)")}"
@@ -74,7 +78,9 @@ case "$target" in
       delivered) delivered delivered; echo "sent to $label"; exit 0;;
       queued)
         delivered queued
-        printf 'queued for %s — that machine is not connected right now. beam will deliver this report\nwhen it comes back online. Do not send it again.\n' "$label"
+        # Matches docs/beam.md's canonical wording exactly (the "queued" outcome text every
+        # caller of beam should use, not just this one) — same semantics as before, phrasing only.
+        printf 'queued for %s — that machine is not connected right now. beam will deliver this\nmessage the next time it comes online. Do not send it again.\n' "$label"
         exit 0;;
       *) delivery_failed "${reason:-beam rejected the message (exit $rc): $out}";;
     esac;;

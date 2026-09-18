@@ -28,9 +28,23 @@ tmux_target() { printf '=%s:' "$1"; }
 # "local" means this machine — exactly the behaviour every script had before beam existed, byte
 # for byte. Anything else is a beam peer label or peerId, and every tmux/git call below is run
 # there through `beam exec` instead of run here. Scripts set this from --machine, defaulting to
-# $ORCHESTRA_MACHINE; report.sh and relay.sh never set it (a player and the relay always act on
-# their own machine).
-ORCH_MACHINE="${ORCH_MACHINE:-${ORCHESTRA_MACHINE:-}}"
+# $ORCHESTRA_MACHINE.
+#
+# report.sh and relay.sh never set it — a player and the relay always act on their own machine —
+# but $ORCHESTRA_MACHINE is an ordinary environment variable, and the documented way to set a
+# default is to export it. If a user's shell (or the tmux server's captured global environment;
+# see PARENT_SESSION_MARKERS in _lib.sh, which strips it from a spawned player's pane too) leaks
+# it in, ORCH_MACHINE must not pick it up there: the orchestrator's own reporting lookup would
+# silently go over beam instead of asking this machine, and tag_get's "never fails" swallows the
+# result into an opaque "orchestrator target is unset or unreachable". report.sh and relay.sh set
+# ORCHESTRA_FORCE_LOCAL=1 before sourcing this file, which pins ORCH_MACHINE to this machine
+# unconditionally — the player and the relay need no machine awareness at all beyond parsing a
+# beam-qualified target tag.
+if [ -n "${ORCHESTRA_FORCE_LOCAL:-}" ]; then
+  ORCH_MACHINE=""
+else
+  ORCH_MACHINE="${ORCH_MACHINE:-${ORCHESTRA_MACHINE:-}}"
+fi
 is_local_machine() { [ -z "$ORCH_MACHINE" ] || [ "$ORCH_MACHINE" = local ]; }
 machine_label() { is_local_machine && printf 'this machine' || printf '%s' "$ORCH_MACHINE"; }
 
@@ -73,44 +87,59 @@ beam_own_peer_id() {
 # that may not be installed.
 # json_unescape <raw>: decode the standard JSON string escapes a scanner already isolated
 # (\" \\ \/ \b \f \n \r \t; \uXXXX is passed through literally — Orchestra never emits one).
+# Linear in the length of <raw>: each iteration jumps straight to the next backslash with one
+# bash pattern-match (`${s%%\\*}`/`${s#*\\}`, both a single native scan) instead of walking the
+# string one character at a time. A 100 KiB payload (the cap beam enforces) used to take ~45s
+# here — every `out+="$c"` reallocates and copies the whole accumulator, so N one-character
+# appends cost O(N^2) — and now completes in well under a second.
 json_unescape() {
-  local s="$1" out="" i=0 len c n
-  len=${#s}
-  while [ "$i" -lt "$len" ]; do
-    c="${s:$i:1}"
-    if [ "$c" = '\' ]; then
-      n="${s:$((i+1)):1}"
-      case "$n" in
-        n) out+=$'\n';; t) out+=$'\t';; r) out+=$'\r';; b) out+=$'\b';; f) out+=$'\f';;
-        '"') out+='"';; '\') out+='\';; /) out+='/';;
-        *) out+="\\$n";;
-      esac
-      i=$((i+2))
-    else out+="$c"; i=$((i+1)); fi
+  local s="$1" out="" head c
+  while :; do
+    case "$s" in
+      *'\'*)
+        head="${s%%\\*}"; out+="$head"
+        s="${s#*\\}"; c="${s:0:1}"; s="${s:1}"
+        case "$c" in
+          n) out+=$'\n';; t) out+=$'\t';; r) out+=$'\r';; b) out+=$'\b';; f) out+=$'\f';;
+          '"') out+='"';; '\') out+='\';; /) out+='/';;
+          *) out+="\\$c";;
+        esac;;
+      *) out+="$s"; break;;
+    esac
   done
   printf '%s' "$out"
 }
 # json_string_field <json> <field>: the decoded value of "<field>":"<value>" found anywhere in one
 # line of JSON (object nesting elsewhere in the line is not a concern: field names here are never
-# reused at another depth). Fails when the field or its closing quote is not found.
+# reused at another depth). Fails when the field is absent, its value is not a JSON string (only
+# JSON whitespace may separate the colon from the opening quote — anything else, a digit, `null`,
+# `true`, `{`, `[`, means this field is not a string and must not be confused for one), or its
+# closing quote is not found.
 json_string_field() {
-  local json="$1" field="$2" marker rest i c len out=""
+  local json="$1" field="$2" marker rest out="" head
   marker="\"$field\""
   case "$json" in *"$marker"*) ;; *) return 1;; esac
   rest="${json#*"$marker"}"; rest="${rest#*:}"
-  while [ -n "$rest" ] && [ "${rest:0:1}" != '"' ]; do rest="${rest:1}"; done
-  [ -n "$rest" ] || return 1
-  rest="${rest:1}"
-  len=${#rest}; i=0
-  while [ "$i" -lt "$len" ]; do
-    c="${rest:$i:1}"
-    case "$c" in
-      '\') out+="$c${rest:$((i+1)):1}"; i=$((i+2));;
-      '"') json_unescape "$out"; return 0;;
-      *) out+="$c"; i=$((i+1));;
+  while [ -n "$rest" ]; do
+    case "${rest:0:1}" in
+      ' '|$'\t'|$'\n'|$'\r') rest="${rest:1}";;
+      *) break;;
     esac
   done
-  return 1
+  [ -n "$rest" ] && [ "${rest:0:1}" = '"' ] || return 1
+  rest="${rest:1}"
+  # Scan straight to the next backslash-or-quote (one native pattern match) instead of one
+  # character at a time: same fix, and reason, as json_unescape below — this loop is what a
+  # profiler actually sees, since it builds the raw (still-escaped) value that json_unescape is
+  # then called on once, at the end.
+  while :; do
+    head="${rest%%[\\\"]*}"; rest="${rest:${#head}}"
+    case "${rest:0:1}" in
+      '"') out+="$head"; json_unescape "$out"; return 0;;
+      '\') out+="$head\\${rest:1:1}"; rest="${rest:2}";;
+      *) return 1;;    # ran out of input before an unescaped closing quote
+    esac
+  done
 }
 
 # tmux sanitizes what it prints unless the client is in UTF-8 mode, which it infers from the names
@@ -129,6 +158,14 @@ tmux_on() {
     if [ -n "$sock" ]; then beam_exec "$ORCH_MACHINE" tmux -u -S "$sock" "$@"; else beam_exec "$ORCH_MACHINE" tmux -u "$@"; fi
   fi
 }
+# tmux_local <args…>: tmux on THIS machine's current/default server, ignoring ORCH_MACHINE
+# entirely — for "which session/what am I" questions, which are never a remote operation (see
+# beam_own_peer_id, which does the same for peer identity). Using tmux_on "" here would honour a
+# --machine/$ORCHESTRA_MACHINE set for an unrelated reason and read the wrong machine's current
+# session.
+tmux_local() {
+  if [ -n "${TMUX:-}" ]; then tmux -u -S "${TMUX%%,*}" "$@"; else tmux -u "$@"; fi
+}
 # tag_get <socket> <session> <tag>: the value, empty when unset or unreachable; never fails.
 tag_get()   { tmux_on "$1" show-options -qv -t "$(tmux_target "$2")" "$3" 2>/dev/null || :; }
 tag_set()   { tmux_on "$1" set-option -t "$(tmux_target "$2")" "$3" "$4"; }
@@ -144,7 +181,7 @@ player_session_context() {
   player_session="${ORCHESTRA_SESSION:-}"; player_socket="${ORCHESTRA_SOCKET:-}"
   if [ -z "$player_session" ] && [ -n "${TMUX:-}" ]; then
     player_socket="${TMUX%%,*}"
-    player_session="$(tmux_on "$player_socket" display-message -p '#S' 2>/dev/null)" || player_session=""
+    player_session="$(tmux_local display-message -p '#S' 2>/dev/null)" || player_session=""
   fi
   [ -n "$player_session" ]
 }
@@ -186,7 +223,10 @@ resolve_orchestrator() {
   elif [[ -z "${CLAUDECODE:-}" && -n "${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}" ]]; then
     normalize_target "codex:${CODEX_THREAD_ID:-$CODEX_SESSION_ID}"
   elif [[ -n "${TMUX:-}" ]]; then
-    normalize_target "tmux:$(tmux_on "" display-message -p '#S')"
+    # "What session am I in" is a question about this machine, never ORCH_MACHINE — see
+    # tmux_local; a spawn.sh/adopt.sh run with --machine must still learn its OWN orchestrator
+    # target from its own pane, not from whatever session happens to be current on the target.
+    normalize_target "tmux:$(tmux_local display-message -p '#S')"
   else
     echo 'Cannot identify orchestrator; pass --orchestrator codex:<thread-id> or tmux:<session>.' >&2
     return 2
