@@ -825,19 +825,56 @@ class PortTests(unittest.TestCase):
         self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assert_reads_pass_utf8()
 
     # --- machines: the executor, beam-qualified targets, relay ------------------------------
-    def test_local_new_session_argv_unchanged_by_the_machine_dimension(self):
-        # The review found the prior version of this test near-tautological: it pinned tmux_on's
-        # own argv (which already carried "-u" before the machine dimension existed) without ever
-        # exercising a call site this phase actually touched. spawn.sh's tmux-server-starting call
-        # — the exact site B1 found bypassing the executor for a remote machine — is the one that
-        # matters: prove a LOCAL spawn (no --machine at all) still gets the bare
-        # `env ... tmux -S <sock> new-session ...` invocation it always did, byte for byte, "-u"
-        # included, not added.
-        self.spawn('--agent', 'codex')
-        calls = self.tmux_calls()
-        new_session = next(c for c in calls if 'new-session' in c and self.session in c)
-        self.assertEqual(new_session[:2], ['-S', self.sock], new_session)
-        self.assertNotIn('-u', new_session)
+    # Every tmux invocation a LOCAL run (no --machine anywhere) may make, pinned: command -> the
+    # exact flags that precede it. Three shapes, and no others. "-u" is deliberate and intended
+    # wherever tmux_on carries it, capture-pane included: it is what makes tmux print real tabs
+    # and non-ASCII instead of "_" outside a UTF-8 locale (see tmux_on in _routing.sh), so the
+    # pane text screen.sh reads back is the pane's, whatever the caller's locale. The two sites
+    # that do not go through tmux_on keep their own argv: spawn.sh starts the tmux server itself,
+    # marker-stripped, and _launch.sh reads its prompt buffer from inside the pane.
+    LOCAL_TMUX_ARGV = {
+        'capture-pane':   [('-u',)],
+        'delete-buffer':  [('-u',), ('-S', 'SOCK')],
+        'display-message': [('-u',)],
+        'has-session':    [('-u',), ('-u', '-S', 'SOCK')],
+        'kill-session':   [('-u',)],
+        'list-panes':     [('-u',)],
+        'list-sessions':  [('-u',)],
+        'load-buffer':    [('-u',), ('-u', '-S', 'SOCK')],
+        'new-session':    [('-S', 'SOCK')],
+        'paste-buffer':   [('-u',)],
+        'respawn-pane':   [('-u', '-S', 'SOCK')],
+        'send-keys':      [('-u',)],
+        'set-option':     [('-u',), ('-u', '-S', 'SOCK')],
+        'show-buffer':    [('-S', 'SOCK')],
+        'show-options':   [('-u',)],
+    }
+    def test_local_tmux_argv_is_pinned_at_every_call_site(self):
+        # The machine dimension moved call sites that used a bare `tmux` — kill-session and
+        # delete-buffer in kill.sh, send-keys in send.sh and adopt.sh, and has-session,
+        # capture-pane, display-message and the whole paste_into sequence in _lib.sh — onto
+        # tmux_on, which has always passed -u. Pinning only spawn.sh's new-session left that
+        # unchecked, so this exercises each of them and pins the argv they are meant to have,
+        # -u and all: an unintended change to a local invocation fails here.
+        self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex')                                          # new-session, tags, prompt buffer, launcher
+        self.orch('sessions.sh', '--repo', str(self.repo))                      # list-panes
+        self.orch('screen.sh', self.session, '--repo', str(self.repo))          # capture-pane, display-message
+        self.orch('send.sh', self.session, '--repo', str(self.repo), 'hello')   # paste_into
+        self.orch('send.sh', self.session, '--repo', str(self.repo), '--type', 'hi')
+        self.orch('adopt.sh', self.session, '--repo', str(self.repo), '--orchestrator', 'tmux:parent')
+        self.orch('kill.sh', self.session, '--repo', str(self.repo))            # kill-session, delete-buffer
+        seen = {}
+        for c in self.tmux_calls():
+            flags, i = [], 0
+            while c[i:i+1] in (['-u'], ['-S']):
+                if c[i] == '-u': flags.append('-u'); i += 1
+                else:
+                    self.assertEqual(c[i+1], self.sock, c)      # never a server this run did not choose
+                    flags += ['-S', 'SOCK']; i += 2
+            seen.setdefault(c[i], set()).add(tuple(flags))
+        self.assertEqual({k: sorted(v) for k, v in sorted(seen.items())},
+                         {k: sorted(v) for k, v in sorted(self.LOCAL_TMUX_ARGV.items())})
     def test_machine_flag_routes_through_beam_exec_with_large_stdin(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
         big = 'y' * 20000       # over tmux's ~16 KiB command-line cap: only load-buffer on stdin survives
