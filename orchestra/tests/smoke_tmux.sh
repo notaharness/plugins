@@ -289,8 +289,14 @@ esac
 FAKEBEAM
 chmod +x "$T/bin/beam"
 
+# Every tmux call for a machine names that machine's own server: the socket is asked of the
+# target once (a shell there, so $TMUX and its uid are the target's) and passed as -S on every
+# call after it. Without that, a bare remote tmux would resolve its own default socket and this
+# send would land on a different server than the one the session is on.
 check "--machine routes tmux argv through beam exec, stdin intact" \
   "bash '$O/send.sh' feature/x --repo '$T/repo' --machine workbox 'via-machine' >/dev/null 2>&1 && sleep 0.6 && grep -q via-machine '$T/received-claude' && grep -q '^exec workbox -- tmux' '$T/beam-log'"
+check "--machine asks the target for its socket, then names it on every tmux call" \
+  "grep -q \"^exec workbox -- sh -c \" '$T/beam-log' && grep -q '^exec workbox -- tmux -u -S $SOCK ' '$T/beam-log' && ! grep -qE '^exec workbox -- tmux -u [^-]' '$T/beam-log'"
 
 env PATH=/usr/bin:/bin bash -c '. "'"$P"'/_routing.sh"; ORCH_MACHINE=ghost tmux_on "" list-sessions' >"$T/missing-beam.out" 2>"$T/missing-beam.err"; mbrc=$?
 check "missing beam binary fails loudly, names three options, runs nothing locally" \
