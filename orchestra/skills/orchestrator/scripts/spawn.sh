@@ -102,10 +102,24 @@ LAUNCHER="$(realpath "$ORCH_SCRIPTS/_launch.sh")"
 CLAUDE_INVOCATION="$(claude_player_invocation)"
 root="$(repo_root)"
 dir="$(worktree_dir_for_branch "$BRANCH")"
-# Existence of the worktree directory is a question for ORCH_MACHINE, not this one.
-if is_local_machine; then dir_exists() { [ -d "$root/$dir" ]; }
-else dir_exists() { r test -d "$root/$dir"; }
+# Existence of the worktree directory is a question for ORCH_MACHINE, not this one, and asking
+# another machine has three answers rather than two: there, not there, or the machine did not
+# answer. A failed exec is not a statement about its filesystem, so the probe reports what it
+# found in its OUTPUT and keeps its exit status for the transport; reading that status as "not
+# there" would tell the user there is nothing to resume about a worktree that exists, and send a
+# fresh spawn down a create path that is about to fail for the same reason.
+if is_local_machine; then dir_probe() { [ -d "$root/$dir" ] && printf yes || printf no; }
+else dir_probe() { r sh -c '[ -d "$1" ] && printf yes || printf no' sh "$root/$dir"; }
 fi
+dir_exists() {
+  local answer
+  answer="$(dir_probe)" || { echo "spawn.sh: could not reach $(machine_label) to check whether the worktree $root/$dir is there; nothing was created" >&2; exit 1; }
+  case "$answer" in
+    yes) return 0;;
+    no) return 1;;
+    *) echo "spawn.sh: unexpected answer from $(machine_label) when checking for the worktree $root/$dir: $answer" >&2; exit 1;;
+  esac
+}
 
 # Resolve first: the session for (repo, branch) is whatever carries those tags, under any name.
 # What already exists: a dead pane (resumable), a live placeholder from a failed launch

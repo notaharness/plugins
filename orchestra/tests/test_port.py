@@ -1083,6 +1083,23 @@ class PortTests(unittest.TestCase):
         self.assertEqual([r['session'] for r in rows], [self.rname], rows)
         self.assertFalse((self.base/'tmux-state.json').exists())
         self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'list-panes' in c for c in self.beam_calls()), self.beam_calls())
+    def test_unreachable_machine_is_not_a_missing_worktree(self):
+        # A failed exec says nothing about the target's filesystem. Collapsing it into "the
+        # worktree is not there" reports "nothing to resume" about a worktree that exists, and
+        # walks a fresh spawn into a create path that fails for the same reason a moment later.
+        self.enable_remote_machine()
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        self.env['TEST_BEAM_EXEC_FAIL'] = 'printf yes'          # only the worktree probe
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/remote', '--resume'], ok=False)
+        self.assertNotEqual(x.returncode, 0)
+        self.assertIn('could not reach workbox', x.stderr)
+        self.assertNotIn('nothing to resume', x.stderr)
+        # and the same probe, answering normally, still reports a worktree that is simply absent
+        del self.env['TEST_BEAM_EXEC_FAIL']
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/remote', '--resume'], ok=False)
+        self.assertIn('nothing to resume', x.stderr)
     def test_machine_spawn_skips_local_harness_path_check(self):
         # B1 (the PATH half): a remote spawn's harness check must not be answered from this
         # machine's PATH — "gemini" is stubbed nowhere in this test, local or remote, so a local
