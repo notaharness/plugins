@@ -16,6 +16,10 @@ while [ $# -gt 0 ]; do case "$1" in
   --lines) LINES="$2"; shift;; --history) HISTORY="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
   *) echo "screen.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 require_valid_repo_for_machine || exit 2
+# Which server this machine's sessions are on, resolved once so every tmux call below
+# addresses the one spawn.sh created the session on (machine_socket, _routing.sh); a no-op,
+# and one variable assignment, without --machine.
+machine_socket || exit 1
 target="$(resolve_session "$session")" || exit 1
 session_exists "$target" || exit 1
 [ "$HISTORY" -gt 0 ] || [ "$(tmux_on "" display-message -p -t "$(tmux_target "$target")" '#{pane_dead}')" != 1 ] || HISTORY=40

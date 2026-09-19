@@ -19,6 +19,10 @@ while [ "${1:-}" = "--repo" ] || [ "${1:-}" = "--machine" ]; do
 done
 [ $# -eq 0 ] || { sed -n '2,13p' "$0" >&2; exit 2; }
 require_valid_repo_for_machine || exit 2
+# Which server this machine's sessions are on, resolved once so every tmux call below
+# addresses the one spawn.sh created the session on (machine_socket, _routing.sh); a no-op,
+# and one variable assignment, without --machine.
+machine_socket || exit 1
 target="$(resolve_session "$session")" || exit 1
 is_player_session "$target" || { echo "kill.sh: $target is not a player session (its tags do not say $TAG_SPAWNER + $TAG_SESSION_TYPE $SESSION_TYPE_WORKTREE); nothing killed" >&2; exit 1; }
 session_exists "$target" || exit 1

@@ -14,7 +14,7 @@ plugin's skills/ directory). The expected Claude player invocation defaults to t
 plugin in both layouts, with an explicit ORCHESTRA_CLAUDE_SKILL override for standalone
 Claude installations.
 """
-import os, json, re, subprocess, tempfile, unittest
+import os, hashlib, json, re, subprocess, tempfile, unittest
 from pathlib import Path
 ROOT = Path(os.environ.get('SKILLS_ROOT', Path(__file__).resolve().parent.parent/'skills'))
 def player_invocation():
@@ -53,12 +53,26 @@ LABELS = [  # (repo path, session type, branch, label)
     ('/x/' + 'b'*220, 'agent', '', 'b'*195 + '-9fb6'),
 ]
 TMUX_MOCK = r'''#!/usr/bin/env python3
-import os, sys, json, re, subprocess
+import os, sys, json, re, hashlib, subprocess
 from pathlib import Path
 b = Path(os.environ['ORCH_TEST_TMP']); a = sys.argv[1:]
 with (b/'tmux-log').open('a') as f: f.write(json.dumps(a)+'\n')
-while a[:1] in (['-u'], ['-S']): a = a[1:] if a[0] == '-u' else a[2:]     # -u: UTF-8 output; -S: server socket
-state_file = b/'tmux-state.json'; buffers_file = b/'tmux-buffers.json'
+sock = None
+while a[:1] in (['-u'], ['-S']):                                          # -u: UTF-8 output; -S: server socket
+    if a[0] == '-u': a = a[1:]
+    else: sock, a = a[1], a[2:]
+# The socket IS the server: sessions, options and buffers belong to one socket path, and two
+# different -S paths are two different servers, as they would be on a real host. No -S means the
+# socket tmux itself picks ($TMUX_TMPDIR else /tmp, tmux(1) -L), which is the same server an
+# explicit -S naming that path reaches. Keying state on the resolved path instead of discarding
+# -S is what makes a disagreement about WHICH server a remote session lives on visible here.
+if sock is None: sock = '%s/tmux-%d/default' % (os.environ.get('TMUX_TMPDIR') or '/tmp', os.getuid())
+# The state file is named after the resolved socket; the one this machine's scripts use by
+# default (ORCH_TEST_DEFAULT_SOCK, set per machine by the harness) keeps the plain name the test
+# helpers read. A pane whose TMUX_TMPDIR is redirected to the agent scratch directory therefore
+# gets its own server here too, exactly as it would in reality.
+tail = '' if sock == os.environ.get('ORCH_TEST_DEFAULT_SOCK') else '-' + hashlib.sha256(sock.encode()).hexdigest()[:8]
+state_file = b/('tmux-state%s.json' % tail); buffers_file = b/('tmux-buffers%s.json' % tail)
 def load():
     return (json.loads(state_file.read_text()) if state_file.exists() else {},
             json.loads(buffers_file.read_text()) if buffers_file.exists() else {})
@@ -100,7 +114,7 @@ if c == 'kill-server': state.clear(); buffers.clear(); save(); sys.exit(0)
 if c == 'display-message':
     n = target(a.index('-t')+1) if '-t' in a else None; key = a[-1]; s = state.get(n, {})
     print({'#S': os.environ.get('TEST_TMUX_SESSION', 'parent'), '#{pane_dead}': str(s.get('dead', 1)), '#{pane_current_path}': s.get('path', ''),
-           '#{socket_path}': '/tmp/test-socket', '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
+           '#{socket_path}': sock, '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
            '#{pane_pid}': str(os.getpid())}.get(key, '')); sys.exit(0)
 if c == 'show-options':
     # Session user option: `show-options -qv -t =name: @tag`. Without -q an unset option is an error.
@@ -200,6 +214,16 @@ if a[:1] == ['exec']:
         env['ORCH_TEST_TMP'] = remote_tmp
         if os.environ.get('ORCH_TEST_REMOTE_PATH'): env['PATH'] = os.environ['ORCH_TEST_REMOTE_PATH']
         if os.environ.get('ORCH_TEST_REMOTE_HOME'): env['HOME'] = os.environ['ORCH_TEST_REMOTE_HOME']
+        # A machine whose tmux keeps its sockets somewhere other than /tmp/tmux-<uid>: the
+        # target's own default socket, which only the target can answer for.
+        if os.environ.get('ORCH_TEST_REMOTE_TMUX_TMPDIR'):
+            env['TMUX_TMPDIR'] = os.environ['ORCH_TEST_REMOTE_TMUX_TMPDIR']
+            env['ORCH_TEST_DEFAULT_SOCK'] = '%s/tmux-%d/default' % (env['TMUX_TMPDIR'], os.getuid())
+    # TEST_BEAM_EXEC_FAIL=<substring>: the transport itself fails for any argv containing it —
+    # the machine could not be reached, which is not an answer about the machine's filesystem.
+    fail = os.environ.get('TEST_BEAM_EXEC_FAIL')
+    if fail and fail in ' '.join(argv):
+        sys.stderr.write('beam: exec %s: peer not connected\n' % machine); sys.exit(1)
     r = subprocess.run(argv, cwd=cwd, input=stdin_data, env=env)
     sys.exit(r.returncode)
 if a[:1] == ['status']:
@@ -207,6 +231,8 @@ if a[:1] == ['status']:
                        'label': os.environ.get('TEST_BEAM_LABEL_SELF', 'thishost'), 'running': True}))
     sys.exit(0)
 if a[:1] == ['peers']:
+    raw = os.environ.get('TEST_BEAM_PEERS_JSON')      # verbatim JSON, for labels TEST_BEAM_PEERS cannot express
+    if raw: print(raw); sys.exit(0)
     peers = []
     for item in os.environ.get('TEST_BEAM_PEERS', '').split(','):
         if not item: continue
@@ -253,7 +279,8 @@ class PortTests(unittest.TestCase):
         self.base = Path(self.tmp.name); self.repo = self.base/'repo'; self.repo.mkdir(); self.bin = self.base/'bin'; self.bin.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CLAUDE', 'CODEX', 'ORCHESTRA', 'TMUX', 'ANTHROPIC', 'PLAYER'))}
         self.env.update(PATH=str(self.bin)+':'+self.env['PATH'], CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
-                        CODEX_HOME=str(self.base/'codex-home'), CLAUDE_CONFIG_DIR=str(self.base/'claude-config'))
+                        CODEX_HOME=str(self.base/'codex-home'), CLAUDE_CONFIG_DIR=str(self.base/'claude-config'),
+                        ORCH_TEST_DEFAULT_SOCK='/tmp/tmux-%d/default' % os.getuid())
         self.git_init(self.repo)
         self.stub('tmux', TMUX_MOCK); self.stub('codex', CLI_MOCK); self.stub('claude', CLI_MOCK)
         self.wt = self.repo/'.claude/worktrees/feature-test'
@@ -313,22 +340,31 @@ class PortTests(unittest.TestCase):
     def beam_acked(self):
         f = self.base/'beam-acked'
         return f.read_text().splitlines() if f.exists() else []
-    def state(self): return json.loads((self.base/'tmux-state.json').read_text())
+    # One state file per tmux server, named after its socket (see TMUX_MOCK): sock selects which
+    # server a helper reads or writes, defaulting to the one the scripts use with no socket given.
+    def state_file(self, sock=None, base=None):
+        base = self.base if base is None else base
+        tail = '' if sock in (None, self.sock) else '-' + hashlib.sha256(sock.encode()).hexdigest()[:8]
+        return base/('tmux-state%s.json' % tail)
+    def state(self, sock=None): return json.loads(self.state_file(sock).read_text())
     def buffers(self):
         f = self.base/'tmux-buffers.json'
         return json.loads(f.read_text()) if f.exists() else {}
-    def tag(self, name, session=None): return self.state()[session or self.session]['options'].get(name)
-    def last_report(self):
-        v = self.tag('@orchestra-last-report'); self.assertIsNotNone(v, '@orchestra-last-report is unset'); return v
-    def set_state(self, s): (self.base/'tmux-state.json').write_text(json.dumps(s))
+    def tag(self, name, session=None, sock=None): return self.state(sock)[session or self.session]['options'].get(name)
+    def last_report(self, sock=None):
+        v = self.tag('@orchestra-last-report', sock=sock); self.assertIsNotNone(v, '@orchestra-last-report is unset'); return v
+    def set_state(self, s, sock=None): self.state_file(sock).write_text(json.dumps(s))
     def drop_tag(self, name):
         s = self.state(); s[self.session]['options'].pop(name, None); self.set_state(s)
-    def rename(self, old, new):
-        s = self.state(); s[new] = s.pop(old); self.set_state(s)
+    def rename(self, old, new, sock=None):
+        s = self.state(sock); s[new] = s.pop(old); self.set_state(s, sock)
     # A session some other program created: no tags unless given (mock tmux, so any name works).
-    def foreign(self, name, tags=None):
-        self.run_cmd(['tmux', 'new-session', '-d', '-s', name])
-        for k, v in (tags or {}).items(): self.run_cmd(['tmux', 'set-option', '-t', '='+name+':', k, v])
+    # sock plants it on another server, the way a session reached through a different $TMUX or
+    # ORCHESTRA_SOCKET really would live on one.
+    def foreign(self, name, tags=None, sock=None):
+        pre = [] if sock is None else ['-S', sock]
+        self.run_cmd(['tmux', *pre, 'new-session', '-d', '-s', name])
+        for k, v in (tags or {}).items(): self.run_cmd(['tmux', *pre, 'set-option', '-t', '='+name+':', k, v])
     def player_tags(self, repo=None, branch='feature/test', spawner='kirby'):
         return {'@orchestra-spawner': spawner, '@orchestra-repo': str((repo or self.repo).resolve()), '@orchestra-session-type': 'worktree', '@orchestra-branch': branch}
     def sessions(self, *args): return json.loads(self.orch('sessions.sh', '--json', *args).stdout)
@@ -672,12 +708,13 @@ class PortTests(unittest.TestCase):
                     self.assertNotIn('paste-buffer', self.tmux_log())
                 del self.env[flag]
     def test_report_from_pane_without_orchestra_env_uses_tmux(self):
-        self.spawn('--agent', 'codex'); self.rename(self.session, 'label-chosen-elsewhere')     # a pane Kirby started, under whatever label Kirby chose
-        inside = dict(self.env, TMUX='/tmp/custom-socket,7,0', TEST_TMUX_SESSION='label-chosen-elsewhere')
+        self.env['TMUX'] = '/tmp/custom-socket,7,0'          # the session lives on that server, as $TMUX says
+        self.spawn('--agent', 'codex'); self.rename(self.session, 'label-chosen-elsewhere', sock='/tmp/custom-socket')     # a pane Kirby started, under whatever label Kirby chose
+        inside = dict(self.env, TEST_TMUX_SESSION='label-chosen-elsewhere')
         self.assertEqual(self.report('--orchestrator', env=inside).stdout.strip(), 'codex:'+ID)
         self.clear_log(); x = self.report('PROGRESS', 'derived', env=inside); self.assertIn('queued for', x.stdout)
         self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player label-chosen-elsewhere] PROGRESS: derived'])
-        self.assertRegex(self.tag('@orchestra-last-report', 'label-chosen-elsewhere'), '^PROGRESS '+STAMP+' delivered$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
+        self.assertRegex(self.tag('@orchestra-last-report', 'label-chosen-elsewhere', sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' delivered$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
         self.assertIn('["-u", "-S", "/tmp/custom-socket", "display-message"', self.tmux_log())        # the session lookup goes through tmux_on too
         x = self.report('DONE', 'derived fail', env=dict(inside, TEST_CLI_EXIT='1'), ok=False)
         self.assert_delivery_failed(x, 'codex:'+ID, 'Codex queue refused', 'DONE', 'derived fail', session='label-chosen-elsewhere')
@@ -707,12 +744,12 @@ class PortTests(unittest.TestCase):
         self.env['TMUX'] = '/tmp/custom-socket,1,1'
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent')
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SOCKET'], '/tmp/custom-socket')
-        self.foreign('parent'); self.clear_log()
+        self.foreign('parent', sock='/tmp/custom-socket'); self.clear_log()
         self.report('PROGRESS', 'tmux delivery', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket')); log = self.tmux_log()
         self.assertIn('"-S", "/tmp/custom-socket", "load-buffer"', log); self.assertIn('paste-buffer', log); self.assertIn('"=parent:"', log)
         self.assertEqual((self.base/'buffer').read_text(), '[player repo-feature-test] PROGRESS: tmux delivery')
-        self.assertRegex(self.last_report(), '^PROGRESS '+STAMP+' delivered$')
-        self.run_cmd(['tmux', 'kill-session', '-t', '=parent'])
+        self.assertRegex(self.last_report(sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' delivered$')
+        self.run_cmd(['tmux', '-S', '/tmp/custom-socket', 'kill-session', '-t', '=parent'])
         x = self.report('DONE', 'gone', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket'), ok=False)
         self.assert_delivery_failed(x, 'tmux:parent', 'orchestrator session parent is gone', 'DONE', 'gone')
     def test_failed_paste_leaves_no_buffer(self):
@@ -809,7 +846,11 @@ class PortTests(unittest.TestCase):
         exec_calls = [c for c in self.beam_calls() if c[:1] == ['exec']]
         self.assertTrue(exec_calls, self.beam_calls())
         load = next(c for c in exec_calls if 'load-buffer' in c)
-        self.assertEqual(load, ['exec', 'workbox', '--', 'tmux', '-u', 'load-buffer', '-b', load[-2], '-'])
+        # Every remote tmux call names the server explicitly: a beam exec inherits no $TMUX, so
+        # without -S the target's tmux would pick its own default and answer for a different
+        # server than the one spawn.sh created the session on.
+        self.assertEqual(load, ['exec', 'workbox', '--', 'tmux', '-u', '-S', self.sock, 'load-buffer', '-b', load[-2], '-'])
+        self.assertEqual(sum(c[3:5] == ['sh', '-c'] for c in exec_calls), 1, exec_calls)   # asked once, then cached
         self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] ' + big)     # stdin reached the mock intact
     def test_missing_beam_binary_fails_names_three_options_and_runs_nothing_locally(self):
         calls_before = len(self.tmux_calls())
@@ -906,7 +947,8 @@ class PortTests(unittest.TestCase):
         # envelope naming any other local target, even a perfectly well-formed one, is refused,
         # logged with the sender's peer id, and left unacked; the actually-running session it
         # names is never touched.
-        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.stub('beam', BEAM_MOCK)
+        self.foreign('parent', sock='/tmp/relay-sock')       # relay.sh's own pane: $TMUX names that server
         good = json.dumps({'id': 'e5', 'from': 'peerA', 'to': 'q', 'seq': 5, 'topic': 'orchestra', 'encoding': 'utf8',
                             'payload': 'target: tmux:parent\n\n[player x] DONE: own session', 'createdAt': 0})
         (self.base/'beam-inbox').write_text(good+'\n')
@@ -997,6 +1039,44 @@ class PortTests(unittest.TestCase):
         self.assertFalse(local_snapshot)
         exec_targets = {c[1] for c in self.beam_calls() if c[:1] == ['exec']}
         self.assertEqual(exec_targets, {'workbox'})
+    def test_remote_socket_is_the_targets_own_and_every_script_agrees(self):
+        # The socket mismatch: spawn.sh computed an explicit remote socket while send.sh, kill.sh,
+        # screen.sh, adopt.sh and sessions.sh passed none, leaving the target's tmux to resolve its
+        # own default — the same server only as long as that default happens to be "/tmp/tmux-<uid>".
+        # Here it is not (the target keeps its sockets under its own TMUX_TMPDIR, as a sandboxed
+        # runner or a hardened /tmp does), so a socket built on this machine names a server the
+        # session is not on: the spawn reports success and every command after it says "no such
+        # session" about a player that is alive.
+        self.enable_remote_machine()
+        self.env['ORCH_TEST_REMOTE_TMUX_TMPDIR'] = str(self.remote/'tmux-tmp')
+        self.env['TEST_PANE_ALIVE'] = '1'
+        remote_sock = '%s/tmux-%d/default' % (self.remote/'tmux-tmp', os.getuid())
+        self.assertNotEqual(remote_sock, self.sock)
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        rname = 'remote-repo-feature-remote'
+        args = ['--repo', str(remote_repo), '--machine', 'workbox']
+        x = self.run_cmd(['bash', self.script('spawn.sh'), *args, '--branch', 'feature/remote',
+                           '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'codex'])
+        self.assertEqual(x.returncode, 0, x.stderr)
+        # created on the server the TARGET named, and the pane is told that same socket
+        self.assertEqual(sorted(self.remote_state()), [rname], self.remote_state())
+        self.assertEqual(self.remote_calls()[-1]['env']['ORCHESTRA_SOCKET'], remote_sock)
+        # …and every other script addresses it there: a listing finds it, adoption retags it,
+        # send reaches it and kill removes it, all by the name spawn.sh printed.
+        rows = json.loads(self.orch('sessions.sh', *args, '--all', '--json').stdout)
+        self.assertEqual([r['session'] for r in rows], [rname], rows)
+        self.orch('adopt.sh', rname, *args, '--orchestrator', 'tmux:new-parent')
+        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.orch('send.sh', rname, *args, '--raw', 'ping')
+        self.orch('screen.sh', rname, *args)
+        self.orch('kill.sh', rname, *args)
+        self.assertNotIn(rname, self.remote_state())
+        # no tmux call for that machine was ever aimed at a socket path invented here
+        tmux_execs = [c for c in self.beam_calls() if c[:1] == ['exec'] and 'tmux' in c]
+        self.assertTrue(tmux_execs, self.beam_calls())
+        for c in tmux_execs:
+            self.assertIn('-S', c, c); self.assertEqual(c[c.index('-S')+1], remote_sock, c)
+        self.assertFalse((self.base/'tmux-state.json').exists())
     def test_machine_sessions_listing_reads_only_the_remote_machine(self):
         self.test_machine_spawn_creates_nothing_on_this_machine()
         rows = json.loads(self.orch('sessions.sh', '--machine', 'workbox', '--repo', str(self.remote_repo), '--all', '--json').stdout)

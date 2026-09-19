@@ -142,6 +142,38 @@ json_string_field() {
   done
 }
 
+# --- Which tmux server another machine's sessions live on -------------------------------------
+# On this machine, "no socket" means the server $TMUX names, else the one tmux itself picks, and
+# a bare `tmux` finds it. Neither holds for a machine reached through beam: its exec carries no
+# $TMUX and no shell, so a bare remote `tmux` resolves ITS default socket while anything that
+# passed an explicit -S addressed whatever path this machine computed — two different servers as
+# soon as the target's default is not "/tmp/tmux-<uid>" (a target with $TMUX_TMPDIR set, or a
+# build whose default directory differs, such as one keeping sockets under $TMPDIR). A session
+# created on one is then invisible on the other: "no such session" for a player that is alive.
+# So the socket is resolved once per machine, by asking the TARGET rather than computing a path
+# here: its running tmux for the socket it is actually on, and, when no server runs there yet,
+# tmux's documented rule ($TMUX_TMPDIR else /tmp, tmux(1) -L) evaluated by a shell on the target,
+# with its own environment and its own uid. Every tmux call for that machine then carries that
+# one path, so spawn.sh and every later command address the same server.
+MACHINE_SOCKET=""                     # resolved by machine_socket; empty means this machine
+_MACHINE_SOCKET_KEY=""; _MACHINE_SOCKET_VALUE=""
+_MACHINE_SOCKET_PROBE='tmux -u display-message -p "#{socket_path}" 2>/dev/null ||
+  printf "%s/tmux-%s/default" "${TMUX_TMPDIR:-/tmp}" "$(id -u)"'
+# machine_socket: sets MACHINE_SOCKET for ORCH_MACHINE, cached per machine (one round trip, not
+# one per tmux call — scripts that make several calls resolve it once at top level so the cache
+# is warm in the subshells that follow). Fails, leaving MACHINE_SOCKET empty, when the machine
+# cannot be reached; callers must not fall back to a local server on that failure.
+machine_socket() {
+  MACHINE_SOCKET=""
+  if is_local_machine; then return 0; fi
+  if [ "$_MACHINE_SOCKET_KEY" = "$ORCH_MACHINE" ]; then MACHINE_SOCKET="$_MACHINE_SOCKET_VALUE"; return 0; fi
+  local sock
+  sock="$(beam_exec "$ORCH_MACHINE" sh -c "$_MACHINE_SOCKET_PROBE")" || return 1
+  sock="${sock%%$nl*}"
+  [ -n "$sock" ] || { echo "orchestra: could not determine which tmux socket to use on $ORCH_MACHINE" >&2; return 1; }
+  _MACHINE_SOCKET_KEY="$ORCH_MACHINE"; _MACHINE_SOCKET_VALUE="$sock"; MACHINE_SOCKET="$sock"
+}
+
 # tmux sanitizes what it prints unless the client is in UTF-8 mode, which it infers from the names
 # of LC_ALL/LC_CTYPE/LANG: outside a UTF-8 locale control characters (such as the tabs between
 # listing fields) and non-ASCII come back as "_". `tmux -u` forces UTF-8 output whatever the locale, so every call goes through it.
@@ -149,13 +181,15 @@ json_string_field() {
 # one $TMUX names, else the default); a path is passed as -S so a process whose tmux environment
 # is redirected (every player pane) still reaches the server that holds its session. On the local
 # machine (ORCH_MACHINE unset/empty/"local") this is exactly today's invocation, unchanged; on any
-# other machine the identical argv runs there instead, through beam_exec.
+# other machine the identical argv runs there instead, through beam_exec — always with an explicit
+# -S, since a remote tmux has no $TMUX to inherit and every caller has to mean the same server.
 tmux_on() {
   local sock="$1"; shift
   if is_local_machine; then
     if [ -n "$sock" ]; then tmux -u -S "$sock" "$@"; else tmux -u "$@"; fi
   else
-    if [ -n "$sock" ]; then beam_exec "$ORCH_MACHINE" tmux -u -S "$sock" "$@"; else beam_exec "$ORCH_MACHINE" tmux -u "$@"; fi
+    if [ -z "$sock" ]; then machine_socket || return 1; sock="$MACHINE_SOCKET"; fi
+    beam_exec "$ORCH_MACHINE" tmux -u -S "$sock" "$@"
   fi
 }
 # tmux_local <args…>: tmux on THIS machine's current/default server, ignoring ORCH_MACHINE

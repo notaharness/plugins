@@ -85,13 +85,15 @@ case "$ORCH" in
 esac
 # The socket the player's session will live on. Locally this is $TMUX's socket (the orchestrator's
 # own pane) or the default per-user path. $TMUX describes only this process's own binding, so it
-# never applies to a remote machine; beam's exec has no shell to expand "$(id -u)" itself, so the
-# remote uid is fetched with its own call and the same default-path convention built from it here.
+# never applies to a remote machine, and neither does a path built here: the target is asked which
+# server it uses (machine_socket, _routing.sh), and the answer — cached, so this is the only round
+# trip it costs — is the same one send.sh, kill.sh, screen.sh, adopt.sh and sessions.sh resolve, so
+# the session this creates is the session they find.
 if is_local_machine; then
   ORCH_SOCK="$(default_orchestrator_socket)"
 else
-  remote_uid="$(beam_exec "$ORCH_MACHINE" id -u)" || { echo "spawn.sh: could not determine the default tmux socket on $ORCH_MACHINE (id -u failed)" >&2; exit 1; }
-  ORCH_SOCK="/tmp/tmux-$remote_uid/default"
+  machine_socket || { echo "spawn.sh: could not determine which tmux socket to use on $ORCH_MACHINE" >&2; exit 1; }
+  ORCH_SOCK="$MACHINE_SOCKET"
 fi
 t() { tmux_on "$ORCH_SOCK" "$@"; }        # -u -S: reads are exact in any locale
 tag() { tag_set "$ORCH_SOCK" "$name" "$@"; }

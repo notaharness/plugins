@@ -24,6 +24,10 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --*) echo "adopt.sh: unknown argument $1" >&2; exit 2;; *) break;; esac; shift; done
 TEXT="$*"
 require_valid_repo_for_machine || exit 2
+# Which server this machine's sessions are on, resolved once so every tmux call below
+# addresses the one spawn.sh created the session on (machine_socket, _routing.sh); a no-op,
+# and one variable assignment, without --machine.
+machine_socket || exit 1
 # See spawn.sh: an explicit --orchestrator is left as given when already beam-qualified; otherwise
 # a remote adoption is qualified with this machine's own peerId so the (now possibly remote)
 # player can address this orchestrator back through beam.

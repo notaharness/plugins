@@ -21,6 +21,10 @@ while [ "${1:-}" = "--repo" ] || [ "${1:-}" = "--machine" ]; do
 done
 [ $# -ge 1 ] || { sed -n '2,15p' "$0" >&2; exit 2; }
 require_valid_repo_for_machine || exit 2
+# Which server this machine's sessions are on, resolved once so every tmux call below
+# addresses the one spawn.sh created the session on (machine_socket, _routing.sh); a no-op,
+# and one variable assignment, without --machine.
+machine_socket || exit 1
 target="$(resolve_session "$session")" || exit 1
 session_exists "$target" || exit 1
 tt="$(tmux_target "$target")"

@@ -184,6 +184,9 @@ act on a player on the wrong machine.
   rather than resolved against this machine's working directory.
 - Session names are unique only *per machine*. Once more than one machine is registered, a bare
   name no longer identifies one player and `--machine` may be needed alongside it.
+- Which tmux server a machine keeps its players on is asked of that machine, once per command,
+  and every script shares the answer — a machine whose sockets live outside `/tmp` (a
+  `TMUX_TMPDIR` of its own) needs no configuration here.
 - `sessions.sh --all` lists this machine plus, when beam resolves and peers are registered, every
   peer's players — one listing call per machine, with a MACHINE column (`--json`: a `machine`
   field). With no beam or no peers, the output is unchanged.

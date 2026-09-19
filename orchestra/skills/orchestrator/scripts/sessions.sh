@@ -83,6 +83,9 @@ if [ "$SAMPLE" -gt 0 ]; then
   SAMPLE_STARTING_MACHINE="$ORCH_MACHINE"
   for machine_iter in "${MACHINES[@]}"; do
     ORCH_MACHINE="$machine_iter"; [ "$machine_iter" = local ] && ORCH_MACHINE=""
+    # The server that machine keeps its sessions on, resolved once per machine (_routing.sh);
+    # a peer that cannot be reached contributes no baseline and no rows, as before, quietly.
+    machine_socket 2>/dev/null || continue
     while IFS= read -r n; do before["$machine_iter$TAB$n"]="$(screen_text "=$n:" | md5sum)"; done < <(all_player_sessions)
   done
   ORCH_MACHINE="$SAMPLE_STARTING_MACHINE"
@@ -106,6 +109,7 @@ now=$(date +%s); rows=0; first=1
 STARTING_MACHINE="$ORCH_MACHINE"
 for machine_iter in "${MACHINES[@]}"; do
   ORCH_MACHINE="$machine_iter"; [ "$machine_iter" = local ] && ORCH_MACHINE=""
+  machine_socket 2>/dev/null || continue                  # see the sample loop above
   machine_disp="${MACHINE_LABEL[$machine_iter]:-$machine_iter}"
   while IFS= read -r line; do
     split_tabs "$line"; set -- "${F[@]}"
