@@ -589,6 +589,31 @@ class PortTests(unittest.TestCase):
         self.assertTrue(any('workbox' in l for l in text[1:]), text)                # the label
         self.assertFalse(any(PEER in l for l in text[1:]), text)                    # never the raw peerId
 
+    def test_peer_labels_with_braces_quotes_and_backslashes_do_not_desync_the_scan(self):
+        # A peer's label is chosen on that peer's machine. Scanning `beam peers --json` for the
+        # next "{...}" ended the first peer's object at the "}" inside its label and resumed from
+        # there, so that peer lost its label and every peer after it was garbled or dropped —
+        # rows missing from sessions.sh --all for machines that are registered and reachable.
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.stub('beam', BEAM_MOCK)
+        hostile = 'work}box "one" \\ two{'
+        self.env['TEST_BEAM_PEERS_JSON'] = json.dumps(
+            [{'peerId': PEER, 'label': hostile, 'state': 'connected', 'endpoint': '', 'queued': 0},
+             {'peerId': 'fedcba0987654321', 'label': 'plain', 'state': 'connected', 'endpoint': '', 'queued': 0}])
+        rows = self.sessions('--all')
+        self.assertEqual(sorted(r['machine'] for r in rows), sorted(['local', hostile, 'plain']), rows)
+        self.assertFalse(any(PEER == r['machine'] for r in rows), rows)     # the label, not the raw peerId
+    def test_json_array_objects_rejects_a_malformed_array(self):
+        # No half-parsed answer: a truncated document yields no peers rather than a plausible
+        # prefix of them, so a machine is never silently left out of a listing that looks complete.
+        for bad in ('[{"peerId":"x"', '[{"peerId":"unterminated}', 'not json at all', '[}]'):
+            x = self.run_cmd(['bash', '-c', '. "$0"; json_array_objects "$1" || exit 1; printf "%s\\n" "${#JSON_OBJECTS[@]}"',
+                               str(ROOT/'player/scripts/_routing.sh'), bad], ok=False)
+            self.assertNotEqual(x.returncode, 0, bad)
+        x = self.run_cmd(['bash', '-c', '. "$0"; json_array_objects "$1"; printf "%s\\n" "${#JSON_OBJECTS[@]}"',
+                           str(ROOT/'player/scripts/_routing.sh'), '[{"a":{"b":"}"}},{"c":"\\""}]'])
+        self.assertEqual(x.stdout.strip(), '2')          # nested objects and escaped quotes, both counted once
+
     # --- resume ----------------------------------------------------------------------
     def test_resume_default_restart_note_only_no_replay_no_overrides(self):
         self.spawn('--agent', 'claude', '--model', 'fable'); self.kill_pane()

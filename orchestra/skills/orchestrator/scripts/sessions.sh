@@ -61,15 +61,17 @@ MACHINES=(local); declare -A MACHINE_LABEL
 if [ $EXPLICIT_MACHINE = 1 ]; then MACHINES=("$ORCH_MACHINE")
 elif [ $ALL = 1 ] && beam_cmd 2>/dev/null; then
   peers_json="$("${BEAM_CMD[@]}" peers --json 2>/dev/null)" || peers_json=""
-  rest="$peers_json"
-  while :; do
-    case "$rest" in *'{'*'}'*) ;; *) break;; esac
-    obj="${rest#*\{}"; obj="{${obj%%\}*}}"; rest="${rest#*\{*\}}"
-    pid="$(json_string_field "$obj" peerId 2>/dev/null || :)"
-    [ -n "$pid" ] || continue
-    lbl="$(json_string_field "$obj" label 2>/dev/null || :)"
-    MACHINES+=("$pid"); MACHINE_LABEL["$pid"]="${lbl:-$pid}"
-  done
+  # Split the array properly (json_array_objects, _routing.sh) rather than by scanning for the
+  # next "{...}": a label is chosen by a person on the machine that peer belongs to, and one
+  # containing "}" would otherwise cut that peer's object short and lose every peer after it.
+  if json_array_objects "$peers_json" 2>/dev/null; then
+    for obj in ${JSON_OBJECTS[@]+"${JSON_OBJECTS[@]}"}; do
+      pid="$(json_string_field "$obj" peerId 2>/dev/null || :)"
+      [ -n "$pid" ] || continue
+      lbl="$(json_string_field "$obj" label 2>/dev/null || :)"
+      MACHINES+=("$pid"); MACHINE_LABEL["$pid"]="${lbl:-$pid}"
+    done
+  fi
 fi
 MULTI_MACHINE=0; [ "${#MACHINES[@]}" -gt 1 ] && MULTI_MACHINE=1
 

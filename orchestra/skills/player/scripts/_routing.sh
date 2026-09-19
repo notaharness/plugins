@@ -142,6 +142,40 @@ json_string_field() {
   done
 }
 
+# json_array_objects <json>: the top-level elements of a JSON array, into the array JSON_OBJECTS
+# (a global: setting one keeps the caller out of a subshell). A real scanner, not a brace
+# matcher: it tracks string state and backslash escapes, so a "{" or "}" inside a string value
+# nests nothing and ends nothing. `beam peers --json` is the caller and a peer's label is chosen
+# on another machine — a label containing "}" used to truncate that peer's object and desynchronise
+# every element after it. Like the two scanners above it jumps to the next character that matters
+# with one native pattern match per step rather than walking character by character, so it stays
+# linear in the length of the document. Fails, leaving JSON_OBJECTS empty, on anything that is not
+# a well-formed array: no half-parsed answer, since the alternative to one peer row is none.
+json_array_objects() {
+  local orig="$1" s="$1" q='"' pos=0 depth=0 start=0 head ch
+  JSON_OBJECTS=()
+  case "$orig" in *\[*) ;; *) return 1;; esac
+  while [ -n "$s" ]; do
+    head="${s%%[$q{\}]*}"                             # the next quote or brace, if any
+    [ "${#head}" -lt "${#s}" ] || break
+    ch="${s:${#head}:1}"; pos=$((pos + ${#head} + 1)); s="${s:${#head}+1}"
+    case "$ch" in
+      '"')                                             # inside a string nothing is structural
+        while :; do
+          head="${s%%[\\$q]*}"
+          [ "${#head}" -lt "${#s}" ] || return 1       # no closing quote: not well-formed
+          if [ "${s:${#head}:1}" = '\' ]; then pos=$((pos + ${#head} + 2)); s="${s:${#head}+2}"
+          else pos=$((pos + ${#head} + 1)); s="${s:${#head}+1}"; break; fi
+        done;;
+      '{') if [ "$depth" -eq 0 ]; then start=$((pos - 1)); fi; depth=$((depth + 1));;
+      *)   depth=$((depth - 1))                        # "}"
+           if [ "$depth" -lt 0 ]; then return 1; fi
+           if [ "$depth" -eq 0 ]; then JSON_OBJECTS+=("${orig:start:pos-start}"); fi;;
+    esac
+  done
+  [ "$depth" -eq 0 ] || { JSON_OBJECTS=(); return 1; }
+}
+
 # --- Which tmux server another machine's sessions live on -------------------------------------
 # On this machine, "no socket" means the server $TMUX names, else the one tmux itself picks, and
 # a bare `tmux` finds it. Neither holds for a machine reached through beam: its exec carries no
