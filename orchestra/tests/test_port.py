@@ -347,6 +347,9 @@ class PortTests(unittest.TestCase):
         self.env['ORCH_TEST_REMOTE_TMP'] = str(self.remote)
         self.env['ORCH_TEST_REMOTE_PATH'] = str(self.remote_bin)+':'+system_path
         self.env['ORCH_TEST_REMOTE_HOME'] = str(self.remote_home)
+        # The plugin is installed at the same $HOME-relative path on both sides (Claude Code's
+        # plugin cache): ~/skills/orchestrator/scripts/_launch.sh here and on the remote.
+        self.env['HOME'] = str(ROOT.parent); (self.remote_home/'skills').symlink_to(ROOT)
     def remote_state(self):
         f = self.remote/'tmux-state.json'
         return json.loads(f.read_text()) if f.exists() else {}
@@ -1322,6 +1325,32 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')
         self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'new-session' in c for c in self.beam_calls()), self.beam_calls())
         self.rname = rname; self.remote_repo = remote_repo
+    def test_machine_spawn_runs_the_launcher_installed_on_the_remote_machine(self):
+        # The pane runs _launch.sh on the target, where this machine's absolute plugin path does
+        # not exist: the launcher is the one under the target's own $HOME, at the same path
+        # relative to $HOME as here (Claude Code's plugin cache), and nothing here is referenced.
+        self.enable_remote_machine()
+        self.env['TEST_PANE_ALIVE'] = '1'
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/remote', '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'codex'])
+        self.assertEqual(x.returncode, 0, x.stderr)
+        launch = next(c for c in self.beam_calls() if c[:2] == ['exec', 'workbox'] and 'respawn-pane' in c)
+        cmd = launch[launch.index('-c', launch.index('/bin/bash')) + 1]
+        self.assertIn(str(self.remote_home/'skills/orchestrator/scripts/_launch.sh'), cmd, cmd)
+        self.assertNotIn(self.script('_launch.sh'), cmd, cmd)
+        self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')
+    def test_machine_spawn_refuses_when_the_remote_machine_has_no_launcher(self):
+        self.enable_remote_machine()
+        (self.remote_home/'skills').unlink()                                 # installed here, not under the remote $HOME
+        remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--repo', str(remote_repo), '--machine', 'workbox',
+                           '--branch', 'feature/remote', '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'codex'], ok=False)
+        self.assertNotEqual(x.returncode, 0)
+        self.assertIn('~/skills/orchestrator/scripts/_launch.sh does not exist on workbox', x.stderr)
+        self.assertIn('install the orchestra plugin there', x.stderr)
+        self.assertFalse((remote_repo/'.claude/worktrees').exists(), 'a worktree was created before the launcher check')
+        self.assertEqual(self.remote_state(), {}, 'a session was created before the launcher check')
     def test_machine_adopt_send_screen_kill_touch_only_the_remote_machine(self):
         self.test_machine_spawn_creates_nothing_on_this_machine()      # builds the remote session and asserts spawn's own invariant
         rname, remote_repo = self.rname, self.remote_repo

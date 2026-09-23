@@ -105,6 +105,20 @@ t() { tmux_on "$ORCH_SOCK" "$@"; }        # -u -S: reads are exact in any locale
 tag() { tag_set "$ORCH_SOCK" "$name" "$@"; }
 
 LAUNCHER="$(realpath "$ORCH_SCRIPTS/_launch.sh")"
+# The launcher runs inside the pane, so on ORCH_MACHINE, where this machine's absolute path
+# means nothing. Claude Code installs the plugin under ~/.claude/plugins/cache/..., so the target
+# is asked for the same $HOME-relative path under its own $HOME, and the spawn stops before
+# anything is created when it is not there: a pane that dies with "No such file or directory"
+# would leave a worktree and a dead session for a cause only screen.sh shows. A failed exec is
+# the transport's answer, not the filesystem's, and is reported as such.
+if ! is_local_machine; then
+  rel="${LAUNCHER#"$HOME"/}"
+  [ "$rel" != "$LAUNCHER" ] || { echo "spawn.sh: $LAUNCHER is outside \$HOME, so it cannot be located on $ORCH_MACHINE" >&2; exit 1; }
+  remote_launcher="$(r sh -c '[ -f "$HOME/$1" ] && printf %s "$HOME/$1"; exit 0' sh "$rel")" \
+    || { echo "spawn.sh: could not ask $ORCH_MACHINE whether ~/$rel exists" >&2; exit 1; }
+  [ -n "$remote_launcher" ] || { echo "spawn.sh: ~/$rel does not exist on $ORCH_MACHINE; install the orchestra plugin there at the same version as here" >&2; exit 1; }
+  LAUNCHER="$remote_launcher"
+fi
 CLAUDE_INVOCATION="$(claude_player_invocation)"
 root="$(repo_root)"
 dir="$(worktree_dir_for_branch "$BRANCH")"
