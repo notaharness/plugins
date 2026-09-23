@@ -5,17 +5,28 @@
 # Usage: report.sh PROGRESS|QUESTION|BLOCKED|DONE <text…>
 #        report.sh --orchestrator          print the current reporting target
 #
-# The target (codex:<thread-id> or tmux:<session>) is the @orchestra-orchestrator tag on this
-# player's own tmux session, set by spawn.sh and adopt.sh; a player cannot change it. The
-# session and the socket of the server holding it come from ORCHESTRA_SESSION and
-# ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own tmux environment points at a scratch
-# server, so every call here passes -S), or from TMUX in a pane spawn.sh did not start (a
-# Kirby session adopted by adopt.sh). No file is read or written.
-# Delivery is reported only when the transport accepted the message; then @orchestra-last-report
-# is set to "<KIND> <ISO-8601 UTC>". Failed delivery exits nonzero and prints the target, reason,
-# and complete original report to stderr so the player can handle the failure. A failed submit
-# may follow a successful paste; inspect before retrying to avoid duplicates. Nothing retries.
+# The target is the @orchestra-orchestrator tag on this player's own tmux session, set by
+# spawn.sh and adopt.sh; a player cannot change it. codex:<thread-id> or tmux:<session> when the
+# orchestrator is on this machine; beam:<orchestrator peerId>/(codex:<thread-id>|tmux:<session>)
+# when it is on another one, in which case delivery goes through `beam msg send` (see
+# beam/docs/05-mailbox.md). A tmux target running Claude Code gets the report on its inbox socket
+# (third field "inbox"); any other agent gets it pasted into its pane ("paste"). The session and the socket of the server
+# holding it come from ORCHESTRA_SESSION and ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own
+# tmux environment points at a scratch server, so every local call here passes -S), or from TMUX
+# in a pane spawn.sh did not start (a Kirby session adopted by adopt.sh). No file is read or
+# written. Delivery is reported only when the transport accepted the message; then
+# @orchestra-last-report is set to "<KIND> <ISO-8601 UTC> <outcome>" (a parser that reads only
+# the first two whitespace-separated fields still gets KIND and the timestamp). A beam send that
+# comes back "stored" is still success — the message is on disk and beam keeps delivering it —
+# and is worded to say so plainly, because the reader is a coding agent that would otherwise
+# conclude the report was lost. Failed delivery (a local target gone or unreachable, or beam's
+# own "rejected") exits nonzero and prints the target, reason, and complete original report to
+# stderr so the player can handle the failure. Nothing retries.
 set -eu
+# A player always acts on its own machine: ORCHESTRA_FORCE_LOCAL pins ORCH_MACHINE to this
+# machine regardless of any --machine/$ORCHESTRA_MACHINE this process happens to inherit (see
+# _routing.sh) — report.sh's own @orchestra-orchestrator lookup must never go over beam.
+ORCHESTRA_FORCE_LOCAL=1
 . "$(dirname "$(realpath "$0")")/_routing.sh"
 player_session_context || { player_session=""; player_socket=""; }
 session="$player_session"; sock="$player_socket"; name="${session:-$(basename "$(pwd)")}"
@@ -24,7 +35,7 @@ if [ "${1:-}" = "--orchestrator" ]; then
   [ -n "$session" ] || { echo 'report.sh: neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane' >&2; exit 2; }
   target="$(tag_get "$sock" "$session" "$TAG_ORCHESTRATOR")"; printf '%s\n' "${target:-<unset>}"; exit
 fi
-[ $# -ge 2 ] || { sed -n '2,17p' "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,24p' "$0" >&2; exit 2; }
 kind="$1"; shift
 case "$kind" in PROGRESS|QUESTION|BLOCKED|DONE) ;; *) echo "report.sh: KIND must be PROGRESS, QUESTION, BLOCKED or DONE" >&2; exit 2;; esac
 msg="[player $name] $kind: $*"
@@ -36,7 +47,7 @@ delivery_failed() {
   exit 1
 }
 delivered() {
-  tag_set "$sock" "$session" "$TAG_LAST_REPORT" "$kind $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null ||
+  tag_set "$sock" "$session" "$TAG_LAST_REPORT" "$kind $(date -u +%Y-%m-%dT%H:%M:%SZ) $1" 2>/dev/null ||
     echo "report.sh: delivered, but could not set $TAG_LAST_REPORT on $session" >&2
 }
 [ -n "$session" ] || delivery_failed 'neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane'
@@ -47,22 +58,36 @@ normalize_target "$destination" >/dev/null 2>&1 || delivery_failed 'invalid orch
 target="$destination"
 case "$target" in
   codex:*)
-    if codex queue --thread "${target#codex:}" --message "$msg"; then delivered; echo "queued for $target"; exit 0; fi
-    delivery_failed 'Codex queue refused the message; inspect before retrying to avoid duplicate reports';;
-  tmux:*) target="${target#tmux:}";;
+    deliver_to_local_target "$sock" "$target" "$msg" || delivery_failed "$DELIVER_REASON"
+    delivered delivered; echo "queued for $target"; exit 0;;
+  tmux:*)
+    deliver_to_local_target "$sock" "$target" "$msg" || delivery_failed "$DELIVER_REASON"
+    delivered "$DELIVER_ROUTE"; echo "sent to ${target#tmux:} ($DELIVER_ROUTE)"; exit 0;;
+  beam:*)
+    rest="${target#beam:}"; peer="${rest%%/*}"; local_target="${rest#*/}"
+    beam_cmd || delivery_failed "$(beam_unresolved_message "$peer")"
+    # The far side needs to know which local target the envelope is for; beam only carries an
+    # opaque payload, so it travels as a one-line header ("target: <local>") plus a blank line
+    # before the report text, the way relay.sh (and this function, symmetrically) expects it.
+    payload="$(printf 'target: %s\n\n%s' "$local_target" "$msg")"
+    # `msg send` has no --json; it prints `delivered to <peer>` or the stored sentence and exits
+    # 0, or `rejected: <reason>` (or an error token) on stderr and exits 1 (beam/docs/07-cli.md).
+    # Exit 0 is the contract: anything other than "delivered" is stored, never lost.
+    out="$(printf '%s' "$payload" | "${BEAM_CMD[@]}" msg send "$peer" --topic orchestra - 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" = 0 ]; then
+      case "$out" in
+        "delivered to "*) delivered delivered; echo "sent to $peer"; exit 0;;
+      esac
+      delivered stored
+      # beam/docs/05-mailbox.md's wording for each pendingReason, which every surface uses.
+      case "$out" in
+        *"has not acknowledged"*)
+          echo "stored for $peer; delivery pending ($peer has not acknowledged it). beam will keep delivering it until $peer does. Do not send it again.";;
+        *)
+          echo "stored for $peer; delivery pending ($peer is offline). beam will deliver it when $peer connects. Do not send it again.";;
+      esac
+      exit 0
+    fi
+    reason="${out%%$nl*}"; reason="${reason#rejected: }"
+    delivery_failed "beam rejected the message (exit $rc): ${reason:-no reason given}";;
 esac
-t() { tmux_on "$sock" "$@"; }
-t has-session -t "=$target" 2>/dev/null || delivery_failed "orchestrator session $target is gone or unreachable"
-# Would the paste be run as a shell command? Only an agent at the terminal may receive it.
-pane_owned_by_agent "$sock" "$target" || delivery_failed "a shell owns $target now, not an agent"
-# One bracketed paste (-p) keeps embedded newlines from submitting early; the buffer is loaded
-# from stdin because tmux rejects command lines over ~16 KiB. The pause lets a slow UI ingest
-# the paste before Enter.
-tt="$(tmux_target "$target")"
-printf '%s' "$msg" | t load-buffer -b "player-$$" - || delivery_failed "tmux could not load the message"
-# errexit is live inside the brace group: cleanup must not exit before the error is printed.
-t paste-buffer -p -d -b "player-$$" -t "$tt" || { t delete-buffer -b "player-$$" 2>/dev/null || :; delivery_failed "tmux could not paste into $target"; }
-sleep 0.3
-t send-keys -t "$tt" Enter || delivery_failed "tmux could not submit the message in $target; the paste succeeded, inspect before retrying"
-delivered
-echo "sent to $target"
