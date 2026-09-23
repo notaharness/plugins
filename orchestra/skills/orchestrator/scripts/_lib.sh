@@ -213,6 +213,19 @@ PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)
 
+# set_orchestrator <socket> <session> <target>: point a player's reports at <target>. A local
+# claude: target is found through the orchestrator's Claude config dir, which the player's own
+# environment need not share, so it goes on beside the target (first: report.sh never sees the
+# target without it); every other target drops it. A beam-qualified one leaves the lookup to the
+# far side's relay, with its own environment.
+set_orchestrator() {
+  case "$3" in
+    claude:*) tag_set "$1" "$2" "$TAG_ORCH_CONFIG" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" || return 1;;
+    *) tag_unset "$1" "$2" "$TAG_ORCH_CONFIG" 2>/dev/null || :;;
+  esac
+  tag_set "$1" "$2" "$TAG_ORCHESTRATOR" "$3"
+}
+
 # Deliver multi-line text to a pane as one bracketed paste on the default/current server, like
 # every other orchestrator-side call here, so it honours ORCH_MACHINE too (paste_into_pane,
 # _routing.sh). Usage: paste_into <session> <text>

@@ -10,7 +10,8 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/sessions.sh *), Bash(${CLAUDE_SK
 
 Split work into players, each in its own tmux session and git worktree. Players code;
 you supervise, answer questions and verify their results. Supports Claude Code and
-Codex CLI players from a Claude/tmux or Codex desktop/CLI orchestrator on the same host.
+Codex CLI players from a Claude Code (terminal, tmux or Desktop) or Codex desktop/CLI orchestrator
+on the same host.
 
 ## Start
 
@@ -67,8 +68,8 @@ which would create or act on a player on the wrong machine.
   peers are registered, every peer's players too — one listing call per machine. Rows then carry
   a MACHINE column (`--json`: a `"machine"` field); with no beam or no peers this is unchanged.
 - A player spawned or adopted onto a remote machine reports back through beam: its
-  `@orchestra-orchestrator` tag holds `beam:<this orchestrator's peerId>/tmux:<session>` (or
-  `codex:<thread-id>`) instead of the plain local form, learned from `beam status --json` run on
+  `@orchestra-orchestrator` tag holds `beam:<this orchestrator's peerId>/claude:<session-id>` (or
+  `codex:<thread-id>`, `tmux:<session>`) instead of the plain local form, learned from `beam status --json` run on
   this machine at spawn/adopt time. `report.sh`'s player-facing behavior for this is documented
   in the player `SKILL.md`.
 
@@ -79,13 +80,17 @@ even if `$ORCHESTRA_MACHINE` is set in the environment it happens to inherit, wh
 unconditionally) subscribes to the `orchestra` topic on the local beam daemon's control socket and
 delivers each arriving envelope to a local target, through the same delivery sequence and
 `pane_owned_by_agent` check `report.sh` uses for a local report — a message that arrived from
-another machine gets no more trust than one typed here. It needs `socat` or an `nc` with `-U`.
+another machine gets no more trust than one typed here. A `claude:` target is looked up in the
+Claude session registry under `relay.sh`'s own `$CLAUDE_CONFIG_DIR` (else `~/.claude`). It needs
+`socat` or an `nc` with `-U`.
 
 Two things it does not do, on purpose:
 
 - **It never trusts the envelope for *where* to deliver.** The envelope names a target, but the
   set of targets `relay.sh` may actually act on comes only from how it was started: with no
-  argument, the single session it was started from; `--allow <target>` (repeatable) names others.
+  argument, the single session it was started from — `claude:$CLAUDE_CODE_SESSION_ID` when a Claude
+  session runs it (even inside tmux, where `$TMUX` can name someone else's session), else its tmux
+  session; `--allow <target>` (repeatable) names others.
   An envelope naming anything outside that allowlist is refused, logged with the sending peer's
   id, and not delivered — any paired peer could otherwise paste arbitrary text into any tmux
   session on this machine that has an agent at the prompt, the user's own session included.
@@ -111,7 +116,8 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-repo` | absolute, symlink-resolved path of the main checkout |
 | `@orchestra-session-type` | `worktree` for every player; `shell`/`agent` are Kirby terminal tabs, never players |
 | `@orchestra-branch` | the branch the session was spawned under, unsanitized (`feature/x`) |
-| `@orchestra-orchestrator` | reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those two |
+| `@orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
+| `@orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
@@ -127,27 +133,37 @@ reads the tag. Sessions created by earlier versions of these scripts are not rec
 ## Reporting destination
 
 `spawn.sh` and `adopt.sh` resolve the destination automatically:
-1. Explicit `--orchestrator codex:<thread-id>` or `--orchestrator tmux:<session>` (already
-   `beam:<peer>/…`-qualified, it is used exactly as given).
-2. Current `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`), only when this process is not a
+1. Explicit `--orchestrator claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`
+   (already `beam:<peer>/…`-qualified, it is used exactly as given).
+2. Current `CLAUDE_CODE_SESSION_ID`, as `claude:<session-id>`, whenever a Claude session runs the
+   script — inside tmux too, where `$TMUX` may name some other session. It is accepted only when
+   Claude's registry entry for `CLAUDE_PID` (`<config dir>/sessions/<pid>.json`) names that
+   session, live and with an inbox socket; otherwise the script stops. This is how a Claude
+   orchestrator outside tmux (a bare terminal, Claude Desktop) gets an address.
+3. Current `CODEX_THREAD_ID` (or `CODEX_SESSION_ID`), only when this process is not a
    Claude session: a Claude orchestrator ignores inherited Codex IDs.
-3. Current tmux session. Missing identity is an error; do not guess.
+4. Current tmux session. Missing identity is an error; do not guess.
 
 When the player is being spawned or adopted onto a `--machine` other than this one, that
 resolved destination is then qualified with this machine's own peerId (from `beam status --json`,
-run here) into `beam:<peerId>/<destination>`, since a bare `tmux:`/`codex:` target is only
-meaningful on the machine that wrote it.
+run here) into `beam:<peerId>/<destination>`, since a bare `claude:`/`codex:`/`tmux:` target is
+only meaningful on the machine that wrote it.
 
 The destination is written to the player session's `@orchestra-orchestrator` tag at spawn
-and adopt; a player cannot change it and never uses its own Codex ID as parent.
+and adopt; a player cannot change it and never uses its own Codex ID as parent. A local `claude:`
+destination also records this process's Claude config directory (`$CLAUDE_CONFIG_DIR`, else
+`~/.claude`) in `@orchestra-orchestrator-config`, since the player may run with a different one.
 Only known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variables,
 `CODEX_THREAD_ID`, …) are removed from the player's environment; `CLAUDE_CONFIG_DIR`,
 `ANTHROPIC_API_KEY` and `CODEX_HOME` are inherited unchanged.
 
-Player `report.sh` routes `codex:` via `codex queue`, `tmux:` via `ORCHESTRA_SOCKET` — to a Claude
-Code session's inbox socket or a Codex TUI's queue when the pane has one, else as a paste — and
+Player `report.sh` routes `claude:` to that session's inbox socket, found in Claude's registry
+under `@orchestra-orchestrator-config` (else the player's `$CLAUDE_CONFIG_DIR`, else `~/.claude`)
+and never pasted anywhere: a session that is not running, or a stale registry entry, is a delivery
+failure. `codex:` goes via `codex queue`, `tmux:` via `ORCHESTRA_SOCKET` — to a Claude Code
+session's inbox socket or a Codex TUI's queue when the pane has one, else as a paste — and
 `beam:<peer>/…` via `beam msg send`. A Claude session in `bypassPermissions` mode holds inbox
-messages for approval unless its settings set `"crossSessionInbound": "accept"`. It prints `queued for …` (Codex) or `sent to …` (tmux, or a
+messages for approval unless its settings set `"crossSessionInbound": "accept"`. It prints `queued for …` (Codex) or `sent to …` (Claude, tmux, or a
 beam delivery the far side acknowledged) only when the transport accepted the message, and then
 sets `@orchestra-last-report`. A beam send that comes back `stored` — the far machine is offline or
 has not acknowledged it yet, and beam keeps delivering it — is also success and is worded to say so

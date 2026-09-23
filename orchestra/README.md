@@ -120,7 +120,7 @@ Three separate values describe a player:
 | --- | --- | --- |
 | Human-readable label | tmux session name | `shop-feature-search` |
 | Repository and branch identity | `@orchestra-repo` and `@orchestra-branch` session options | `/code/shop` + `feature/search` |
-| Current supervisor | `@orchestra-orchestrator` session option | `tmux:planning` or `codex:<thread-id>` |
+| Current supervisor | `@orchestra-orchestrator` session option | `tmux:planning`, `claude:<session-id>` or `codex:<thread-id>` |
 
 The session name is chosen at creation from the repository directory and branch, with `/`, `.` and `:` replaced by `-`. If any session already has that name, a numeric suffix is added: `shop-feature-search-2`, then `-3`, and so on. Scripts find the player through its tags, so the suffix does not change its identity.
 
@@ -197,8 +197,8 @@ act on a player on the wrong machine.
   peer's players — one listing call per machine, with a MACHINE column (`--json`: a `machine`
   field). With no beam or no peers, the output is unchanged.
 - A player on another machine reports back over beam: its `@orchestra-orchestrator` tag holds
-  `beam:<orchestrator peer id>/tmux:<session>` (or `codex:<thread-id>`) instead of the bare local
-  form.
+  `beam:<orchestrator peer id>/tmux:<session>` (or `claude:<session-id>`, `codex:<thread-id>`)
+  instead of the bare local form.
 
 ### Receiving reports from another machine: `relay.sh`
 
@@ -209,6 +209,11 @@ here has to put it in front of the orchestrator, and that is `relay.sh`:
 skills/orchestrator/scripts/relay.sh            # deliver to the session it was started in
 skills/orchestrator/scripts/relay.sh --allow tmux:planning
 ```
+
+Started by a Claude session, "the session it was started in" is `claude:$CLAUDE_CODE_SESSION_ID`,
+even inside tmux, where `$TMUX` can name a session that is not this one's; otherwise it is the tmux
+session. A `claude:` target is looked up under `relay.sh`'s own `$CLAUDE_CONFIG_DIR` (else
+`~/.claude`).
 
 It subscribes to the `orchestra` topic on the local beam daemon's control socket (through `socat`,
 or an `nc` with `-U`) and delivers each envelope through the same sequence, and the same
@@ -236,7 +241,7 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 - `beam` only if you want players on other machines, plus `socat` or an `nc` with `-U` on the
   orchestrator's machine for `relay.sh`; see [Machines](#machines).
 - `python3` to pre-accept Claude Code's workspace-trust dialog for new worktrees; without it Claude may ask on first launch.
-- OpenBSD `nc` (for `-N -U`) or `socat` to deliver reports to a Claude Code orchestrator's inbox socket; without either, reports are pasted into its pane.
+- OpenBSD `nc` (for `-N -U`) or `socat` to deliver reports to a Claude Code orchestrator's inbox socket; without either, a tmux orchestrator gets them pasted into its pane and a `claude:<session-id>` orchestrator cannot be reached.
 - util-linux `script` for automatic CLI detection during resume.
 
 Gemini, Copilot, and OpenCode can also be launched, but have more limited resume support. The plugin uses each CLI's existing authentication and permissions.
@@ -289,7 +294,8 @@ tmux -u show-options -qv -t '=shop-feature-search:' @orchestra-agent
 | `@orchestra-repo` | Absolute, symlink-resolved path of the main checkout. |
 | `@orchestra-session-type` | `worktree` for every player. Sessions with other types, such as `shell` or `agent`, are outside player management. |
 | `@orchestra-branch` | The branch the session was spawned under, unsanitized (`feature/x`). |
-| `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
+| `@orchestra-orchestrator` | Reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
+| `@orchestra-orchestrator-config` | For a local `claude:` target only: the orchestrator's Claude configuration directory, where `report.sh` finds the session. Written and removed together with `@orchestra-orchestrator`. |
 | `@orchestra-agent` | Harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom`. The launcher records what actually started. |
 | `@orchestra-launching` | `1` only while the placeholder pane exists. |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <outcome>`, the outcome being `delivered` (Codex queue, or beam delivered), `stored` (beam stored), `inbox`, `queue` or `paste`, of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
@@ -302,7 +308,13 @@ The pane receives `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` so the launcher and
 
 The player calls `report.sh KIND "message"`. The script reads `@orchestra-orchestrator` on every call and sends `[player SESSION] KIND: message`, where `SESSION` is the player's tmux session name. `report.sh --orchestrator` prints the target; changing it is the responsibility of the spawn and adoption scripts.
 
-Reports go to either a Codex conversation through `codex queue` or an orchestrator in a tmux pane, reached through `ORCHESTRA_SOCKET` (see [Delivery](#delivery)). An explicit `--orchestrator codex:<thread-id>` or `--orchestrator tmux:<session>` selects the target when spawning or adopting. Otherwise, the scripts detect the orchestrator from the current session. A player's own Codex ID is never used as its parent target.
+Reports go to a Claude Code session addressed by its id, a Codex conversation through `codex queue`, or an orchestrator in a tmux pane, reached through `ORCHESTRA_SOCKET` (see [Delivery](#delivery)). An explicit `--orchestrator claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>` selects the target when spawning or adopting. Otherwise, the scripts detect the orchestrator from the current session, in this order:
+
+1. A Claude session (`CLAUDE_CODE_SESSION_ID`), as `claude:<session-id>`, even inside tmux. The id is checked against Claude's registry entry for `CLAUDE_PID`; a mismatch, or a session without an inbox socket, stops the script. This is the only address a Claude orchestrator outside tmux (a bare terminal, Claude Desktop) has, and it survives resume, compaction and renaming, where a tmux name is a guessable label.
+2. A Codex conversation (`CODEX_THREAD_ID`), unless the caller is a Claude session.
+3. The current tmux session.
+
+A player's own Codex or Claude session ID is never used as its parent target.
 
 Players send four kinds of report:
 
@@ -330,9 +342,11 @@ What each queue carries:
 - **Neither carries a fresh player's first task.** `spawn.sh` hands the task to the CLI as its initial prompt argument. A Codex conversation has no thread id to address until that first turn has started.
 - `--raw`, `--key` and `--type` in `send.sh` are keystrokes for the TUI itself (menus, slash commands) and always go into the pane.
 
-The Claude socket comes from the registry file Claude Code keeps for each live session, `sessions/<pid>.json` under that session's configuration directory, with its recorded start time checked against the process so a recycled pid is never mistaken for it. The Codex thread is the UUID of the rollout file the TUI holds open, `<CODEX_HOME>/sessions/…/rollout-…-<uuid>.jsonl`, skipping subagent threads; `codex queue` runs with that `CODEX_HOME`. Both lookups run only on the machine the scripts run on, so a pane on another machine is pasted. Once the inbox or the queue has been tried, a failure is final and nothing is pasted as well, which could deliver twice.
+The Claude socket comes from the registry file Claude Code keeps for each live session, `sessions/<pid>.json` under that session's configuration directory, with its recorded start time and pid namespace checked against the process so a recycled pid is never mistaken for it. The Codex thread is the UUID of the rollout file the TUI holds open, `<CODEX_HOME>/sessions/…/rollout-…-<uuid>.jsonl`, skipping subagent threads; `codex queue` runs with that `CODEX_HOME`. Both lookups run only on the machine the scripts run on, so a pane on another machine is pasted. Once the inbox or the queue has been tried, a failure is final and nothing is pasted as well, which could deliver twice.
 
-Successful delivery prints `queued for …` (a Codex orchestrator addressed as `codex:`) or `sent to <session> (inbox|queue|paste)`, and records the kind, the timestamp and the outcome — `delivered`, `stored`, `inbox`, `queue` or `paste` — in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
+A `claude:<session-id>` orchestrator has no pane. `report.sh` scans the registry under the orchestrator's configuration directory (`@orchestra-orchestrator-config`, else the player's `$CLAUDE_CONFIG_DIR`, else `~/.claude`) for the live entry with that `sessionId` and posts to its inbox socket; Claude Desktop registers there the same way. No live entry, a stale one, or a refused socket is a delivery failure: nothing is ever pasted for a `claude:` target.
+
+Successful delivery prints `queued for …` (a Codex orchestrator addressed as `codex:`) or `sent to <session|session-id> (inbox|queue|paste)`, and records the kind, the timestamp and the outcome — `delivered`, `stored`, `inbox`, `queue` or `paste` — in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
 
 When the orchestrator is on another machine, delivery has three outcomes rather than two, and the
 middle one is a success:

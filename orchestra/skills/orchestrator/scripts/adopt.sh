@@ -3,7 +3,7 @@
 # invocation into its pane. Without trailing text the player treats it as a handoff and
 # answers with a PROGRESS summary (or repeats DONE); with text, the text becomes its new task.
 #
-# Usage: adopt.sh <session> [--repo PATH] [--orchestrator codex:<thread-id>|tmux:<session>]
+# Usage: adopt.sh <session> [--repo PATH] [--orchestrator claude:<id>|codex:<id>|tmux:<session>]
 #                 [--agent claude|codex|...] [--machine NAME] [<text…>]
 #                 --machine: the beam peer label or peerId the session is on; default
 #                 $ORCHESTRA_MACHINE, else this machine. A remote --repo must be absolute or
@@ -13,7 +13,8 @@
 # <session> is a branch (resolved in this repo, --repo, or uniquely across repos) or an exact
 # tmux session name; only a session tagged as a player (@orchestra-spawner set,
 # @orchestra-session-type worktree) is adopted, whoever created it. The target is written to the
-# session's @orchestra-orchestrator tag, which report.sh reads; the player's own ORCHESTRA_SOCKET
+# session's @orchestra-orchestrator tag (and a Claude session's config dir to
+# @orchestra-orchestrator-config), which report.sh reads; the player's own ORCHESTRA_SOCKET
 # already names this server. Sessions without an @orchestra-agent tag default to Claude.
 #
 # How the invocation reaches the pane: a Codex TUI whose thread is discoverable gets it through
@@ -24,7 +25,7 @@
 # Prints "adopted <session> -> reports to <target> (…) via queue|keys|paste".
 set -eu
 . "$(dirname "$(realpath "$0")")/_lib.sh"
-[ $# -ge 1 ] || { sed -n '2,24p' "$0" >&2; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,25p' "$0" >&2; exit 2; }
 session="$1"; shift; ORCH=""; AGENT=""
 while [ $# -gt 0 ]; do case "$1" in
   --repo) ORCH_REPO="$2"; shift;; --orchestrator) ORCH="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
@@ -51,7 +52,7 @@ tt="$(tmux_target "$target")"
 pane_owned_by_agent "" "$target" || { echo "adopt.sh: no agent is reading $target (a shell owns the pane); nothing changed" >&2; exit 1; }
 [ -n "$AGENT" ] || AGENT="$(tag_get "" "$target" "$TAG_AGENT")"
 case "${AGENT:-claude}" in codex) invocation='$player';; *) invocation="$(claude_player_invocation)";; esac
-tag_set "" "$target" "$TAG_ORCHESTRATOR" "$ORCH" || { echo "adopt.sh: could not set $TAG_ORCHESTRATOR on $target" >&2; exit 1; }
+set_orchestrator "" "$target" "$ORCH" || { echo "adopt.sh: could not set $TAG_ORCHESTRATOR on $target" >&2; exit 1; }
 msg="$invocation${TEXT:+ $TEXT}"
 codex_queue_pane "$msg" && rc=0 || rc=$?
 case "$rc" in

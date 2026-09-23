@@ -30,7 +30,7 @@ PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-orchestrator',
-        '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report']
+        '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -875,7 +875,7 @@ class PortTests(unittest.TestCase):
         self.assert_delivery_failed(x, 'tmux:parent', 'orchestrator session parent is gone', 'DONE', 'gone')
     # A Claude Code orchestrator: the report goes to its inbox socket, found through the session
     # registry file Claude writes for its pid, and never touches the pane.
-    def fake_claude(self, register=True, listen=True, proc_start=None):
+    def fake_claude(self, register=True, listen=True, proc_start=None, config=None, session=UUID, pid_domain=None, register_pid=None):
         import socket, threading
         proc = subprocess.Popen(['bash', '-c', 'exec -a claude sleep 30'], stdin=subprocess.DEVNULL)
         self.addCleanup(proc.wait); self.addCleanup(proc.kill)       # cleanups run last-in first-out
@@ -900,11 +900,21 @@ class PortTests(unittest.TestCase):
         if register:
             stat = Path('/proc/%d/stat' % proc.pid).read_text()
             start = stat.rsplit(') ', 1)[1].split()[19]
-            d = self.base/'claude-config/sessions'; d.mkdir(parents=True, exist_ok=True)
-            (d/('%d.json' % proc.pid)).write_text(json.dumps({'pid': proc.pid, 'sessionId': UUID, 'procStart': proc_start or start,
-                                                               'kind': 'interactive', 'messagingSocketPath': sock_path, 'status': 'idle'}))
-        self.env.update(TEST_PANE_COMMAND='claude', TEST_PANE_PID=str(proc.pid))
+            d = Path(config or self.base/'claude-config')/'sessions'; d.mkdir(parents=True, exist_ok=True)
+            pid = register_pid or proc.pid
+            entry = {'pid': pid, 'sessionId': session, 'procStart': proc_start or start, 'kind': 'interactive', 'entrypoint': 'cli',
+                     'pidDomain': pid_domain or self.pid_domain(), 'messagingSocketPath': sock_path, 'status': 'idle'}
+            if proc_start is False: del entry['procStart']                  # no start time recorded: liveness is all that is left
+            (d/('%d.json' % pid)).write_text(json.dumps(entry))
+        self.env.update(TEST_PANE_COMMAND='claude', TEST_PANE_PID=str(proc.pid)); self.fake_claude_pid = proc.pid
         return received
+    # Claude's pidDomain for a process in this pid namespace on this machine (as 2.1.280 writes it).
+    def pid_domain(self): return 'linux:%s:%s' % (Path('/etc/machine-id').read_text().strip(), os.readlink('/proc/self/ns/pid'))
+    def wait_for(self, received):
+        import time
+        for _ in range(100):
+            if received: break
+            time.sleep(0.05)
     def test_claude_orchestrator_gets_the_report_on_its_inbox_socket(self):
         self.spawn('--agent', 'codex', '--orchestrator', 'tmux:parent'); self.foreign('parent')
         received = self.fake_claude(); self.clear_log()
@@ -940,6 +950,108 @@ class PortTests(unittest.TestCase):
         self.assertIn('relay.sh: delivered to tmux:parent (inbox)', x.stderr)
         self.assertEqual(json.loads(received[0])['message']['content'], '[player far] DONE: over beam')
         self.assertEqual(self.settled(log, 'msg.ack'), ['e9'])
+    # A Claude orchestrator addressed by session id (claude:<sessionId>): no pane is involved. The
+    # session is found in Claude's registry under the ORCHESTRATOR's config dir, recorded beside the
+    # target at spawn, and nothing is ever pasted, whatever goes wrong.
+    SID = '7c0ffee0-1234-4abc-8def-0123456789ab'
+    def spawn_for_claude_session(self):
+        cfg = self.base/'orchestrator-claude-config'; player_cfg = self.env['CLAUDE_CONFIG_DIR']
+        self.env['CLAUDE_CONFIG_DIR'] = str(cfg); self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+self.SID)
+        self.env['CLAUDE_CONFIG_DIR'] = player_cfg                # the player runs with a different config dir
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID)
+        self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        return cfg
+    def test_report_to_a_claude_session_goes_to_its_inbox_by_session_id(self):
+        cfg = self.spawn_for_claude_session()
+        self.fake_claude(config=cfg, session='0199a000-1111-7000-8000-00000000beef')   # another live session: never chosen
+        received = self.fake_claude(config=cfg, session=self.SID); self.clear_log()
+        text = 'one\ntwo "quoted" \\ back $(touch BAD)'
+        x = self.report('DONE', text)
+        self.assertEqual(x.stdout, 'sent to %s (inbox)\n' % self.SID)
+        self.assertRegex(self.last_report(), '^DONE '+STAMP+' inbox$')
+        self.wait_for(received); self.assertEqual(len(received), 1)
+        self.assertEqual(json.loads(received[0]), {'type': 'user', 'message': {'role': 'user', 'content': '[player %s] DONE: %s' % (self.session, text)}})
+        # no pane lookup of any kind: only the player's own tags are read and written
+        commands = {(d[2] if d[0] == '-S' else d[0]) for d in ([a for a in c if a != '-u'] for c in self.tmux_calls())}
+        self.assertEqual(sorted(commands), ['set-option', 'show-options'])
+        self.assertFalse((self.wt/'BAD').exists())
+    def test_claude_session_config_dir_comes_from_the_tag_then_the_environment_then_home(self):
+        cfg = self.spawn_for_claude_session(); self.fake_claude(config=cfg, session=self.SID)
+        self.drop_tag('@orchestra-orchestrator-config')
+        x = self.report('PROGRESS', 'player config dir', ok=False)        # the player's own dir has no such session
+        self.assert_delivery_failed(x, 'claude:'+self.SID, 'no live Claude session %s is registered in %s/sessions' % (self.SID, self.env['CLAUDE_CONFIG_DIR']), 'PROGRESS', 'player config dir')
+        self.assertEqual(self.report('PROGRESS', 'env', env=self.player_env(CLAUDE_CONFIG_DIR=str(cfg))).stdout, 'sent to %s (inbox)\n' % self.SID)
+        import shutil; shutil.rmtree(cfg/'sessions')                                  # the fake inbox takes one connection
+        home = self.base/'home'; home.mkdir(); (home/'.claude').symlink_to(cfg); self.fake_claude(config=cfg, session=self.SID)
+        env = self.player_env(HOME=str(home)); del env['CLAUDE_CONFIG_DIR']
+        self.assertEqual(self.report('PROGRESS', 'home', env=env).stdout, 'sent to %s (inbox)\n' % self.SID)
+    def test_claude_session_target_fails_closed_and_never_pastes(self):
+        import shutil
+        cfg = self.spawn_for_claude_session(); missing = 'no live Claude session %s is registered in %s/sessions' % (self.SID, cfg)
+        for case, kwargs, reason in (('not registered', {'register': False}, missing),
+                                     ('recycled pid', {'proc_start': '1'}, missing),
+                                     ('dead pid, live socket', {'register_pid': 2147483646, 'proc_start': False}, missing),
+                                     ('another pid namespace', {'pid_domain': 'linux:00000000000000000000000000000000:pid:[1]'}, missing),
+                                     ('socket refuses', {'listen': False}, 'claude inbox socket refused the connection')):
+            with self.subTest(case):
+                shutil.rmtree(cfg/'sessions', ignore_errors=True)
+                received = self.fake_claude(config=cfg, session=self.SID, **kwargs); self.clear_log(); before = self.state()
+                x = self.report('DONE', case, ok=False)
+                self.assert_delivery_failed(x, 'claude:'+self.SID, reason, 'DONE', case)
+                for cmd in ('load-buffer', 'paste-buffer', 'send-keys', 'display-message'): self.assertNotIn(cmd, self.tmux_log())
+                self.assertEqual(self.state(), before); self.assertEqual(received, [])
+    def own_claude_session(self, session=None):
+        # The environment a Claude Code session gives the commands it runs: its session id, its pid
+        # (registered under its config dir) and CLAUDECODE; here also a tmux pane that is not its own.
+        cfg = self.base/'orchestrator-claude-config'
+        self.fake_claude(config=cfg, session=session or self.SID)
+        self.env.update(CLAUDECODE='1', CLAUDE_CODE_SESSION_ID=self.SID, CLAUDE_PID=str(self.fake_claude_pid), CLAUDE_CONFIG_DIR=str(cfg))
+        return cfg
+    def test_claude_orchestrator_is_detected_by_its_verified_session_id(self):
+        script = '. "$1"; resolve_orchestrator "${2:-}"'
+        def resolve(explicit=''): return self.run_cmd(['bash', '-c', script, 'test', str(ROOT/'player/scripts/_routing.sh'), explicit], ok=False)
+        self.own_claude_session(); self.env.update(TMUX='/tmp/someone-elses,1,1', TEST_TMUX_SESSION='kirby-shell-2')
+        self.assertEqual(resolve().stdout, 'claude:'+self.SID)                           # wins over tmux and inherited Codex IDs
+        self.assertEqual(resolve('tmux:parent').stdout, 'tmux:parent')                    # an explicit target still wins
+        self.own_claude_session(session='0199a000-1111-7000-8000-00000000beef')          # CLAUDE_PID's registry entry is another session
+        x = resolve(); self.assertEqual(x.returncode, 2); self.assertEqual(x.stdout, '')
+        self.assertIn('CLAUDE_CODE_SESSION_ID %s is not the session registered' % self.SID, x.stderr)
+        self.env['CLAUDE_PID'] = '2147483646'; x = resolve(); self.assertEqual(x.returncode, 2); self.assertIn('pass --orchestrator', x.stderr)
+    def test_spawn_and_adopt_from_a_claude_orchestrator_record_its_session_and_config(self):
+        cfg = self.own_claude_session(); self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        e = self.calls()[-1]['env']; self.assertIsNone(e['CLAUDECODE'])                 # nothing of the orchestrator's session reaches the player
+        self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p')
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'tmux:p'); self.assertIsNone(self.tag('@orchestra-orchestrator-config'))
+        self.orch('adopt.sh', self.session)
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        self.env['CLAUDE_CODE_SESSION_ID'] = '0199a000-1111-7000-8000-00000000beef'     # unverifiable: nothing is changed or created
+        x = self.orch('adopt.sh', self.session, ok=False); self.assertEqual(x.returncode, 2)
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID)
+        x = self.spawn('--agent', 'codex', branch='feature/other', ok=False); self.assertEqual(x.returncode, 2)
+        self.assertEqual(sorted(self.state()), [self.session])
+    def test_relay_delivers_to_a_claude_session_by_id(self):
+        received = self.fake_claude(session=self.SID)                                    # under the relay's own config dir
+        x, log = self.run_relay('--allow', 'claude:'+self.SID, ok=False,
+                                envelopes=[self.envelope('e10', 'target: claude:%s\n\n[player far] DONE: to a session' % self.SID)])
+        self.assertIn('relay.sh: delivered to claude:%s (inbox)' % self.SID, x.stderr)
+        self.wait_for(received); self.assertEqual(json.loads(received[0])['message']['content'], '[player far] DONE: to a session')
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e10'])
+        x = self.orch('relay.sh', '--allow', 'claude:not-a-uuid', cwd=self.base, ok=False); self.assertEqual(x.returncode, 2)
+    def test_relay_default_allowlist_is_the_claude_session_it_runs_in(self):
+        # Inside Claude, $TMUX may name someone else's session; the relay's own session id wins.
+        received = self.fake_claude(session=self.SID); self.foreign('parent', sock='/tmp/relay-sock')
+        env = dict(self.env, CLAUDE_CODE_SESSION_ID=self.SID, TMUX='/tmp/relay-sock,0,0', TEST_TMUX_SESSION='parent')
+        x, log = self.run_relay(env=env, ok=False, envelopes=[self.envelope('e11', 'target: tmux:parent\n\nnot mine'),
+                                                              self.envelope('e12', 'target: claude:%s\n\nmine' % self.SID)])
+        self.assertIn('may deliver to: claude:%s on' % self.SID, x.stderr)
+        self.assertEqual(self.settled(log, 'msg.defer'), ['e11']); self.assertEqual(self.settled(log, 'msg.ack'), ['e12'])
+    def test_report_beam_target_carries_a_claude_session(self):
+        self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK); self.env['TEST_BEAM_OUTCOME'] = 'delivered'
+        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'beam:%s/claude:%s' % (PEER, self.SID)])
+        self.assertEqual(self.report('DONE', 'far').stdout, 'sent to %s\n' % PEER)
+        self.assertEqual(self.beam_sent()[-1]['payload'], 'target: claude:%s\n\n[player %s] DONE: far' % (self.SID, self.session))
     def test_send_to_a_claude_player_goes_to_its_inbox(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude')
         received = self.fake_claude(); self.clear_log()
@@ -1205,10 +1317,11 @@ class PortTests(unittest.TestCase):
         self.assertEqual(kind, 'DONE'); self.assertRegex(ts, r'^'+STAMP+r'$')
     def test_normalize_target_beam_qualified(self):
         def norm(t): return self.run_cmd(['bash', '-c', '. "$0"; normalize_target "$1"', str(ROOT/'player/scripts/_routing.sh'), t], ok=False)
-        for good in ('beam:%s/tmux:controller' % PEER, 'beam:%s/codex:%s' % (PEER, ID)):
+        for good in ('beam:%s/tmux:controller' % PEER, 'beam:%s/codex:%s' % (PEER, ID), 'claude:'+ID, 'beam:%s/claude:%s' % (PEER, ID)):
             x = norm(good); self.assertEqual(x.returncode, 0, good); self.assertEqual(x.stdout, good)
         for bad in ('beam:/tmux:controller', 'beam:%s' % PEER, 'beam:%s/ssh:host' % PEER,
-                    'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'beam:%s/tmux:controller' % PEER.upper(), 'beam:%s/tmux:controller' % PEER[:16], 'ssh:host'):
+                    'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'beam:%s/tmux:controller' % PEER.upper(), 'beam:%s/tmux:controller' % PEER[:16], 'ssh:host',
+                    'claude:', 'claude:not-a-uuid', 'claude:%s/x' % ID, 'beam:%s/claude:nope' % PEER):
             x = norm(bad); self.assertNotEqual(x.returncode, 0, bad)
     def envelope(self, id, payload, frm='p', encoding='utf8'):
         return {'id': id, 'from': frm, 'to': PEER, 'seq': 1, 'topic': 'orchestra', 'payload': payload, 'encoding': encoding, 'createdAt': 0}
