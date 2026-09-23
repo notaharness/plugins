@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Send a player a message — answer a question, add a follow-up, nudge. Text is prefixed
-# "[orchestrator] " so the player knows it is not the user speaking. A Claude Code player gets it
-# on its inbox socket, queued like any cross-session message and never typed over its prompt;
-# any other player gets it pasted and submitted. --raw sends text verbatim as a paste (e.g. a menu
-# choice like "1" or "y"), --key a keypress and --type literal keystrokes, always into the pane.
+# "[orchestrator] " so the player knows it is not the user speaking. It is queued, never typed
+# over the player's prompt, where the player's agent has a queue: a Claude Code player's inbox
+# socket, or `codex queue` for a Codex player whose thread is discoverable; any other player, or
+# one on another machine, gets it pasted and submitted (deliver_to_pane in _routing.sh has the
+# rules). --raw sends text verbatim as a paste (a menu choice like "1" or "y"), --key a keypress
+# and --type literal keystrokes, always into the pane: a menu or a slash command is for the TUI.
 #
 # Usage: send.sh <session> [--repo <path>] [--machine NAME] <text…>
 #        send.sh <session> [--repo <path>] [--machine NAME] --raw <text…>
@@ -15,14 +17,14 @@
 # The session is a branch (resolved in this repo, --repo, or uniquely across repos) or an exact
 # tmux session name of a tagged player; never a prefix, never a session without the tags. Long
 # text is fine: it is pasted from a buffer, not passed on the tmux command line. Prints
-# "sent to <session> (inbox|paste)".
+# "sent to <session> (inbox|queue|paste)".
 . "$(dirname "$(realpath "$0")")/_lib.sh"
-[ $# -ge 2 ] || { sed -n '2,18p' "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,20p' "$0" >&2; exit 2; }
 session="$1"; shift
 while [ "${1:-}" = "--repo" ] || [ "${1:-}" = "--machine" ]; do
   case "$1" in --repo) ORCH_REPO="$2";; --machine) ORCH_MACHINE="$2";; esac; shift 2
 done
-[ $# -ge 1 ] || { sed -n '2,18p' "$0" >&2; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,20p' "$0" >&2; exit 2; }
 require_valid_repo_for_machine || exit 2
 # Which server this machine's sessions are on, resolved once so every tmux call below
 # addresses the one spawn.sh created the session on (machine_socket, _routing.sh); a no-op,

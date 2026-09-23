@@ -111,7 +111,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-orchestrator` | reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those two |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 
 The first four tags are a session's identity, written once when it is created; the name is
 only a label. The pane environment carries `ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET`
@@ -142,9 +142,9 @@ Only known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variabl
 `ANTHROPIC_API_KEY` and `CODEX_HOME` are inherited unchanged.
 
 Player `report.sh` routes `codex:` via `codex queue`, `tmux:` via `ORCHESTRA_SOCKET` — to a Claude
-Code session's inbox socket when it has one, else as a paste into the pane — and `beam:<peer>/…`
-via `beam msg send`. A Claude orchestrator in `bypassPermissions` mode holds these messages for
-approval unless its settings set `"crossSessionInbound": "accept"`. It prints `queued for …` (Codex) or `sent to …` (tmux, or a
+Code session's inbox socket or a Codex TUI's queue when the pane has one, else as a paste — and
+`beam:<peer>/…` via `beam msg send`. A Claude session in `bypassPermissions` mode holds inbox
+messages for approval unless its settings set `"crossSessionInbound": "accept"`. It prints `queued for …` (Codex) or `sent to …` (tmux, or a
 beam delivery the far side acknowledged) only when the transport accepted the message, and then
 sets `@orchestra-last-report`. A beam send that comes back `stored` — the far machine is offline or
 has not acknowledged it yet, and beam keeps delivering it — is also success and is worded to say so
@@ -205,11 +205,14 @@ the original choice must be guaranteed. Do not silently substitute a model.
   current or `--repo` repo (`--json` gives `session`/`name`, `repo`, `branch`, `agent`,
   `orchestrator`, `last_report`). `--sample 4` compares pane text; timers can still look busy.
   `screen.sh SESSION [--history 200]` gives context; a dead pane shows its last output by default.
-- `send.sh SESSION TEXT` sends an orchestrator-prefixed message. `--raw` is for menus;
-  `--key Escape` sends a key. Inspect the pane before sending.
+- `send.sh SESSION TEXT` sends an orchestrator-prefixed message, queued on a Claude player's
+  inbox or a Codex player's thread when it has one, else pasted. `--raw` is for menus;
+  `--key Escape` sends a key. Inspect the pane before sending. Claude Code never runs a slash
+  command or skill invocation posted to its inbox, so invocations are always typed; do not
+  send one as text.
 - Handoff: `adopt.sh SESSION [--orchestrator T] [--agent codex]` sets the target tag of an
   idle player (agent at its prompt; dead panes and bare shells are refused) and types the
-  player invocation. Without text expect a PROGRESS summary or a repeated DONE;
+  player invocation (queued instead for a Codex player whose thread is discoverable). Without text expect a PROGRESS summary or a repeated DONE;
   `adopt.sh SESSION "new task text"` gives it a new assignment instead. Sessions without
   an `@orchestra-agent` tag default to Claude; use `--agent codex` for a Codex player.
 - Continuation: `spawn.sh --repo PATH --branch feature/name --resume` restarts a dead or

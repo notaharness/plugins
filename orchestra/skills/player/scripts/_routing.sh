@@ -430,6 +430,51 @@ claude_inbox_post() {
   else printf '%s\n' "$frame" | socat - "UNIX-CONNECT:$1" >/dev/null 2>&1; fi
 }
 
+# --- Codex's queue for a running TUI -----------------------------------------------------------
+# `codex queue --thread <id> --message <text>` hands a message to a running Codex conversation as
+# its next turn, and a `$skill` mention in it loads that skill as if typed. The thread id is not in
+# the pane, the process's arguments or its environment; it is the UUID in the name of the rollout
+# file the TUI holds open, <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl. A TUI also
+# holds its subagents' rollouts (a guardian review, say), whose session_meta line names a
+# parent_thread_id; those are skipped. Codex writes the rollout only once the conversation's first
+# turn starts, so a TUI that has not had one has no thread to address yet.
+# open_files <pid>: the paths a process holds open (/proc, else lsof).
+open_files() {
+  if [ -d "/proc/$1/fd" ]; then
+    local l; for l in "/proc/$1/fd"/*; do readlink "$l" 2>/dev/null; done
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -Fn -p "$1" 2>/dev/null | sed -n 's/^n//p'
+  fi
+}
+process_tree() { local c; printf '%s\n' "$1"; for c in $(pgrep -P "$1" 2>/dev/null); do process_tree "$c"; done; }
+# codex_pane_thread <pid>: "<thread id> <CODEX_HOME>" for the Codex TUI running as <pid> or below
+# it; fails when it holds no top-level rollout, or more than one.
+codex_pane_thread() {
+  local p f first id found=""
+  for p in $(process_tree "$1"); do
+    while IFS= read -r f; do
+      case "$f" in */sessions/*/rollout-*.jsonl) ;; *) continue;; esac
+      first="$(head -n1 "$f" 2>/dev/null)" || continue
+      case "$first" in *'"session_meta"'*) ;; *) continue;; esac
+      case "$first" in *'"parent_thread_id"'*) continue;; esac
+      id="$(json_string_field "$first" id)" || continue
+      [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || continue
+      case "$found" in "") found="$id ${f%%/sessions/*}";; "$id "*) ;; *) return 1;; esac
+    done < <(open_files "$p")
+  done
+  [ -n "$found" ] && printf '%s' "$found"
+}
+# codex_queue_pane <text>: queue <text> for the Codex TUI pane_owned_by_agent found (its own
+# CODEX_HOME, which need not be this process's). 0 queued; 1 codex refused it (DELIVER_REASON set:
+# final, since the message may have been queued); 2 no thread to address, so the caller pastes.
+codex_queue_pane() {
+  local thread
+  [ "$PANE_AGENT" = codex ] && thread="$(codex_pane_thread "$PANE_AGENT_PID")" || return 2
+  CODEX_HOME="${thread#* }" codex queue --thread "${thread%% *}" --message "$1" >/dev/null && return 0
+  DELIVER_REASON="codex queue refused the message for thread ${thread%% *}; inspect before retrying to avoid duplicates"
+  return 1
+}
+
 # --- Shared local delivery ---------------------------------------------------------------------
 # paste_into_pane <socket> <session> <text>: one bracketed paste (-p keeps embedded newlines from
 # submitting early), then Enter. The text goes through load-buffer on stdin because tmux rejects
@@ -447,20 +492,27 @@ paste_into_pane() {
     { DELIVER_REASON="tmux could not submit the message in $session; the paste succeeded, inspect before retrying"; return 1; }
 }
 # deliver_to_pane <socket> <session> <text>: the message to the agent in that pane, after
-# pane_owned_by_agent has run for it: a Claude Code session with a live inbox socket gets it there
-# as a queued message; anything else — Codex, other agents, an older Claude, a pane on another
-# machine — gets the paste. Once a socket is found a failure is final: falling back to a paste
-# could deliver twice. Sets DELIVER_ROUTE (inbox or paste), or DELIVER_REASON on failure.
-# Only text meant as a message goes this way: Claude Code never runs a slash command or skill
-# invocation that arrives on its inbox, so invocations are always typed or pasted.
+# pane_owned_by_agent has run for it, by the first route that pane can take:
+#   inbox  Claude Code with a live inbox socket (claude_inbox_socket): a queued cross-session
+#          message. It carries text only — Claude never runs a slash command or skill invocation
+#          that arrives this way, so an invocation (spawn.sh, adopt.sh) is never sent through it.
+#   queue  a Codex TUI whose thread is discoverable (codex_pane_thread): `codex queue`, which
+#          carries text and `$skill` mentions alike.
+#   paste  anything else — another agent, an older Claude, a Codex TUI before its first turn, a
+#          pane on another machine (the agent lookup only runs locally), no nc/socat: one bracketed
+#          paste and Enter.
+# Once the inbox or the queue has been tried, a failure is final: falling back to a paste could
+# deliver twice. Sets DELIVER_ROUTE (inbox, queue or paste), or DELIVER_REASON on failure.
 DELIVER_REASON=""; DELIVER_ROUTE=""
 deliver_to_pane() {
-  local sock="$1" session="$2" msg="$3" inbox
+  local sock="$1" session="$2" msg="$3" inbox rc
   DELIVER_ROUTE=""
   if [ "$PANE_AGENT" = claude ] && claude_inbox_client && inbox="$(claude_inbox_socket "$PANE_AGENT_PID")"; then
     claude_inbox_post "$inbox" "$msg" || { DELIVER_REASON="claude inbox socket refused the connection"; return 1; }
     DELIVER_ROUTE=inbox; return 0
   fi
+  codex_queue_pane "$msg" && rc=0 || rc=$?
+  case "$rc" in 0) DELIVER_ROUTE=queue; return 0;; 1) return 1;; esac
   paste_into_pane "$sock" "$session" "$msg" || return 1
   DELIVER_ROUTE=paste
 }

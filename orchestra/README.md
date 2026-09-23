@@ -285,7 +285,7 @@ tmux -u show-options -qv -t '=shop-feature-search:' @orchestra-agent
 | `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
 | `@orchestra-agent` | Harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom`. The launcher records what actually started. |
 | `@orchestra-launching` | `1` only while the placeholder pane exists. |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <outcome>`, the outcome being `delivered` (Codex queue, or beam delivered), `stored` (beam stored), `inbox` or `paste`, of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <outcome>`, the outcome being `delivered` (Codex queue, or beam delivered), `stored` (beam stored), `inbox`, `queue` or `paste`, of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
 
 The first four tags record the session's origin and are written at creation. Spawning or adopting a player sets its supervisor independently.
 
@@ -308,16 +308,24 @@ Players send four kinds of report:
 
 ### Delivery
 
-A report for a tmux orchestrator takes one of two routes, decided on every call from what is running in that pane:
+A message for an agent in a tmux pane — a report for a tmux orchestrator (`report.sh`, `relay.sh`), or a message and an adoption for a player (`send.sh`, `adopt.sh`) — takes the first route that pane can take, decided on every call from what is running in it:
 
-| Route | When | What the orchestrator sees |
+| Route | When | What the agent sees |
 | --- | --- | --- |
-| Inbox | Claude Code 2.1.224 or later is at the terminal, and `nc` (with `-N -U`) or `socat` is installed | The report arrives on the session's [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket) as a cross-session message: read between tool calls while it works, a new turn while it is idle. Nothing is typed into its prompt box. |
-| Paste | Any other agent, an older Claude Code, or a Claude session whose socket cannot be found | The report is pasted into the pane as one bracketed paste and submitted with Enter. |
+| Inbox | Claude Code 2.1.224 or later, with `nc` (with `-N -U`) or `socat` installed | The text arrives on the session's [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket) as a cross-session message: read between tool calls while it works, a new turn while it is idle. Nothing is typed into its prompt box. |
+| Queue | A Codex TUI that has had its first turn | `codex queue --thread <id>` hands it over as the conversation's next turn. |
+| Paste | Anything else: another agent, an older Claude Code, a Codex TUI before its first turn, a pane on another machine | One bracketed paste, submitted with Enter. |
 
-`report.sh` finds the socket through the registry file Claude Code keeps for each live session, `sessions/<pid>.json` under that session's configuration directory, and checks the recorded start time against the process so a recycled pid is never mistaken for it. Once a socket is found, a refused connection is a delivery failure, not a reason to paste as well, which could deliver the report twice.
+What each queue carries:
 
-Successful delivery prints `queued for …` (Codex) or `sent to <session> (inbox)` / `sent to <session> (paste)`, and records the kind, the timestamp and the outcome — `delivered`, `stored`, `inbox` or `paste` — in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
+- **Claude's inbox carries text only.** Claude Code never runs a slash command or skill invocation that arrives there; it reaches the model as plain text from "another session". So `adopt.sh` always types `/orchestra:player …` into a Claude pane, and only `send.sh`'s `[orchestrator] …` messages and reports use the inbox.
+- **Codex's queue carries skill mentions too.** A queued `$player …` loads the skill as a typed one does, so `adopt.sh` queues it for a Codex player.
+- **Neither carries a fresh player's first task.** `spawn.sh` hands the task to the CLI as its initial prompt argument. A Codex conversation has no thread id to address until that first turn has started.
+- `--raw`, `--key` and `--type` in `send.sh` are keystrokes for the TUI itself (menus, slash commands) and always go into the pane.
+
+The Claude socket comes from the registry file Claude Code keeps for each live session, `sessions/<pid>.json` under that session's configuration directory, with its recorded start time checked against the process so a recycled pid is never mistaken for it. The Codex thread is the UUID of the rollout file the TUI holds open, `<CODEX_HOME>/sessions/…/rollout-…-<uuid>.jsonl`, skipping subagent threads; `codex queue` runs with that `CODEX_HOME`. Both lookups run only on the machine the scripts run on, so a pane on another machine is pasted. Once the inbox or the queue has been tried, a failure is final and nothing is pasted as well, which could deliver twice.
+
+Successful delivery prints `queued for …` (a Codex orchestrator addressed as `codex:`) or `sent to <session> (inbox|queue|paste)`, and records the kind, the timestamp and the outcome — `delivered`, `stored`, `inbox`, `queue` or `paste` — in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
 
 When the orchestrator is on another machine, delivery has three outcomes rather than two, and the
 middle one is a success:

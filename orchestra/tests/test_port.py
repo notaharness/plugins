@@ -933,6 +933,61 @@ class PortTests(unittest.TestCase):
                 x = self.orch('send.sh', self.session, 'nudge')
                 self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session); self.assertIn('paste-buffer', self.tmux_log())
                 self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] nudge')
+    # A Codex TUI: its thread id is the UUID of the rollout file it holds open; a subagent's
+    # rollout (parent_thread_id set) is open too and must not be mistaken for it.
+    THREAD = '01a0ce78-3bf1-7152-9fd0-e460736488f0'
+    def fake_codex(self, rollout=True):
+        home = self.base/'player-codex-home'; d = home/'sessions/2026/09/23'; d.mkdir(parents=True, exist_ok=True)
+        main = d/('rollout-2026-09-23T13-33-01-%s.jsonl' % self.THREAD)
+        guardian = d/'rollout-2026-09-23T13-33-01-01a0ce78-4444-7000-8000-000000000001.jsonl'
+        meta = lambda i, extra: json.dumps({'timestamp': 't', 'type': 'session_meta', 'payload': dict({'session_id': self.THREAD, 'id': i, 'cwd': str(self.wt)}, **extra)})
+        main.write_text(meta(self.THREAD, {'source': 'cli'})+'\n')
+        guardian.write_text(meta('01a0ce78-4444-7000-8000-000000000001', {'parent_thread_id': self.THREAD})+'\n')
+        files = [str(guardian), str(main)] if rollout else ['/dev/null', '/dev/null']
+        proc = subprocess.Popen(['bash', '-c', 'exec 3<"$0" 4<"$1"; exec -a codex sleep 30', *files], stdin=subprocess.DEVNULL)
+        self.addCleanup(proc.wait); self.addCleanup(proc.kill)
+        import time
+        for _ in range(100):
+            if Path('/proc/%d/cmdline' % proc.pid).read_bytes().split(b'\0')[0] == b'codex': break
+            time.sleep(0.02)
+        self.env.update(TEST_PANE_COMMAND='codex', TEST_PANE_PID=str(proc.pid))
+        return home
+    def test_send_and_adopt_queue_to_a_codex_player_by_its_thread(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        home = self.fake_codex(); self.clear_log(); n = len(self.calls())
+        x = self.orch('send.sh', self.session, 'try the other flag')
+        self.assertEqual(x.stdout, 'sent to %s (queue)\n' % self.session)
+        c = self.calls()[-1]
+        self.assertEqual(c['args'], ['queue', '--thread', self.THREAD, '--message', '[orchestrator] try the other flag'])
+        self.assertEqual(c['env']['CODEX_HOME'], str(home))                 # the TUI's own CODEX_HOME, from the rollout path
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:new-parent', 'Next', 'task')
+        self.assertTrue(x.stdout.rstrip().endswith('via queue'), x.stdout)
+        self.assertEqual(self.calls()[-1]['args'], ['queue', '--thread', self.THREAD, '--message', '$player Next task'])
+        self.assertEqual(len(self.calls()), n+2)
+        for cmd in ('load-buffer', 'paste-buffer', 'send-keys'): self.assertNotIn(cmd, self.tmux_log())
+    def test_report_to_a_codex_orchestrator_in_tmux_queues(self):
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        self.fake_codex(); self.clear_log()
+        x = self.report('DONE', 'queued to a codex tui')
+        self.assertEqual(x.stdout, 'sent to parent (queue)\n'); self.assertRegex(self.last_report(), ' queue$')
+        self.assertEqual(self.calls()[-1]['args'], ['queue', '--thread', self.THREAD, '--message', '[player %s] DONE: queued to a codex tui' % self.session])
+    def test_codex_without_a_thread_is_pasted_and_a_refused_queue_is_final(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.fake_codex(rollout=False); self.clear_log(); n = len(self.calls())       # before its first turn: no rollout
+        x = self.orch('send.sh', self.session, 'hello')
+        self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session); self.assertEqual(len(self.calls()), n)
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p')
+        self.assertTrue(x.stdout.rstrip().endswith('via keys'), x.stdout); self.assertIn('"-l", "$player"]', self.tmux_log())
+        self.fake_codex(); self.env['TEST_CODEX_EXIT'] = '1'; self.clear_log()
+        x = self.orch('send.sh', self.session, 'refused', ok=False)
+        self.assertEqual(x.returncode, 1); self.assertIn('codex queue refused the message for thread '+self.THREAD, x.stderr)
+        self.assertNotIn('paste-buffer', self.tmux_log())
+    def test_adopt_types_the_invocation_for_claude_even_with_a_live_inbox(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude')
+        received = self.fake_claude(); self.clear_log()
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p', 'New', 'task')
+        self.assertTrue(x.stdout.rstrip().endswith('via keys'), x.stdout)
+        self.assertIn('"-l", "%s New task"]' % INV, self.tmux_log()); self.assertEqual(received, [])
     def test_failed_paste_leaves_no_buffer(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
         self.env['TEST_PASTE_FAIL'] = '1'

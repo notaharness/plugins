@@ -15,9 +15,16 @@
 # @orchestra-session-type worktree) is adopted, whoever created it. The target is written to the
 # session's @orchestra-orchestrator tag, which report.sh reads; the player's own ORCHESTRA_SOCKET
 # already names this server. Sessions without an @orchestra-agent tag default to Claude.
+#
+# How the invocation reaches the pane: a Codex TUI whose thread is discoverable gets it through
+# `codex queue`, which loads a `$player` mention like a typed one (see deliver_to_pane in
+# _routing.sh for the rules). Everything else gets it typed — single-line — or pasted, multi-line,
+# at the prompt. That includes Claude Code even when its inbox socket is live: a skill invocation
+# posted there arrives as plain text and never runs, so /orchestra:player must be typed.
+# Prints "adopted <session> -> reports to <target> (…) via queue|keys|paste".
 set -eu
 . "$(dirname "$(realpath "$0")")/_lib.sh"
-[ $# -ge 1 ] || { sed -n '2,17p' "$0" >&2; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,24p' "$0" >&2; exit 2; }
 session="$1"; shift; ORCH=""; AGENT=""
 while [ $# -gt 0 ]; do case "$1" in
   --repo) ORCH_REPO="$2"; shift;; --orchestrator) ORCH="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
@@ -46,10 +53,15 @@ pane_owned_by_agent "" "$target" || { echo "adopt.sh: no agent is reading $targe
 case "${AGENT:-claude}" in codex) invocation='$player';; *) invocation="$(claude_player_invocation)";; esac
 tag_set "" "$target" "$TAG_ORCHESTRATOR" "$ORCH" || { echo "adopt.sh: could not set $TAG_ORCHESTRATOR on $target" >&2; exit 1; }
 msg="$invocation${TEXT:+ $TEXT}"
-# A slash/dollar invocation must start the input line. Single-line text is typed literally;
-# multi-line text is pasted as one bracketed block so embedded newlines do not submit early.
-case "$msg" in
-  *$'\n'*) paste_into "$target" "$msg";;
-  *) tmux_on "" send-keys -t "$tt" -l "$msg"; sleep 0.3; tmux_on "" send-keys -t "$tt" Enter;;
+codex_queue_pane "$msg" && rc=0 || rc=$?
+case "$rc" in
+  0) route=queue;;
+  1) echo "adopt.sh: $DELIVER_REASON (the target tag is already set)" >&2; exit 1;;
+  # A slash/dollar invocation must start the input line. Single-line text is typed literally;
+  # multi-line text is pasted as one bracketed block so embedded newlines do not submit early.
+  *) case "$msg" in
+       *$'\n'*) paste_into "$target" "$msg"; route=paste;;
+       *) tmux_on "" send-keys -t "$tt" -l "$msg"; sleep 0.3; tmux_on "" send-keys -t "$tt" Enter; route=keys;;
+     esac;;
 esac
-echo "adopted $target -> reports to $ORCH${TEXT:+ (new task sent)}${TEXT:- (expect a PROGRESS handoff report)}"
+echo "adopted $target -> reports to $ORCH${TEXT:+ (new task sent)}${TEXT:- (expect a PROGRESS handoff report)} via $route"

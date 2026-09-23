@@ -69,9 +69,9 @@ with one DONE or BLOCKED report. Handoffs may legitimately resend the terminal r
 `report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a tmux orchestrator, or a
 beam delivery the far machine acknowledged) only when the transport accepted the message. A tmux
 orchestrator running Claude Code receives the report on its inbox socket, as a message it reads
-between tool calls, and `report.sh` prints `sent to <session> (inbox)`; any other orchestrator
-gets it pasted into its pane, `sent to <session> (paste)`. It then records
-`<KIND> <timestamp> <delivered|stored|inbox|paste>` in your session's `@orchestra-last-report`
+between tool calls, and `report.sh` prints `sent to <session> (inbox)`; a Codex TUI gets it through
+`codex queue` (`(queue)`); any other orchestrator gets it pasted into its pane (`(paste)`). It then
+records `<KIND> <timestamp> <delivered|stored|inbox|queue|paste>` in your session's `@orchestra-last-report`
 tag — a third field beyond the kind and timestamp.
 
 When your orchestrator is on another machine and beam cannot hand the report over right away —
