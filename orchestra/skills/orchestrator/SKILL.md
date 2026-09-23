@@ -60,6 +60,9 @@ which would create or act on a player on the wrong machine.
 
 - `--repo` on a remote machine must be an absolute path or start with `~/`; a relative path is
   refused rather than resolved against this machine's working directory.
+- The plugin must be installed on the remote machine at the same `$HOME`-relative path as here
+  (Claude Code's plugin cache on both): the player's launcher runs in the pane, there. A spawn
+  stops before creating anything when it is missing and says what to install.
 - `sessions.sh --all` with no `--machine` lists the local machine plus, when beam resolves and
   peers are registered, every peer's players too — one listing call per machine. Rows then carry
   a MACHINE column (`--json`: a `"machine"` field); with no beam or no peers this is unchanged.

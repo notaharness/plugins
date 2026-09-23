@@ -184,6 +184,10 @@ act on a player on the wrong machine.
 
 - `--repo` on a remote machine must be absolute or start with `~/`. A relative path is refused
   rather than resolved against this machine's working directory.
+- The plugin must be installed on the remote machine too, at the same path relative to `$HOME`
+  as here (Claude Code's plugin cache, `~/.claude/plugins/cache/...`, on both). The player's
+  launcher runs in the pane, on that machine, and a spawn stops before creating anything when
+  it is not there.
 - Session names are unique only *per machine*. Once more than one machine is registered, a bare
   name no longer identifies one player and `--machine` may be needed alongside it.
 - Which tmux server a machine keeps its players on is asked of that machine, once per command,
