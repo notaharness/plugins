@@ -48,8 +48,8 @@ them. Read repo `AGENTS.md`, `CLAUDE.md`, and applicable parent docs.
 ## Machines
 
 Every script above also accepts `--machine NAME`, defaulting to `$ORCHESTRA_MACHINE`, else this
-machine. `NAME` is a beam peer label or peerId — beam is n10's pairing-and-streams tool, the
-seam through which a player can run on a different machine than its orchestrator; the literal
+machine. `NAME` is a beam peer label, alias or peerId — beam pairs machines and carries streams
+and messages between them, the seam through which a player can run on a different machine than its orchestrator; the literal
 `local`, or omitting the flag, means this machine — with no beam installed, nothing here changes:
 same commands, same tmux and git argv, same output. Naming a machine runs the same tmux/git
 commands there instead,

@@ -170,9 +170,9 @@ Session options disappear when the tmux session ends. `kill.sh` stops the sessio
 ## Machines
 
 Every orchestrator script accepts `--machine NAME`, defaulting to `$ORCHESTRA_MACHINE`, else this
-machine. `NAME` is a [beam](https://github.com/notaharness/n10) peer label or peer id — beam is
-n10's pairing-and-streams tool, and the seam through which a player can run somewhere other than
-its orchestrator. Omitting the flag, or the literal `local`, means this machine.
+machine. `NAME` is a [beam](https://github.com/notaharness/beam) peer label, alias or peer id —
+beam pairs your machines and carries streams and messages between them, and is the seam through
+which a player can run somewhere other than its orchestrator. Omitting the flag, or the literal `local`, means this machine.
 
 Naming a machine runs the same Git and tmux commands, with the same arguments, over
 `beam exec <machine>` instead of locally. The `beam` binary is resolved in order:
