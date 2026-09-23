@@ -431,18 +431,49 @@ claude_inbox_post() {
 }
 
 # --- Shared local delivery ---------------------------------------------------------------------
-# The one place a report (or a relayed envelope) is actually delivered to a local target: the
-# codex queue path, or, for a tmux target, Claude's inbox socket when a Claude Code session with
-# one is at the terminal, else the tmux load-buffer/paste-buffer/send-keys sequence — both gated
-# by pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux:
-# target) and relay.sh (an envelope's embedded local target) both call this; a message that
-# arrived from another machine gets exactly the same scrutiny as one typed locally. <target>
-# carries its codex:/tmux: prefix. On success DELIVER_ROUTE says which way it went (queue, inbox
-# or paste); on failure the reason is left in DELIVER_REASON rather than printed here, so each
-# caller keeps its own error wording (report.sh's "delivery failed" block, relay.sh's log line).
+# paste_into_pane <socket> <session> <text>: one bracketed paste (-p keeps embedded newlines from
+# submitting early), then Enter. The text goes through load-buffer on stdin because tmux rejects
+# command lines over ~16 KiB; the pause lets a slow UI ingest the paste before Enter. The socket
+# selects the server as in tmux_on. On failure the reason is left in DELIVER_REASON.
+paste_into_pane() {
+  local sock="$1" session="$2" text="$3" tt buf="orchestra-$$"
+  tt="$(tmux_target "$session")"
+  printf '%s' "$text" | tmux_on "$sock" load-buffer -b "$buf" - || { DELIVER_REASON="tmux could not load the message"; return 1; }
+  # errexit is live inside callers with `set -e`: cleanup must not exit before the reason is set.
+  tmux_on "$sock" paste-buffer -p -d -b "$buf" -t "$tt" ||
+    { tmux_on "$sock" delete-buffer -b "$buf" 2>/dev/null || :; DELIVER_REASON="tmux could not paste into $session"; return 1; }
+  sleep 0.3
+  tmux_on "$sock" send-keys -t "$tt" Enter ||
+    { DELIVER_REASON="tmux could not submit the message in $session; the paste succeeded, inspect before retrying"; return 1; }
+}
+# deliver_to_pane <socket> <session> <text>: the message to the agent in that pane, after
+# pane_owned_by_agent has run for it: a Claude Code session with a live inbox socket gets it there
+# as a queued message; anything else — Codex, other agents, an older Claude, a pane on another
+# machine — gets the paste. Once a socket is found a failure is final: falling back to a paste
+# could deliver twice. Sets DELIVER_ROUTE (inbox or paste), or DELIVER_REASON on failure.
+# Only text meant as a message goes this way: Claude Code never runs a slash command or skill
+# invocation that arrives on its inbox, so invocations are always typed or pasted.
 DELIVER_REASON=""; DELIVER_ROUTE=""
+deliver_to_pane() {
+  local sock="$1" session="$2" msg="$3" inbox
+  DELIVER_ROUTE=""
+  if [ "$PANE_AGENT" = claude ] && claude_inbox_client && inbox="$(claude_inbox_socket "$PANE_AGENT_PID")"; then
+    claude_inbox_post "$inbox" "$msg" || { DELIVER_REASON="claude inbox socket refused the connection"; return 1; }
+    DELIVER_ROUTE=inbox; return 0
+  fi
+  paste_into_pane "$sock" "$session" "$msg" || return 1
+  DELIVER_ROUTE=paste
+}
+# deliver_to_local_target <socket> <codex:…|tmux:…> <text>: the one place a report (or a relayed
+# envelope) is delivered on this machine — codex queue, or deliver_to_pane gated by
+# pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux: target)
+# and relay.sh (an envelope's embedded local target) both call this; a message that arrived from
+# another machine gets exactly the same scrutiny as one typed locally. On success DELIVER_ROUTE
+# says which way it went (queue, inbox or paste); on failure the reason is left in DELIVER_REASON
+# rather than printed here, so each caller keeps its own error wording (report.sh's "delivery
+# failed" block, relay.sh's log line).
 deliver_to_local_target() {
-  local sock="$1" target="$2" msg="$3" tt inbox
+  local sock="$1" target="$2" msg="$3"
   DELIVER_ROUTE=""
   case "$target" in
     codex:*)
@@ -455,22 +486,5 @@ deliver_to_local_target() {
   tmux_on "$sock" has-session -t "=$target" 2>/dev/null || { DELIVER_REASON="orchestrator session $target is gone or unreachable"; return 1; }
   # Would the paste be run as a shell command? Only an agent at the terminal may receive it.
   pane_owned_by_agent "$sock" "$target" || { DELIVER_REASON="a shell owns $target now, not an agent"; return 1; }
-  # A Claude Code session takes the message on its inbox socket: nothing touches its prompt box.
-  # Once the socket is found a failure is final — falling back to a paste could deliver twice.
-  if [ "$PANE_AGENT" = claude ] && claude_inbox_client && inbox="$(claude_inbox_socket "$PANE_AGENT_PID")"; then
-    claude_inbox_post "$inbox" "$msg" || { DELIVER_REASON="claude inbox socket refused the connection"; return 1; }
-    DELIVER_ROUTE=inbox; return 0
-  fi
-  # One bracketed paste (-p) keeps embedded newlines from submitting early; the buffer is loaded
-  # from stdin because tmux rejects command lines over ~16 KiB. The pause lets a slow UI ingest
-  # the paste before Enter.
-  tt="$(tmux_target "$target")"
-  printf '%s' "$msg" | tmux_on "$sock" load-buffer -b "player-$$" - || { DELIVER_REASON="tmux could not load the message"; return 1; }
-  # errexit is live inside callers with `set -e`: cleanup must not exit before the reason is set.
-  tmux_on "$sock" paste-buffer -p -d -b "player-$$" -t "$tt" ||
-    { tmux_on "$sock" delete-buffer -b "player-$$" 2>/dev/null || :; DELIVER_REASON="tmux could not paste into $target"; return 1; }
-  sleep 0.3
-  tmux_on "$sock" send-keys -t "$tt" Enter ||
-    { DELIVER_REASON="tmux could not submit the message in $target; the paste succeeded, inspect before retrying"; return 1; }
-  DELIVER_ROUTE=paste; return 0
+  deliver_to_pane "$sock" "$target" "$msg"
 }

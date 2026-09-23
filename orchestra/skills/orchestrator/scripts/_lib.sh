@@ -213,17 +213,10 @@ PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)
 
-# Deliver multi-line text to a pane as one bracketed paste. The text goes through load-buffer on
-# stdin: tmux rejects command lines over ~16 KiB, which set-buffer/-e/send-keys all count against.
-# Goes through tmux_on (the default/current server, like every other orchestrator-side call here),
-# so it honours ORCH_MACHINE too. Usage: paste_into <session> <text>
-paste_into() {
-  local session="$1" text="$2"
-  printf '%s' "$text" | tmux_on "" load-buffer -b "orch-$$" - || return 1
-  tmux_on "" paste-buffer -p -d -b "orch-$$" -t "$(tmux_target "$session")" || { tmux_on "" delete-buffer -b "orch-$$" 2>/dev/null || :; return 1; }
-  sleep 0.3
-  tmux_on "" send-keys -t "$(tmux_target "$session")" Enter
-}
+# Deliver multi-line text to a pane as one bracketed paste on the default/current server, like
+# every other orchestrator-side call here, so it honours ORCH_MACHINE too (paste_into_pane,
+# _routing.sh). Usage: paste_into <session> <text>
+paste_into() { paste_into_pane "" "$1" "$2"; }
 
 # Resolve links created by skills installers before finding the sibling player skill.
 # Both skills must be installed together under the same skills directory.

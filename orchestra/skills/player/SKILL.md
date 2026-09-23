@@ -52,7 +52,8 @@ Stay in this worktree; respect repo `AGENTS.md`, `CLAUDE.md` and applicable conv
 Your tmux environment is redirected to a scratch server to prevent accidental access to
 user sessions; `report.sh` reaches the real server through `ORCHESTRA_SOCKET`. `report.sh`
 is the sanctioned reporting route; do not bypass isolation.
-Messages prefixed `[orchestrator]` relay the orchestrator's guidance under the user's task.
+Messages prefixed `[orchestrator]` relay the orchestrator's guidance under the user's task; in
+Claude Code they arrive as messages from another Claude session, which is the orchestrator.
 
 `report.sh KIND "text"` sends `[player SESSION] KIND: text`, where SESSION is your tmux
 session name (a label; the orchestrator resolves it through the tags):

@@ -911,6 +911,28 @@ class PortTests(unittest.TestCase):
         self.assertIn('relay.sh: delivered to tmux:parent (inbox)', x.stderr)
         self.assertEqual(json.loads(received[0])['message']['content'], '[player far] DONE: over beam')
         self.assertEqual(self.settled(log, 'msg.ack'), ['e9'])
+    def test_send_to_a_claude_player_goes_to_its_inbox(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude')
+        received = self.fake_claude(); self.clear_log()
+        x = self.orch('send.sh', self.session, 'use the second approach\nand "quote" it')
+        self.assertEqual(x.stdout, 'sent to %s (inbox)\n' % self.session)
+        for _ in range(100):
+            if received: break
+            import time; time.sleep(0.05)
+        self.assertEqual(json.loads(received[0]), {'type': 'user', 'message': {'role': 'user', 'content': '[orchestrator] use the second approach\nand "quote" it'}})
+        for cmd in ('load-buffer', 'paste-buffer', 'send-keys'): self.assertNotIn(cmd, self.tmux_log())
+        # --raw, --key and --type stay keystrokes into the pane, Claude or not
+        self.clear_log(); x = self.orch('send.sh', self.session, '--raw', '1')
+        self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session); self.assertIn('paste-buffer', self.tmux_log())
+        self.assertEqual((self.base/'buffer').read_text(), '1')
+    def test_send_to_other_players_pastes(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        for command in ('codex', 'claude', 'bash'):                 # codex; a Claude with no registered inbox; a shell
+            with self.subTest(command):
+                self.env['TEST_PANE_COMMAND'] = command; self.clear_log()
+                x = self.orch('send.sh', self.session, 'nudge')
+                self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session); self.assertIn('paste-buffer', self.tmux_log())
+                self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] nudge')
     def test_failed_paste_leaves_no_buffer(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
         self.env['TEST_PASTE_FAIL'] = '1'
