@@ -22,6 +22,14 @@
 # pane stays for inspection (spawn.sh sets remain-on-exit). In auto mode Claude runs first under
 # script(1) so its output can be checked for the exact "No conversation found to continue"
 # diagnostic; only then is Codex tried, with the newest recorded conversation for this worktree.
+#
+# The task reaches a fresh harness as its initial-prompt argument, never typed: the CLI submits
+# it itself. Nothing can queue it instead — Claude Code never runs a skill invocation posted to its
+# inbox socket, and a Codex conversation has no thread to queue to before its first turn. A dialog
+# at Claude's startup still swallows keys (the trust dialog's default answer is "No, exit"), so
+# every Claude launch here passes --strict-mcp-config (no "new MCP server found" prompt for the
+# repo's .mcp.json; players run without MCP servers) and pre-accepts the workspace-trust dialog
+# for this worktree first (claude_trust_here).
 set -u
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
@@ -47,11 +55,40 @@ preamble() {
   fi
 }
 codex_effort_args() { [ -n "$effort" ] && printf '%s\n' -c "model_reasoning_effort=\"$effort\""; true; }
+# claude_trust_here: record this worktree as trusted in Claude Code's global config
+# ($CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json), as answering its workspace-trust dialog
+# would: projects[<path>].hasTrustDialogAccepted, for this exact path — a trusted ancestor is no
+# substitute (a trusted /tmp still prompts for a directory under it). Nothing is written when the
+# entry is already there; otherwise the file is replaced atomically, never written in place.
+# Needs python3; without it, or without a config file (Claude never run here), nothing changes
+# and the dialog may appear.
+claude_trust_here() {
+  local cfg
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else cfg="$HOME/.claude.json"; fi
+  [ -f "$cfg" ] || return 0
+  command -v python3 >/dev/null 2>&1 || { echo "player launch: python3 not found; Claude may ask whether to trust $PWD" >&2; return 0; }
+  python3 - "$cfg" "$PWD" "$(pwd -P)" <<'PY' || echo "player launch: could not pre-accept Claude's workspace trust for $PWD" >&2
+import json, os, sys, tempfile
+cfg, paths = sys.argv[1], sorted(set(sys.argv[2:]))
+with open(cfg) as f:
+    data = json.load(f)
+projects = data.setdefault('projects', {})
+if all(projects.get(p, {}).get('hasTrustDialogAccepted') is True for p in paths):
+    sys.exit(0)
+for p in paths:
+    projects.setdefault(p, {})['hasTrustDialogAccepted'] = True
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(cfg)), prefix='.claude.json.')
+with os.fdopen(fd, 'w') as f:
+    json.dump(data, f, indent=2)
+os.chmod(tmp, os.stat(cfg).st_mode & 0o777)
+os.replace(tmp, cfg)
+PY
+}
 
 fresh() {
   local prompt; prompt="$(preamble "$1")"; remember "$1"
   case "$1" in
-    claude)   exec claude ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt";;
+    claude)   claude_trust_here; exec claude ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt";;
     codex)    exec codex ${model:+-m "$model"} $(codex_effort_args) "$prompt";;
     gemini)   exec gemini ${model:+-m "$model"} -i "$prompt";;
     copilot)  exec copilot ${model:+--model "$model"} -i "$prompt";;
@@ -82,18 +119,19 @@ resume_codex() {
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
 resume_claude() {
-  local prompt; prompt="$(preamble claude)"; remember claude
-  exec claude --continue ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt"
+  local prompt; prompt="$(preamble claude)"; remember claude; claude_trust_here
+  exec claude --continue ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
 }
 resume_auto() {
   command -v script >/dev/null || fail "cannot detect the harness without util-linux script(1); rerun with --agent claude or --agent codex"
   local log rc
+  claude_trust_here
   log="$(mktemp /tmp/orchestra-resume-probe.XXXXXX)" || fail "cannot create a probe log in /tmp"
   # The prompt and options travel in the environment; the sh -c string contains no user text.
   # script(1) runs the command through $SHELL: pin /bin/sh so a login shell's rc files cannot
   # reorder PATH or otherwise change which claude binary starts.
   PROMPT="$(preamble claude)" SHELL=/bin/sh script -qefc \
-    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} "$PROMPT"' "$log"
+    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} --strict-mcp-config "$PROMPT"' "$log"
   rc=$?
   if [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log"; then
     rm -f "$log"

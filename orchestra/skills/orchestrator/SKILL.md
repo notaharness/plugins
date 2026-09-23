@@ -192,7 +192,8 @@ the original choice must be guaranteed. Do not silently substitute a model.
    `--permission-mode auto` (Claude only) when appropriate to the existing authorization;
    `--dry-run` previews without writes or fetches; `--from REF` deliberately stacks work.
    A failed launch removes its placeholder session and keeps the worktree, so rerunning
-   the same command is the retry.
+   the same command is the retry. Claude players start pre-trusted for their worktree and
+   with `--strict-mcp-config` (no MCP servers), so no startup dialog swallows the task.
 4. After about ten seconds inspect `sessions.sh --all` and `screen.sh SESSION` for failed
    startup, authentication, permissions or missing skills. Report concise status.
 5. Handle reports: PROGRESS usually needs no reply; QUESTION gets an answer from existing

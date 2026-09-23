@@ -159,7 +159,9 @@ flowchart LR
 1. `spawn.sh` prepares the branch and worktree, creates a detached tmux session, and writes the session tags.
 2. It loads the assignment through stdin into a named tmux paste buffer, `orchestra-prompt-<session>`, on the same server. This carries large prompts without using tmux's roughly 16 KiB command allowance.
 3. `respawn-pane` starts `_launch.sh` inside the pane with `ORCHESTRA_SESSION`, `ORCHESTRA_SOCKET`, and the selected launch settings.
-4. The launcher reads and deletes the buffer, adds the player-skill invocation, records the selected agent CLI, and starts it.
+4. The launcher reads and deletes the buffer, adds the player-skill invocation, records the selected agent CLI, and starts it with that text as the CLI's initial prompt argument, which the CLI submits itself.
+
+Nothing is typed into a starting CLI, but a dialog at Claude Code's startup still stops the task: the workspace-trust dialog's default answer is "No, exit". So every Claude launch first records the worktree as trusted in Claude's global config (`projects[<worktree>].hasTrustDialogAccepted` in `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`, replaced atomically and only when missing; a trusted parent directory does not count for Claude), and passes `--strict-mcp-config`, so the repository's `.mcp.json` raises no "new MCP server found" dialog. Players therefore run without MCP servers.
 
 Worktrees live under the main checkout in `.claude/worktrees/`, with `/` in the branch name replaced by `-`: branch `feature/search` uses `.claude/worktrees/feature-search`. The assignment travels in the temporary buffer; coordination metadata lives in session options. The player reads its reporting target from the session each time it reports.
 
@@ -229,6 +231,7 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 - An authenticated `claude` or `codex` CLI for each type of player you want to run.
 - `beam` only if you want players on other machines, plus `socat` or an `nc` with `-U` on the
   orchestrator's machine for `relay.sh`; see [Machines](#machines).
+- `python3` to pre-accept Claude Code's workspace-trust dialog for new worktrees; without it Claude may ask on first launch.
 - OpenBSD `nc` (for `-N -U`) or `socat` to deliver reports to a Claude Code orchestrator's inbox socket; without either, reports are pasted into its pane.
 - util-linux `script` for automatic CLI detection during resume.
 

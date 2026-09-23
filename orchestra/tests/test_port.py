@@ -477,6 +477,32 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'claude')
         self.orch('adopt.sh', self.session, '--agent', 'claude', '--orchestrator', 'tmux:new-parent')
         self.assertIn('"-l", "'+INV+'"]', self.tmux_log())
+    def claude_config(self, projects):
+        cfg = self.base/'claude-config/.claude.json'; cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps({'numStartups': 7, 'projects': projects}, indent=2)); cfg.chmod(0o600)
+        return cfg
+    def test_claude_launch_pre_accepts_trust_and_skips_project_mcp(self):
+        cfg = self.claude_config({'/elsewhere': {'hasTrustDialogAccepted': False, 'mcpServers': {}}})
+        self.spawn('--agent', 'claude'); c = self.calls()[-1]
+        self.assertEqual(c['args'][-2], '--strict-mcp-config'); self.assertTrue(c['args'][-1].startswith(INV+' Task with'))
+        data = json.loads(cfg.read_text())
+        self.assertIs(data['projects'][str(self.wt)]['hasTrustDialogAccepted'], True)
+        self.assertEqual(data['numStartups'], 7); self.assertEqual(data['projects']['/elsewhere'], {'hasTrustDialogAccepted': False, 'mcpServers': {}})
+        self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(x.name for x in cfg.parent.iterdir() if x.name.startswith('.claude.json')), ['.claude.json'])   # replaced, no temp left
+        self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)
+        self.assertEqual(self.calls()[-1]['args'][-2], '--strict-mcp-config')
+    def test_claude_trust_is_written_for_the_worktree_itself_and_only_once(self):
+        # A trusted ancestor is not enough for Claude (a trusted /tmp still prompts below it).
+        cfg = self.claude_config({str(self.repo): {'hasTrustDialogAccepted': True}, '/': {'hasTrustDialogAccepted': True}})
+        self.spawn('--agent', 'claude'); self.assertIs(json.loads(cfg.read_text())['projects'][str(self.wt)]['hasTrustDialogAccepted'], True)
+        before = cfg.read_bytes(); self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)
+        self.assertEqual(cfg.read_bytes(), before)                                          # already there: nothing rewritten
+        cfg.unlink(); self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)
+        self.assertFalse(cfg.exists())                                                      # never creates Claude's config
+    def test_codex_launch_leaves_claude_config_alone(self):
+        cfg = self.claude_config({}); before = cfg.read_bytes()
+        self.spawn('--agent', 'codex'); self.assertEqual(cfg.read_bytes(), before); self.assertNotIn('--strict-mcp-config', self.calls()[-1]['args'])
     def test_sol_override(self):
         self.spawn('--agent', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'xhigh'); self.assertEqual(self.calls()[-1]['args'][3], 'model_reasoning_effort="xhigh"')
     def test_custom_harness_tag(self):
