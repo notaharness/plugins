@@ -470,7 +470,7 @@ codex_pane_thread() {
 codex_queue_pane() {
   local thread
   [ "$PANE_AGENT" = codex ] && thread="$(codex_pane_thread "$PANE_AGENT_PID")" || return 2
-  CODEX_HOME="${thread#* }" codex queue --thread "${thread%% *}" --message "$1" >/dev/null && return 0
+  CODEX_HOME="${thread#* }" codex queue --thread "${thread%% *}" --message "$1" >/dev/null </dev/null && return 0
   DELIVER_REASON="codex queue refused the message for thread ${thread%% *}; inspect before retrying to avoid duplicates"
   return 1
 }
@@ -529,7 +529,7 @@ deliver_to_local_target() {
   DELIVER_ROUTE=""
   case "$target" in
     codex:*)
-      codex queue --thread "${target#codex:}" --message "$msg" && { DELIVER_ROUTE=queue; return 0; }
+      codex queue --thread "${target#codex:}" --message "$msg" </dev/null && { DELIVER_ROUTE=queue; return 0; }
       DELIVER_REASON='Codex queue refused the message; inspect before retrying to avoid duplicate reports'
       return 1;;
     tmux:*) target="${target#tmux:}";;
