@@ -271,25 +271,41 @@ case "\$1" in
           *) printf 'rejected: %s\n' "\${FAKE_BEAM_REJECT_REASON:-unknown-peer}" >&2; exit 1;;
         esac
         ;;
-      listen)
-        [ -f "$T/beam-inbox" ] && cat "$T/beam-inbox"
-        case " \$* " in
-          *' --require-ack '*)
-            # Close stdout so the envelope side of relay.sh's pipeline sees EOF right away instead
-            # of waiting for this process to exit; then poll stdin for acked ids with a short
-            # per-read timeout and give up once nothing new arrives, the same shape as a real ack
-            # timeout (docs/beam.md).
-            exec 1>&-
-            : > "$T/beam-acked"
-            while IFS= read -r -t 1.2 ackid; do printf '%s\n' "\$ackid" >> "$T/beam-acked"; done
-            ;;
-        esac
-        ;;
     esac
     ;;
 esac
 FAKEBEAM
 chmod +x "$T/bin/beam"
+
+# A fake beam daemon for relay.sh: beam's control socket on a real AF_UNIX socket at
+# $BEAM_SOCKET (beam/docs/06-control-socket.md). Each connection that subscribes is offered the
+# envelopes in $T/beam-inbox, one at a time, each only after the previous was settled with
+# msg.ack or msg.defer; once nothing is left it closes the connection and exits. Requests are
+# logged, one JSON line each, to $T/beamd-log.
+cat > "$T/bin/beamd" <<'FAKEBEAMD'
+#!/usr/bin/env python3
+import os, json, socket, sys
+path, inbox_file, log_file = os.environ['BEAM_SOCKET'], sys.argv[1], sys.argv[2]
+inbox = [l for l in open(inbox_file).read().splitlines() if l]
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1); srv.settimeout(20)
+conn, _ = srv.accept(); f = conn.makefile('rb'); pending = list(inbox); inflight = None
+def send(obj): conn.sendall(json.dumps(obj, separators=(',', ':')).encode() + b'\n')
+for line in f:
+    req = json.loads(line); open(log_file, 'a').write(json.dumps(req) + '\n')
+    if req['op'] in ('msg.ack', 'msg.defer'): inflight = None
+    send({'id': req['id'], 'ok': True, 'result': {}})
+    if inflight is None and pending: inflight = pending.pop(0); send({'event': 'mail', 'data': json.loads(inflight)})
+    elif inflight is None: break
+conn.close(); srv.close(); os.unlink(path)
+FAKEBEAMD
+chmod +x "$T/bin/beamd"
+export BEAM_SOCKET="$T/beam.sock"
+# relay_with_daemon <relay args…>: one relay.sh run against a fresh fake daemon.
+relay_with_daemon() {
+  rm -f "$T/beamd-log"; "$T/bin/beamd" "$T/beam-inbox" "$T/beamd-log" & local d=$!
+  local i; for i in $(seq 50); do [ -S "$BEAM_SOCKET" ] && break; sleep 0.1; done
+  bash "$O/relay.sh" "$@"; local rc=$?; wait "$d"; return $rc
+}
 
 # Every tmux call for a machine names that machine's own server: the socket is asked of the
 # target once (a shell there, so $TMUX and its uid are the target's) and passed as -S on every
@@ -342,25 +358,28 @@ tm kill-session -t '=parent' 2>/dev/null
 (unset TMUX TMUX_PANE; tm new-session -d -s parent -x 120 -y 30 -- "$T/bin/claude")
 tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 printf '{"id":"e1","from":"p","to":"q","seq":1,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:parent\\n\\n[player relayed] DONE: via relay"}\n' > "$T/beam-inbox"
-bash "$O/relay.sh" >"$T/relay.out" 2>"$T/relay.err"      # $TMUX is already exported above, as it would be from an orchestrator's own pane
+relay_with_daemon >"$T/relay.out" 2>"$T/relay.err"      # $TMUX is already exported above, as it would be from an orchestrator's own pane
+check "relay.sh subscribes on the control socket with flat parameters" \
+  "[ \"\$(head -n1 '$T/beamd-log')\" = '{\"id\": 1, \"op\": \"msg.subscribe\", \"topic\": \"orchestra\"}' ]"
 check "relay.sh delivers the envelope's local target" \
   "grep -q 'relay.sh: delivered to tmux:parent' '$T/relay.err' && sleep 0.5 && grep -qF '[player relayed] DONE: via relay' '$T/received-claude'"
-check "relay.sh acked only after the delivery actually succeeded (D13)" \
-  "[ \"\$(cat "$T/beam-acked")\" = e1 ]"
+check "relay.sh acks the envelope once delivered" \
+  "grep -qF '\"op\": \"msg.ack\", \"envelopeId\": \"e1\"' '$T/beamd-log' && ! grep -q msg.defer '$T/beamd-log'"
 
-echo "# relay.sh (D14): an envelope naming a target outside the default allowlist is refused, not delivered, not acked"
+echo "# relay.sh: an envelope naming a target outside the default allowlist is refused and deferred"
 # $S1 is still the stranger "sleep 300" session foreign() planted earlier: real tmux reports its
 # pane_current_command as "sleep", not a shell, so pane_owned_by_agent alone would call it fair
 # game — exactly the pane a relay must not touch just because an envelope names it.
 printf '{"id":"e2","from":"attacker","to":"q","seq":2,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:%s\\n\\npaste into the users own session"}\n' "$S1" > "$T/beam-inbox"
-bash "$O/relay.sh" >"$T/refuse.out" 2>"$T/refuse.err"
+relay_with_daemon >"$T/refuse.out" 2>"$T/refuse.err"
 check "outside-allowlist envelope is refused, names the sending peer, and never pasted" \
   "grep -q 'outside this relay' '$T/refuse.err' && grep -q attacker '$T/refuse.err' && ! grep -qF 'paste into the users own session' '$T/received-claude'"
-check "refused envelope is left unacked" "[ ! -s '$T/beam-acked' ]"
+check "refused envelope is deferred with the reason, never acked" \
+  "grep -q '\"op\": \"msg.defer\", \"envelopeId\": \"e2\", \"reason\": \"tmux:$S1 is outside' '$T/beamd-log' && ! grep -q msg.ack '$T/beamd-log'"
 
 echo "# relay.sh --allow adds an explicit extra target"
 printf '{"id":"e3","from":"p","to":"q","seq":3,"topic":"orchestra","encoding":"utf8","payload":"target: codex:%s\\n\\nvia allow"}\n' "$uuid" > "$T/beam-inbox"
-bash "$O/relay.sh" --allow "codex:$uuid" >"$T/allow.out" 2>"$T/allow.err"
+relay_with_daemon --allow "codex:$uuid" >"$T/allow.out" 2>"$T/allow.err"
 check "explicitly allowed target is delivered" "grep -q 'relay.sh: delivered to codex:'$uuid'' '$T/allow.err'"
 
 echo "# relay.sh refuses to run with no default target and no --allow"

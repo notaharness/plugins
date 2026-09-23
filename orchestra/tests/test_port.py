@@ -258,28 +258,59 @@ if a[:2] == ['msg', 'send']:
     if outcome == 'stored-no-ack':
         print('stored for %s; delivery pending (%s has not acknowledged it). beam will keep delivering it until %s does. Do not send it again.' % (peer, peer, peer)); sys.exit(0)
     sys.stderr.write('rejected: %s\n' % os.environ.get('TEST_BEAM_REJECT_REASON', 'unknown-peer')); sys.exit(1)
-if a[:2] == ['msg', 'listen']:
-    inbox = b/'beam-inbox'
-    if inbox.exists(): sys.stdout.write(inbox.read_text())
-    sys.stdout.flush()
-    if '--require-ack' in a:
-        # Close stdout so the envelope side of relay.sh's pipeline gets EOF right away (it must
-        # not wait for this process to exit before it can start delivering what it already has);
-        # then poll stdin for ids relay.sh acks back, recording them to beam-acked, and give up
-        # once nothing new arrives for a beat — the real server has an analogous ack timeout
-        # (docs/beam.md's "queued: ... no ack before the timeout").
-        import select
-        sys.stdout.close()
-        acked = []
-        while True:
-            ready, _, _ = select.select([sys.stdin], [], [], 1.2)
-            if not ready: break
-            line = sys.stdin.readline()
-            if not line: break
-            acked.append(line.strip())
-        (b/'beam-acked').write_text(''.join(x+'\n' for x in acked))
-    sys.exit(0)
 sys.exit(0)
+'''
+
+# Fake beam daemon for relay.sh: the control socket's subscriber side, over a real AF_UNIX socket
+# at $BEAM_SOCKET (beam/docs/06-control-socket.md). Requests are one JSON object per line with
+# the parameters beside "op"; replies are {id, ok, result|error}; after msg.subscribe each
+# envelope in beam-inbox (one per line) goes out as {"event":"mail","data":<envelope>}, one at a
+# time, the next only once the previous is settled by msg.ack or msg.defer — or never, if the
+# subscriber does neither. A new connection (a later subscription) is offered every envelope not
+# yet acked, deferred ones included. When nothing is left to offer it holds the connection for
+# BEAMD_HOLD seconds, then closes it; it serves BEAMD_CONNECTIONS connections, then exits.
+# Every request is appended to beamd-log as {"conn": n, "req": {...}}.
+BEAMD = r'''#!/usr/bin/env python3
+import os, sys, json, socket, time, select
+from pathlib import Path
+b = Path(os.environ['ORCH_TEST_TMP']); path = os.environ['BEAM_SOCKET']
+inbox = [l for l in (b/'beam-inbox').read_text().splitlines() if l] if (b/'beam-inbox').exists() else []
+acked = set(); hold = float(os.environ.get('BEAMD_HOLD', '0')); refuse = os.environ.get('BEAMD_REFUSE_SUBSCRIBE')
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1); (b/'beamd-ready').write_text('')
+def log(n, req):
+    with (b/'beamd-log').open('a') as f: f.write(json.dumps({'conn': n, 'req': req})+'\n')
+for n in range(1, int(os.environ.get('BEAMD_CONNECTIONS', '1')) + 1):
+    srv.settimeout(20)
+    try: conn, _ = srv.accept()
+    except socket.timeout: break
+    buf = b''; queue = []; inflight = None; idle_since = None; closed = False
+    def send(obj): conn.sendall(json.dumps(obj, separators=(',', ':'), ensure_ascii=False).encode()+b'\n')
+    while not closed:
+        if inflight is None and not queue and idle_since is not None and time.time() - idle_since >= hold: break
+        r, _, _ = select.select([conn], [], [], 0.1)
+        if not r: continue
+        data = conn.recv(1 << 20)
+        if not data: break
+        buf += data
+        while b'\n' in buf:
+            line, buf = buf.split(b'\n', 1)
+            req = json.loads(line); log(n, req); op = req.get('op')
+            if op == 'msg.subscribe':
+                if refuse: send({'id': req['id'], 'ok': False, 'error': refuse}); closed = True; break
+                send({'id': req['id'], 'ok': True, 'result': {}})
+                queue = [e for e in inbox if json.loads(e)['id'] not in acked]; idle_since = time.time()
+            elif op in ('msg.ack', 'msg.defer'):
+                if inflight is None or json.loads(inflight)['id'] != req.get('envelopeId'):
+                    send({'id': req['id'], 'ok': False, 'error': 'params', 'detail': 'not in flight'}); continue
+                if op == 'msg.ack': acked.add(req['envelopeId'])
+                inflight = None; send({'id': req['id'], 'ok': True, 'result': {}}); idle_since = time.time()
+            else:
+                send({'id': req['id'], 'ok': False, 'error': 'params'})
+            if inflight is None and queue:
+                inflight = queue.pop(0); send({'event': 'mail', 'data': json.loads(inflight)})
+    if closed: time.sleep(0.2)
+    conn.close()
+srv.close(); os.unlink(path)
 '''
 
 class PortTests(unittest.TestCase):
@@ -346,9 +377,24 @@ class PortTests(unittest.TestCase):
     def beam_sent(self):
         f = self.base/'beam-sent'
         return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
-    def beam_acked(self):
-        f = self.base/'beam-acked'
-        return f.read_text().splitlines() if f.exists() else []
+    def run_relay(self, *args, envelopes=(), env=None, ok=True, **beamd):
+        # relay.sh against BEAMD on a real socket; returns (result, [(conn, request)…]).
+        import time
+        (self.base/'beam-inbox').write_text(''.join(json.dumps(e)+'\n' for e in envelopes))
+        self.stub('beamd', BEAMD); self.stub('beam', BEAM_MOCK)
+        env = dict(env or self.env, BEAM_SOCKET=str(self.base/'beam.sock'), **{k.upper(): str(v) for k, v in beamd.items()})
+        d = subprocess.Popen([str(self.bin/'beamd')], env=env)
+        try:
+            for _ in range(100):
+                if (self.base/'beamd-ready').exists(): break
+                time.sleep(0.05)
+            x = self.run_cmd(['bash', self.script('relay.sh'), *args], cwd=self.base, env=env, ok=ok)
+        finally:
+            d.wait(timeout=30)
+        f = self.base/'beamd-log'
+        log = [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+        return x, [(e['conn'], e['req']) for e in log]
+    def settled(self, log, op): return [r.get('envelopeId') for _, r in log if r.get('op') == op]
     # One state file per tmux server, named after its socket (see TMUX_MOCK): sock selects which
     # server a helper reads or writes, defaulting to the one the scripts use with no socket given.
     def state_file(self, sock=None, base=None):
@@ -988,75 +1034,78 @@ class PortTests(unittest.TestCase):
         for bad in ('beam:/tmux:controller', 'beam:%s' % PEER, 'beam:%s/ssh:host' % PEER,
                     'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'beam:%s/tmux:controller' % PEER.upper(), 'beam:%s/tmux:controller' % PEER[:16], 'ssh:host'):
             x = norm(bad); self.assertNotEqual(x.returncode, 0, bad)
-    def test_relay_delivers_to_tmux_target(self):
-        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
-        envelope = json.dumps({'id': 'e1', 'from': 'p', 'to': 'q', 'seq': 1, 'topic': 'orchestra', 'encoding': 'utf8',
-                                'payload': 'target: tmux:parent\n\n[player %s] DONE: relayed' % self.session, 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(envelope+'\n')
-        self.clear_log()
-        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
+    def envelope(self, id, payload, frm='p', encoding='utf8'):
+        return {'id': id, 'from': frm, 'to': PEER, 'seq': 1, 'topic': 'orchestra', 'payload': payload, 'encoding': encoding, 'createdAt': 0}
+    def test_relay_subscribes_on_the_control_socket_and_acks_after_delivery(self):
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.clear_log()
+        x, log = self.run_relay('--allow', 'tmux:parent', ok=False,
+                                envelopes=[self.envelope('e1', 'target: tmux:parent\n\n[player %s] DONE: relayed' % self.session)])
+        self.assertEqual(x.returncode, 1); self.assertIn('the beam daemon closed the connection', x.stderr)     # daemon gone: exit 1, nothing lost
+        # parameters sit beside "op"; a nested "params" object would be ignored and subscribe to every topic
+        self.assertEqual(log[0], (1, {'id': 1, 'op': 'msg.subscribe', 'topic': 'orchestra'}))
         self.assertIn('relay.sh: delivered to tmux:parent', x.stderr)
         self.assertEqual((self.base/'buffer').read_text(), '[player %s] DONE: relayed' % self.session)
-        self.assertEqual(self.beam_acked(), ['e1'])            # acked only once the paste actually succeeded (D13)
+        self.assertEqual(log[1], (1, {'id': 2, 'op': 'msg.ack', 'envelopeId': 'e1'}))
+        self.assertEqual(self.settled(log, 'msg.defer'), [])
     def test_relay_delivers_to_codex_target(self):
-        self.stub('beam', BEAM_MOCK)
-        envelope = json.dumps({'id': 'e2', 'from': 'p', 'to': 'q', 'seq': 2, 'topic': 'orchestra', 'encoding': 'utf8',
-                                'payload': 'target: codex:%s\n\nhello from relay' % ID, 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(envelope+'\n')
-        x = self.orch('relay.sh', '--allow', 'codex:'+ID, cwd=self.base)
-        self.assertIn('relay.sh: delivered to codex:'+ID, x.stderr)
-        self.assertEqual(self.calls()[-1]['args'][:4], ['queue', '--thread', ID, '--message'])
-        self.assertEqual(self.calls()[-1]['args'][4], 'hello from relay')
-        self.assertEqual(self.beam_acked(), ['e2'])
-    def test_relay_decodes_base64_payload(self):
+        _, log = self.run_relay('--allow', 'codex:'+ID, ok=False, envelopes=[self.envelope('e2', 'target: codex:%s\n\nhello from relay' % ID)])
+        self.assertEqual(self.calls()[-1]['args'], ['queue', '--thread', ID, '--message', 'hello from relay'])
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e2'])
+    def test_relay_settles_each_envelope_before_the_next(self):
+        envs = [self.envelope('e%d' % i, 'target: codex:%s\n\nreport %d' % (ID, i)) for i in range(3)]
+        _, log = self.run_relay('--allow', 'codex:'+ID, ok=False, envelopes=envs)
+        self.assertEqual([c['args'][-1] for c in self.calls()], ['report 0', 'report 1', 'report 2'])
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e0', 'e1', 'e2'])
+    def test_relay_decodes_unpadded_base64url_payload(self):
         import base64
-        self.stub('beam', BEAM_MOCK)
-        msg = 'target: codex:%s\n\nb64 message' % ID
-        envelope = json.dumps({'id': 'e3', 'from': 'p', 'to': 'q', 'seq': 3, 'topic': 'orchestra', 'encoding': 'base64',
-                                'payload': base64.b64encode(msg.encode()).decode(), 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(envelope+'\n')
-        self.orch('relay.sh', '--allow', 'codex:'+ID, cwd=self.base)
-        self.assertEqual(self.calls()[-1]['args'][4], 'b64 message')
-    def test_relay_refuses_shell_owned_pane(self):
-        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
-        self.env['TEST_PANE_COMMAND'] = 'bash'
-        envelope = json.dumps({'id': 'e4', 'from': 'p', 'to': 'q', 'seq': 4, 'topic': 'orchestra', 'encoding': 'utf8',
-                                'payload': 'target: tmux:parent\n\n[player x] DONE: hi', 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(envelope+'\n')
-        self.clear_log()
-        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
+        msg = 'target: codex:%s\n\nb64 message ?>~ with /+ \u00e9' % ID
+        raw = base64.urlsafe_b64encode(msg.encode()).decode().rstrip('=')
+        self.assertIn('-', raw + base64.urlsafe_b64encode(b'\xfb\xff').decode())      # the alphabet differs from standard base64
+        _, log = self.run_relay('--allow', 'codex:'+ID, ok=False, envelopes=[self.envelope('e3', raw, encoding='base64'),
+                                                                               self.envelope('e3b', 'not*base64', encoding='base64')])
+        self.assertEqual(self.calls()[-1]['args'][4], 'b64 message ?>~ with /+ \u00e9')
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e3']); self.assertEqual(self.settled(log, 'msg.defer'), ['e3b'])
+    def test_relay_defers_a_failed_delivery_and_retries_on_a_new_subscription(self):
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        self.env['TEST_PANE_COMMAND'] = 'bash'; self.clear_log()
+        x, log = self.run_relay('--allow', 'tmux:parent', ok=False, env=dict(self.env, ORCHESTRA_RELAY_RETRY='1'),
+                                envelopes=[self.envelope('e4', 'target: tmux:parent\n\n[player x] DONE: hi')],
+                                beamd_connections=2, beamd_hold=3)
         self.assertIn('a shell owns', x.stderr); self.assertNotIn('paste-buffer', self.tmux_log())
-        self.assertEqual(self.beam_acked(), [])                # delivery failed: never acked (D13), so it is redelivered
+        self.assertEqual(self.settled(log, 'msg.ack'), [])                      # never acked: the report is not lost
+        defers = [(c, r) for c, r in log if r.get('op') == 'msg.defer']
+        self.assertEqual([c for c, _ in defers], [1, 2])                       # deferred, then offered again to the next subscription
+        self.assertIn('a shell owns parent now', defers[0][1]['reason'])
+        self.assertEqual([r['op'] for c, r in log if c == 2][0], 'msg.subscribe')
     def test_relay_default_allowlist_is_its_own_session_only(self):
-        # D14: with no --allow, the only permitted target is the session relay.sh runs from — an
-        # envelope naming any other local target, even a perfectly well-formed one, is refused,
-        # logged with the sender's peer id, and left unacked; the actually-running session it
-        # names is never touched.
-        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.stub('beam', BEAM_MOCK)
+        # With no --allow, the only permitted target is the session relay.sh runs from.
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent')
         self.foreign('parent', sock='/tmp/relay-sock')       # relay.sh's own pane: $TMUX names that server
-        good = json.dumps({'id': 'e5', 'from': 'peerA', 'to': 'q', 'seq': 5, 'topic': 'orchestra', 'encoding': 'utf8',
-                            'payload': 'target: tmux:parent\n\n[player x] DONE: own session', 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(good+'\n')
         env = dict(self.env, TMUX='/tmp/relay-sock,0,0', TEST_TMUX_SESSION='parent')
-        x = self.run_cmd(['bash', self.script('relay.sh')], cwd=self.base, env=env)
+        x, log = self.run_relay(env=env, ok=False, envelopes=[self.envelope('e5', 'target: tmux:parent\n\n[player x] DONE: own session', frm='peerA')])
         self.assertIn('relay.sh: delivered to tmux:parent', x.stderr)
-        self.assertEqual(self.beam_acked(), ['e5'])
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e5'])
     def test_relay_refuses_target_outside_allowlist(self):
-        # The security hole the phase 6 review demonstrated: an envelope naming the user's own
-        # session (never passed to --allow) must not be pasted into it, whatever pane_owned_by_agent
-        # would otherwise say about that pane.
-        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.stub('beam', BEAM_MOCK)
-        self.foreign('users-own-session')       # an agent-owned pane the relay was never told it may use
-        envelope = json.dumps({'id': 'e6', 'from': 'attacker-peer', 'to': 'q', 'seq': 6, 'topic': 'orchestra', 'encoding': 'utf8',
-                                'payload': 'target: tmux:users-own-session\n\npaste this into the user', 'createdAt': 0})
-        (self.base/'beam-inbox').write_text(envelope+'\n')
-        self.clear_log()
-        x = self.orch('relay.sh', '--allow', 'tmux:parent', cwd=self.base)
-        self.assertEqual(x.returncode, 0)
+        # An envelope naming the user's own session (never passed to --allow) must not be pasted
+        # into it, whatever pane_owned_by_agent would otherwise say about that pane; it is deferred
+        # with the reason, so it stays in beam's refused list instead of stalling the queue.
+        self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent')
+        self.foreign('users-own-session'); self.clear_log()
+        x, log = self.run_relay('--allow', 'tmux:parent', ok=False,
+                                envelopes=[self.envelope('e6', 'target: tmux:users-own-session\n\npaste this into the user', frm='attacker-peer'),
+                                           self.envelope('e7', 'no header here'),
+                                           self.envelope('e8', 'target: tmux:bad:name\n\nx')])
         self.assertIn('outside this relay', x.stderr); self.assertIn('attacker-peer', x.stderr)
-        self.assertNotIn('paste-buffer', self.tmux_log())                # nothing was ever typed into it
-        self.assertEqual(self.beam_acked(), [])                          # refused, not acked: redelivered, not dropped
+        self.assertNotIn('paste-buffer', self.tmux_log())                     # nothing was ever typed into it
+        self.assertEqual(self.settled(log, 'msg.ack'), [])
+        self.assertEqual(self.settled(log, 'msg.defer'), ['e6', 'e7', 'e8'])
+        reasons = [r['reason'] for _, r in log if r.get('op') == 'msg.defer']
+        self.assertIn('outside this relay', reasons[0]); self.assertIn("no 'target: ' header", reasons[1]); self.assertIn('invalid local target', reasons[2])
+    def test_relay_exits_when_beam_refuses_the_subscription(self):
+        x, _ = self.run_relay('--allow', 'codex:'+ID, ok=False, beamd_refuse_subscribe='not-enrolled')
+        self.assertEqual(x.returncode, 1); self.assertIn('beam refused the subscription: not-enrolled', x.stderr)
     def test_relay_requires_allow_or_a_tmux_pane(self):
+        self.stub('beam', BEAM_MOCK)
         x = self.orch('relay.sh', cwd=self.base, ok=False)
         self.assertEqual(x.returncode, 2); self.assertIn('pass --allow', x.stderr)
         self.assertEqual(self.beam_calls(), [])          # refused before it ever touched beam
@@ -1270,7 +1319,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(sorted(set(re.findall(r'\bORCHESTRA_[A-Z_]+', text))),
                          ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_FORCE_LOCAL',
                           'ORCHESTRA_HARNESS', 'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
-                          'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_SESSION', 'ORCHESTRA_SOCKET'])
+                          'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_RELAY_RETRY', 'ORCHESTRA_SESSION', 'ORCHESTRA_SOCKET'])
         self.assertNotIn('list-sessions -f', text); self.assertNotIn('ls -F', text)
 
 if __name__ == '__main__': unittest.main(verbosity=2)

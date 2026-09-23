@@ -204,15 +204,21 @@ skills/orchestrator/scripts/relay.sh            # deliver to the session it was 
 skills/orchestrator/scripts/relay.sh --allow tmux:planning
 ```
 
-It runs `beam msg listen --require-ack --topic orchestra` and delivers each envelope through the
-same paste sequence, and the same pane-ownership check, that a local report uses — a message that
-crossed a machine boundary is not trusted any further than one that did not.
+It subscribes to the `orchestra` topic on the local beam daemon's control socket (through `socat`,
+or an `nc` with `-U`) and delivers each envelope through the same sequence, and the same
+pane-ownership check, that a local report uses — a message that crossed a machine boundary is not
+trusted any further than one that did not.
 
-Two properties are deliberate. It acknowledges a message only *after* delivering it, so a failed
-delivery leaves the message queued for redelivery rather than destroying a report the player was
-already told had arrived. And the targets it may deliver to come only from how it was started (the
-session it runs in, plus any `--allow`), never from the envelope — otherwise any paired machine
-could paste into any session here that has an agent at the prompt, including your own.
+Two properties are deliberate. It acknowledges a message only *after* delivering it; a message it
+cannot deliver is deferred with the reason, stays with beam (`beam msg queue --which refused`), and
+is offered again when `relay.sh` resubscribes 30 seconds later (`ORCHESTRA_RELAY_RETRY`), rather
+than being destroyed after the player was already told it had arrived. And the targets it may
+deliver to come only from how it was started (the session it runs in, plus any `--allow`), never
+from the envelope — otherwise any paired machine could paste into any session here that has an
+agent at the prompt, including your own.
+
+`relay.sh` exits when the beam daemon closes its connection; restart it after restarting beam.
+Nothing is lost in between, since beam keeps every report that was not acknowledged.
 
 N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 
@@ -221,7 +227,8 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 - Linux or macOS with Bash, Git, coreutils (`realpath`, `sha256sum`), and `ps`/`pgrep`. Tested on Linux.
 - tmux 3.x; tested with 3.4.
 - An authenticated `claude` or `codex` CLI for each type of player you want to run.
-- `beam` only if you want players on other machines; see [Machines](#machines).
+- `beam` only if you want players on other machines, plus `socat` or an `nc` with `-U` on the
+  orchestrator's machine for `relay.sh`; see [Machines](#machines).
 - util-linux `script` for automatic CLI detection during resume.
 
 Gemini, Copilot, and OpenCode can also be launched, but have more limited resume support. The plugin uses each CLI's existing authentication and permissions.
@@ -386,8 +393,9 @@ Known limitations:
   remotely, but not a genuine second machine's filesystem or environment.
 - The pre-flight check that an agent CLI exists is skipped for a remote spawn, because checking
   costs a round trip. A missing CLI on the remote machine fails at launch instead of before it.
-- A `relay.sh` allowlist that never matches causes beam to redeliver without backoff. Refusing
-  loudly is deliberate; the retry interval is not tuned.
+- A report the `relay.sh` allowlist refuses is offered again whenever `relay.sh` resubscribes,
+  which it does after any failed delivery, so it is refused and logged again each time. Clear it
+  from beam's refused list, or start `relay.sh` with the `--allow` it needs.
 - Codex resume finds conversations by the worktree path in rollout files; paths requiring JSON escaping do not match.
 - OpenCode resume is untested. Gemini and Copilot resume are unsupported.
 - Automatic CLI detection during resume keeps a `script` transcript in `/tmp` for the Claude session's lifetime.

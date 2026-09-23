@@ -73,10 +73,10 @@ which would create or act on a player on the wrong machine.
 
 `relay.sh` (no `--machine`; it has none, and always acts on this, the orchestrator's, machine —
 even if `$ORCHESTRA_MACHINE` is set in the environment it happens to inherit, which it ignores
-unconditionally) runs `beam msg listen --require-ack --topic orchestra` and delivers each
-arriving envelope to a local target, through the same paste sequence and `pane_owned_by_agent`
-check `report.sh` uses for a local report — a message that arrived from another machine gets no
-more trust than one typed here.
+unconditionally) subscribes to the `orchestra` topic on the local beam daemon's control socket and
+delivers each arriving envelope to a local target, through the same delivery sequence and
+`pane_owned_by_agent` check `report.sh` uses for a local report — a message that arrived from
+another machine gets no more trust than one typed here. It needs `socat` or an `nc` with `-U`.
 
 Two things it does not do, on purpose:
 
@@ -86,10 +86,11 @@ Two things it does not do, on purpose:
   An envelope naming anything outside that allowlist is refused, logged with the sending peer's
   id, and not delivered — any paired peer could otherwise paste arbitrary text into any tmux
   session on this machine that has an agent at the prompt, the user's own session included.
-- **It only acks a message once delivery has actually succeeded.** An envelope that fails
-  delivery, or that the allowlist refuses, is left unacknowledged, so it stays in the sender's
-  queue and is redelivered — acknowledging first and then failing to deliver would destroy a
-  report the sender was already told had arrived.
+- **It only acks a message once delivery has actually succeeded.** An envelope the allowlist
+  refuses, or whose delivery fails, is deferred with the reason instead: beam keeps it (`beam msg
+  queue --which refused` lists it) and offers it again to the next subscription, which `relay.sh`
+  makes itself 30 seconds after a failed delivery (`ORCHESTRA_RELAY_RETRY`). Acknowledging first
+  and then failing to deliver would destroy a report the sender was already told had arrived.
 
 Run it directly only when supervising remote players from a plain terminal with nothing
 else already relaying that topic; N10 Desktop runs its own relay, so do not run this alongside it.
