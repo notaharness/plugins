@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Runs on the orchestrator's machine: subscribes to reports beamed in from remote players and
 # delivers each one exactly as report.sh would deliver a local one — the same shared
-# deliver_to_local_target sequence (load-buffer/paste-buffer/send-keys, or codex queue), gated
-# by the same pane_owned_by_agent check, so a message that arrived from another machine gets no
-# more trust than one typed locally.
+# deliver_to_local_target sequence (Claude's inbox socket, load-buffer/paste-buffer/send-keys, or
+# codex queue), gated by the same pane_owned_by_agent check, so a message that arrived from
+# another machine gets no more trust than one typed locally.
 #
 # Usage: relay.sh [--topic T] [--allow <local target>]...    default topic: orchestra
 #   --allow codex:<thread-id>|tmux:<session>   an additional local target this relay may deliver
@@ -137,7 +137,7 @@ handle_mail() {
   case "$payload" in *"$nl"*) message="${payload#*"$nl"}"; message="${message#"$nl"}";; *) message="";; esac
   if deliver_to_local_target "$SOCK" "$local_target" "$message"; then
     ack "$id"
-    echo "relay.sh: delivered to $local_target" >&2
+    echo "relay.sh: delivered to $local_target ($DELIVER_ROUTE)" >&2
   else
     defer "$id" "delivery to $local_target failed: $DELIVER_REASON"
     retry_later

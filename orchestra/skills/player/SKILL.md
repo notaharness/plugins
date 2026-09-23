@@ -66,9 +66,12 @@ if nothing remains independent, finish the turn and await the reply. Finish each
 with one DONE or BLOCKED report. Handoffs may legitimately resend the terminal report.
 
 `report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a tmux orchestrator, or a
-beam delivery the far machine acknowledged) only when the transport accepted the message; it then
-records `<KIND> <timestamp> <delivered|stored>` in your session's `@orchestra-last-report` tag —
-a third field beyond the kind and timestamp.
+beam delivery the far machine acknowledged) only when the transport accepted the message. A tmux
+orchestrator running Claude Code receives the report on its inbox socket, as a message it reads
+between tool calls, and `report.sh` prints `sent to <session> (inbox)`; any other orchestrator
+gets it pasted into its pane, `sent to <session> (paste)`. It then records
+`<KIND> <timestamp> <delivered|stored|inbox|paste>` in your session's `@orchestra-last-report`
+tag — a third field beyond the kind and timestamp.
 
 When your orchestrator is on another machine and beam cannot hand the report over right away —
 that machine is offline, or has not acknowledged it yet — beam keeps the report on disk and goes
@@ -81,8 +84,9 @@ stored for <peerId>; delivery pending (<peerId> is offline). beam will deliver i
 This exits 0 and sets `@orchestra-last-report`'s third field to `stored`. Treat it exactly like
 `sent to …`: the report is done, nothing was lost, and sending it again would deliver it twice.
 
-On failure — a local target gone or unreachable, or beam's own `rejected` (unknown peer, revoked
-peer, or the report too large) — it exits nonzero and prints `report.sh: delivery failed`, the
+On failure — a local target gone or unreachable, a Claude inbox socket that refused the
+connection, or beam's own `rejected` (unknown peer, revoked peer, or the report too large) — it
+exits nonzero and prints `report.sh: delivery failed`, the
 destination (or `<unknown>` if it cannot be read), the reason, and the complete original report to
 stderr. Surface the delivery failure in your response and quote the full report so the result
 remains visible in your conversation. Inspect the destination before retrying: a paste may have

@@ -115,7 +115,7 @@ if c == 'display-message':
     n = target(a.index('-t')+1) if '-t' in a else None; key = a[-1]; s = state.get(n, {})
     print({'#S': os.environ.get('TEST_TMUX_SESSION', 'parent'), '#{pane_dead}': str(s.get('dead', 1)), '#{pane_current_path}': s.get('path', ''),
            '#{socket_path}': sock, '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
-           '#{pane_pid}': str(os.getpid())}.get(key, '')); sys.exit(0)
+           '#{pane_pid}': os.environ.get('TEST_PANE_PID', str(os.getpid()))}.get(key, '')); sys.exit(0)
 if c == 'show-options':
     # Session user option: `show-options -qv -t =name: @tag`. Without -q an unset option is an error.
     n = target(a.index('-t')+1); v = state[n]['options'].get(a[-1])
@@ -836,13 +836,81 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent')
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SOCKET'], '/tmp/custom-socket')
         self.foreign('parent', sock='/tmp/custom-socket'); self.clear_log()
-        self.report('PROGRESS', 'tmux delivery', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket')); log = self.tmux_log()
+        x = self.report('PROGRESS', 'tmux delivery', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket')); log = self.tmux_log()
         self.assertIn('"-S", "/tmp/custom-socket", "load-buffer"', log); self.assertIn('paste-buffer', log); self.assertIn('"=parent:"', log)
         self.assertEqual((self.base/'buffer').read_text(), '[player repo-feature-test] PROGRESS: tmux delivery')
-        self.assertRegex(self.last_report(sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' delivered$')
+        self.assertEqual(x.stdout, 'sent to parent (paste)\n')
+        self.assertRegex(self.last_report(sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' paste$')
         self.run_cmd(['tmux', '-S', '/tmp/custom-socket', 'kill-session', '-t', '=parent'])
         x = self.report('DONE', 'gone', env=self.player_env(ORCHESTRA_SOCKET='/tmp/custom-socket'), ok=False)
         self.assert_delivery_failed(x, 'tmux:parent', 'orchestrator session parent is gone', 'DONE', 'gone')
+    # A Claude Code orchestrator: the report goes to its inbox socket, found through the session
+    # registry file Claude writes for its pid, and never touches the pane.
+    def fake_claude(self, register=True, listen=True, proc_start=None):
+        import socket, threading
+        proc = subprocess.Popen(['bash', '-c', 'exec -a claude sleep 30'], stdin=subprocess.DEVNULL)
+        self.addCleanup(proc.wait); self.addCleanup(proc.kill)       # cleanups run last-in first-out
+        for _ in range(100):                               # until exec has replaced bash
+            if (Path('/proc/%d/cmdline' % proc.pid).read_bytes().split(b'\0')[0] == b'claude'): break
+            import time; time.sleep(0.02)
+        sock_path = str(self.base/('inbox-%d.sock' % proc.pid)); received = []
+        srv = socket.socket(socket.AF_UNIX); srv.bind(sock_path)
+        if listen:
+            srv.listen(1)
+            def serve():
+                conn, _ = srv.accept(); data = b''
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk: break
+                    data += chunk
+                received.append(data); conn.close()
+            t = threading.Thread(target=serve, daemon=True); t.start(); self.addCleanup(t.join, 5)
+        else:
+            srv.close()                                    # the file stays, nothing listens: connection refused
+        self.addCleanup(lambda: srv.close())
+        if register:
+            stat = Path('/proc/%d/stat' % proc.pid).read_text()
+            start = stat.rsplit(') ', 1)[1].split()[19]
+            d = self.base/'claude-config/sessions'; d.mkdir(parents=True, exist_ok=True)
+            (d/('%d.json' % proc.pid)).write_text(json.dumps({'pid': proc.pid, 'sessionId': UUID, 'procStart': proc_start or start,
+                                                               'kind': 'interactive', 'messagingSocketPath': sock_path, 'status': 'idle'}))
+        self.env.update(TEST_PANE_COMMAND='claude', TEST_PANE_PID=str(proc.pid))
+        return received
+    def test_claude_orchestrator_gets_the_report_on_its_inbox_socket(self):
+        self.spawn('--agent', 'codex', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        received = self.fake_claude(); self.clear_log()
+        text = 'one\ntwo "quoted" \\ back\ttab $(touch BAD) \u00e9'
+        x = self.report('DONE', text)
+        self.assertEqual(x.stdout, 'sent to parent (inbox)\n')
+        self.assertRegex(self.last_report(), '^DONE '+STAMP+' inbox$')
+        for _ in range(100):
+            if received: break
+            import time; time.sleep(0.05)
+        self.assertEqual(len(received), 1); self.assertTrue(received[0].endswith(b'\n')); self.assertEqual(received[0].count(b'\n'), 1)
+        self.assertEqual(json.loads(received[0]), {'type': 'user', 'message': {'role': 'user', 'content': '[player %s] DONE: %s' % (self.session, text)}})
+        for cmd in ('load-buffer', 'paste-buffer', 'send-keys'): self.assertNotIn(cmd, self.tmux_log())
+        self.assertFalse((self.wt/'BAD').exists())
+    def test_claude_without_a_live_inbox_falls_back_to_paste(self):
+        self.spawn('--agent', 'codex', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        for case, kwargs in (('no registry file', {'register': False}), ('recycled pid', {'proc_start': '1'})):
+            with self.subTest(case):
+                received = self.fake_claude(**kwargs); self.clear_log()
+                x = self.report('PROGRESS', case)
+                self.assertEqual(x.stdout, 'sent to parent (paste)\n'); self.assertRegex(self.last_report(), ' paste$')
+                self.assertIn('paste-buffer', self.tmux_log()); self.assertEqual(received, [])
+    def test_refused_inbox_fails_loudly_without_pasting(self):
+        self.spawn('--agent', 'codex', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        self.fake_claude(listen=False); self.clear_log(); before = self.state()
+        x = self.report('DONE', 'nobody home', ok=False)
+        self.assert_delivery_failed(x, 'tmux:parent', 'claude inbox socket refused the connection', 'DONE', 'nobody home')
+        self.assertNotIn('paste-buffer', self.tmux_log()); self.assertEqual(self.state(), before)
+    def test_relay_delivers_to_a_claude_inbox(self):
+        self.spawn('--agent', 'codex', '--orchestrator', 'tmux:parent'); self.foreign('parent')
+        received = self.fake_claude()
+        x, log = self.run_relay('--allow', 'tmux:parent', ok=False, envelopes=[self.envelope('e9', 'target: tmux:parent\n\n[player far] DONE: over beam')])
+        self.assertIn('relay.sh: delivered to tmux:parent (inbox)', x.stderr)
+        self.assertEqual(json.loads(received[0])['message']['content'], '[player far] DONE: over beam')
+        self.assertEqual(self.settled(log, 'msg.ack'), ['e9'])
     def test_failed_paste_leaves_no_buffer(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
         self.env['TEST_PASTE_FAIL'] = '1'

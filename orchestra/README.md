@@ -141,7 +141,7 @@ flowchart LR
             Identity["Set at creation<br/>@orchestra-spawner = orchestra<br/>@orchestra-repo = /code/shop<br/>@orchestra-session-type = worktree<br/>@orchestra-branch = feature/search"]
             Runtime["Launch state<br/>@orchestra-agent = claude<br/>@orchestra-launching = 1 during launch, then unset"]
             Target["Reporting destination<br/>@orchestra-orchestrator = tmux:planning"]
-            Reports["Last accepted report<br/>@orchestra-last-report = KIND + timestamp"]
+            Reports["Last accepted report<br/>@orchestra-last-report = KIND + timestamp + outcome"]
         end
         Pane["Pane process: coding agent CLI<br/>Working directory: /code/shop/.claude/worktrees/feature-search"]
     end
@@ -229,6 +229,7 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 - An authenticated `claude` or `codex` CLI for each type of player you want to run.
 - `beam` only if you want players on other machines, plus `socat` or an `nc` with `-U` on the
   orchestrator's machine for `relay.sh`; see [Machines](#machines).
+- OpenBSD `nc` (for `-N -U`) or `socat` to deliver reports to a Claude Code orchestrator's inbox socket; without either, reports are pasted into its pane.
 - util-linux `script` for automatic CLI detection during resume.
 
 Gemini, Copilot, and OpenCode can also be launched, but have more limited resume support. The plugin uses each CLI's existing authentication and permissions.
@@ -284,7 +285,7 @@ tmux -u show-options -qv -t '=shop-feature-search:' @orchestra-agent
 | `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
 | `@orchestra-agent` | Harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom`. The launcher records what actually started. |
 | `@orchestra-launching` | `1` only while the placeholder pane exists. |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <delivered|stored>` of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <outcome>`, the outcome being `delivered` (Codex queue, or beam delivered), `stored` (beam stored), `inbox` or `paste`, of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
 
 The first four tags record the session's origin and are written at creation. Spawning or adopting a player sets its supervisor independently.
 
@@ -294,7 +295,7 @@ The pane receives `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` so the launcher and
 
 The player calls `report.sh KIND "message"`. The script reads `@orchestra-orchestrator` on every call and sends `[player SESSION] KIND: message`, where `SESSION` is the player's tmux session name. `report.sh --orchestrator` prints the target; changing it is the responsibility of the spawn and adoption scripts.
 
-Reports go to either a Codex conversation through `codex queue` or a Claude orchestrator's tmux pane, reached through `ORCHESTRA_SOCKET`. An explicit `--orchestrator codex:<thread-id>` or `--orchestrator tmux:<session>` selects the target when spawning or adopting. Otherwise, the scripts detect the orchestrator from the current session. A player's own Codex ID is never used as its parent target.
+Reports go to either a Codex conversation through `codex queue` or an orchestrator in a tmux pane, reached through `ORCHESTRA_SOCKET` (see [Delivery](#delivery)). An explicit `--orchestrator codex:<thread-id>` or `--orchestrator tmux:<session>` selects the target when spawning or adopting. Otherwise, the scripts detect the orchestrator from the current session. A player's own Codex ID is never used as its parent target.
 
 Players send four kinds of report:
 
@@ -305,7 +306,18 @@ Players send four kinds of report:
 | `BLOCKED` | Something prevents further progress. |
 | `DONE` | The task is complete, with results and any limitations. |
 
-Successful delivery prints `queued for …` or `sent to …` and records the kind, the timestamp and the outcome in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
+### Delivery
+
+A report for a tmux orchestrator takes one of two routes, decided on every call from what is running in that pane:
+
+| Route | When | What the orchestrator sees |
+| --- | --- | --- |
+| Inbox | Claude Code 2.1.224 or later is at the terminal, and `nc` (with `-N -U`) or `socat` is installed | The report arrives on the session's [inbox socket](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket) as a cross-session message: read between tool calls while it works, a new turn while it is idle. Nothing is typed into its prompt box. |
+| Paste | Any other agent, an older Claude Code, or a Claude session whose socket cannot be found | The report is pasted into the pane as one bracketed paste and submitted with Enter. |
+
+`report.sh` finds the socket through the registry file Claude Code keeps for each live session, `sessions/<pid>.json` under that session's configuration directory, and checks the recorded start time against the process so a recycled pid is never mistaken for it. Once a socket is found, a refused connection is a delivery failure, not a reason to paste as well, which could deliver the report twice.
+
+Successful delivery prints `queued for …` (Codex) or `sent to <session> (inbox)` / `sent to <session> (paste)`, and records the kind, the timestamp and the outcome — `delivered`, `stored`, `inbox` or `paste` — in `@orchestra-last-report`. This confirms transport acceptance; it does not confirm that the supervising agent has read the report.
 
 When the orchestrator is on another machine, delivery has three outcomes rather than two, and the
 middle one is a success:
@@ -370,9 +382,9 @@ sequenceDiagram
     Player->>Report: Run report.sh PROGRESS with handoff summary
     Report->>Tags: show-options @orchestra-orchestrator
     Tags-->>Report: tmux:planning
-    Report->>Parent: Paste report into planning session and submit
+    Report->>Parent: Deliver on the planning session's Claude inbox socket, or paste and submit
     alt Transport accepts report
-        Report->>Tags: set-option @orchestra-last-report to kind + timestamp
+        Report->>Tags: set-option @orchestra-last-report to kind + timestamp + outcome
     else Delivery fails
         Report-->>Player: Exit nonzero; print target, reason, and full report to stderr
     end

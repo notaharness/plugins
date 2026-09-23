@@ -338,50 +338,115 @@ resolve_orchestrator() {
 # binary in the foreground process group counts. A suspended agent (STAT T) or one in the
 # background leaves the shell reading the tty.
 is_agent_name() { case "$1" in claude|codex|gemini|copilot|opencode) return 0;; *) return 1;; esac; }
+# process_agent <pid> [<name>]: prints "<pid> <agent>" when that process is an agent binary (by
+# its comm or its argv[0]) and not suspended: in the foreground process group, or, given <name>,
+# named exactly that — tmux has already said which command is in the foreground.
+process_agent() {
+  local pid="$1" want="${2:-}" stat comm argv0 name
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null)"
+  case "$stat" in ""|T*) return 1;; esac
+  [ -n "$want" ] || case "$stat" in *+*) ;; *) return 1;; esac
+  comm="$(ps -o comm= -p "$pid" 2>/dev/null)"
+  argv0="$(ps -o args= -p "$pid" 2>/dev/null | awk '{print $1}')"
+  for name in "$comm" "${argv0##*/}"; do
+    is_agent_name "$name" || continue
+    [ -z "$want" ] || [ "$name" = "$want" ] || continue
+    printf '%s %s' "$pid" "$name"; return 0
+  done
+  return 1
+}
+# pane_has_agent <pid> [<name>]: prints "<pid> <agent>" for the first agent process below <pid>
+# (see process_agent); fails when there is none.
 pane_has_agent() {
-  local pid="$1" child comm argv0 stat
+  local pid="$1" want="${2:-}" child
   for child in $(pgrep -P "$pid" 2>/dev/null); do
-    comm="$(ps -o comm= -p "$child" 2>/dev/null)"
-    argv0="$(ps -o args= -p "$child" 2>/dev/null | awk '{print $1}')"
-    stat="$(ps -o stat= -p "$child" 2>/dev/null)"
-    case "$stat" in
-      T*) ;;
-      *+*) is_agent_name "$comm" && return 0
-           is_agent_name "${argv0##*/}" && return 0;;
-    esac
-    pane_has_agent "$child" && return 0
+    process_agent "$child" "$want" && return 0
+    pane_has_agent "$child" "$want" && return 0
   done
   return 1
 }
 # pane_owned_by_agent <socket> <session>: true when the session's pane is alive and an agent (not a
-# shell) is at the terminal. The socket selects the server as in tmux_on.
+# shell) is at the terminal. The socket selects the server as in tmux_on. On this machine it also
+# leaves the agent's pid and name in PANE_AGENT_PID and PANE_AGENT (both empty when the foreground
+# command is not a known agent binary, such as an editor, or the pane is on another machine).
+PANE_AGENT_PID=""; PANE_AGENT=""
 pane_owned_by_agent() {
-  local sock="$1" session="$2" cmd pid
+  local sock="$1" session="$2" cmd pid agent=""
+  PANE_AGENT_PID=""; PANE_AGENT=""
   [ "$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_dead}' 2>/dev/null)" = 0 ] || return 1
   cmd="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_current_command}' 2>/dev/null)"
   case "$cmd" in
     sh|bash|zsh|fish|dash|"")
       pid="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_pid}' 2>/dev/null)"
-      pane_has_agent "$pid";;
-    *) return 0;;
+      agent="$(pane_has_agent "$pid")" || return 1;;
+    *)
+      if is_local_machine && is_agent_name "$cmd"; then
+        pid="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_pid}' 2>/dev/null)"
+        agent="$(process_agent "$pid" "$cmd" || pane_has_agent "$pid" "$cmd")" || agent=""
+      fi;;
   esac
+  if [ -n "$agent" ]; then PANE_AGENT_PID="${agent%% *}"; PANE_AGENT="${agent#* }"; fi
+  return 0
+}
+
+# --- Claude Code's inbox socket ----------------------------------------------------------------
+# Claude Code (2.1.224 and later) binds a per-session Unix socket that takes one NDJSON line,
+# {"type":"user","message":{"role":"user","content":"<text>"}}, and hands it to that session as a
+# cross-session message: read between tool calls while it works, a new turn while it is idle,
+# never typed into its prompt box (https://code.claude.com/docs/en/cross-session-messaging).
+# claude_inbox_socket <pid>: that socket for the Claude Code process <pid>, from the registry file
+# Claude writes for each live session, <config dir>/sessions/<pid>.json ("messagingSocketPath").
+# CLAUDE_CODE_MESSAGING_SOCKET is no help here: Claude exports it only to its own children, so the
+# process's own environment holds, at most, a parent session's socket. The config directory is
+# the one that process runs with (its CLAUDE_CONFIG_DIR, where /proc shows it), then this
+# process's, then ~/.claude. Where /proc is available the file's "procStart" must match the
+# process's start time, so a recycled pid is never taken for the session that used to hold it.
+# Fails when no live socket is found; the caller then pastes instead, as it does when neither nc
+# nor socat is installed to write to one.
+claude_inbox_socket() {
+  local pid="$1" own_dir="" dir json sock recorded started
+  [ -r "/proc/$pid/environ" ] && own_dir="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n1)"
+  for dir in "$own_dir" "${CLAUDE_CONFIG_DIR:-}" "${HOME:-}/.claude"; do
+    [ -n "$dir" ] && [ -f "$dir/sessions/$pid.json" ] || continue
+    json="$(cat "$dir/sessions/$pid.json" 2>/dev/null)" || continue
+    sock="$(json_string_field "$json" messagingSocketPath)" || continue
+    recorded="$(json_string_field "$json" procStart || :)"
+    if [ -n "$recorded" ] && [ -r "/proc/$pid/stat" ]; then
+      started="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')"
+      [ "$started" = "$recorded" ] || continue
+    fi
+    [ -S "$sock" ] || continue
+    printf '%s' "$sock"; return 0
+  done
+  return 1
+}
+# claude_inbox_client: can this machine write to a Unix socket at all (nc -N -U, else socat)?
+claude_inbox_client() { command -v nc >/dev/null 2>&1 || command -v socat >/dev/null 2>&1; }
+# claude_inbox_post <socket> <text>: one frame, then EOF. Fails when the socket refuses it.
+claude_inbox_post() {
+  local frame
+  frame="{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":$(json_str "$2")}}"
+  if command -v nc >/dev/null 2>&1; then printf '%s\n' "$frame" | nc -N -U "$1" >/dev/null 2>&1
+  else printf '%s\n' "$frame" | socat - "UNIX-CONNECT:$1" >/dev/null 2>&1; fi
 }
 
 # --- Shared local delivery ---------------------------------------------------------------------
 # The one place a report (or a relayed envelope) is actually delivered to a local target: the
-# codex queue path, or the tmux load-buffer/paste-buffer/send-keys sequence, gated by
-# pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux: target)
-# and relay.sh (an envelope's embedded local target) both call this; a message that arrived from
-# another machine gets exactly the same scrutiny as one typed locally. <target> carries its
-# codex:/tmux: prefix; on failure the reason is left in DELIVER_REASON rather than printed here,
-# so each caller keeps its own error wording (report.sh's "delivery failed" block, relay.sh's log
-# line).
-DELIVER_REASON=""
+# codex queue path, or, for a tmux target, Claude's inbox socket when a Claude Code session with
+# one is at the terminal, else the tmux load-buffer/paste-buffer/send-keys sequence — both gated
+# by pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux:
+# target) and relay.sh (an envelope's embedded local target) both call this; a message that
+# arrived from another machine gets exactly the same scrutiny as one typed locally. <target>
+# carries its codex:/tmux: prefix. On success DELIVER_ROUTE says which way it went (queue, inbox
+# or paste); on failure the reason is left in DELIVER_REASON rather than printed here, so each
+# caller keeps its own error wording (report.sh's "delivery failed" block, relay.sh's log line).
+DELIVER_REASON=""; DELIVER_ROUTE=""
 deliver_to_local_target() {
-  local sock="$1" target="$2" msg="$3" tt
+  local sock="$1" target="$2" msg="$3" tt inbox
+  DELIVER_ROUTE=""
   case "$target" in
     codex:*)
-      codex queue --thread "${target#codex:}" --message "$msg" && return 0
+      codex queue --thread "${target#codex:}" --message "$msg" && { DELIVER_ROUTE=queue; return 0; }
       DELIVER_REASON='Codex queue refused the message; inspect before retrying to avoid duplicate reports'
       return 1;;
     tmux:*) target="${target#tmux:}";;
@@ -390,6 +455,12 @@ deliver_to_local_target() {
   tmux_on "$sock" has-session -t "=$target" 2>/dev/null || { DELIVER_REASON="orchestrator session $target is gone or unreachable"; return 1; }
   # Would the paste be run as a shell command? Only an agent at the terminal may receive it.
   pane_owned_by_agent "$sock" "$target" || { DELIVER_REASON="a shell owns $target now, not an agent"; return 1; }
+  # A Claude Code session takes the message on its inbox socket: nothing touches its prompt box.
+  # Once the socket is found a failure is final — falling back to a paste could deliver twice.
+  if [ "$PANE_AGENT" = claude ] && claude_inbox_client && inbox="$(claude_inbox_socket "$PANE_AGENT_PID")"; then
+    claude_inbox_post "$inbox" "$msg" || { DELIVER_REASON="claude inbox socket refused the connection"; return 1; }
+    DELIVER_ROUTE=inbox; return 0
+  fi
   # One bracketed paste (-p) keeps embedded newlines from submitting early; the buffer is loaded
   # from stdin because tmux rejects command lines over ~16 KiB. The pause lets a slow UI ingest
   # the paste before Enter.
@@ -401,5 +472,5 @@ deliver_to_local_target() {
   sleep 0.3
   tmux_on "$sock" send-keys -t "$tt" Enter ||
     { DELIVER_REASON="tmux could not submit the message in $target; the paste succeeded, inspect before retrying"; return 1; }
-  return 0
+  DELIVER_ROUTE=paste; return 0
 }

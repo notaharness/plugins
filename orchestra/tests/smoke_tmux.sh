@@ -80,10 +80,10 @@ check "spawn refuses running session" "! bash '$O/spawn.sh' --repo '$T/repo' --b
 
 echo "# report.sh from the player to tmux:parent"
 (cd "$W1" && player PROGRESS "hello from smoke") >"$T/report.out" 2>&1
-check "report exits 0" "[ $? = 0 ] && grep -q 'sent to parent' '$T/report.out'"
+check "report exits 0; a pane without a Claude inbox gets a paste" "[ $? = 0 ] && grep -qx 'sent to parent (paste)' '$T/report.out'"
 sleep 0.5
 check "parent received report under the session name" "grep -q '\[player $S1\] PROGRESS: hello from smoke' '$T/received-claude'"
-check "last-report tag set" "tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP delivered\$'"
+check "last-report tag set" "tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP paste\$'"
 check "--orchestrator prints the tag" "[ \"\$(player --orchestrator)\" = tmux:parent ]"
 (cd "$W1" && player --orchestrator tmux:other >/dev/null 2>&1); check "player cannot rebind itself" "[ $? = 2 ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
 (unset TMUX; tm kill-session -t "=parent")
@@ -103,9 +103,34 @@ check "no mailbox written" "[ ! -e '$HOME/.claude/orchestrator-mail' ] || [ -z \
 
 echo "# listing"
 bash "$O/sessions.sh" --all --json > "$T/sessions.json" 2>/dev/null
-check "sessions.sh --json shows tags" "jq -e '.[] | select(.session == \"$S1\") | .name == \"$S1\" and .agent == \"claude\" and .orchestrator == \"tmux:parent\" and .branch == \"feature/x\" and .repo == \"$REPO\" and (.last_report | test(\"^PROGRESS $STAMP delivered\$\"))' '$T/sessions.json' >/dev/null"
+check "sessions.sh --json shows tags" "jq -e '.[] | select(.session == \"$S1\") | .name == \"$S1\" and .agent == \"claude\" and .orchestrator == \"tmux:parent\" and .branch == \"feature/x\" and .repo == \"$REPO\" and (.last_report | test(\"^PROGRESS $STAMP paste\$\"))' '$T/sessions.json' >/dev/null"
 check "sessions.sh --json never lists the untagged parent" "! jq -e '.[] | select(.session == \"parent\")' '$T/sessions.json' >/dev/null"
 check "sessions.sh columns" "bash '$O/sessions.sh' --repo '$T/repo' | head -n1 | grep -q 'SESSION *BRANCH *AGENT' && bash '$O/sessions.sh' --repo '$T/repo' | grep -q '$S1 *feature/x .*tmux:parent'"
+
+echo "# report.sh to a Claude Code orchestrator: its inbox socket, not its pane"
+# A pane whose foreground process is "claude", registered the way Claude Code registers a live
+# session (<config dir>/sessions/<pid>.json with its inbox socket and start time), and a socat
+# listener standing in for that socket.
+(unset TMUX TMUX_PANE; tm new-session -d -s claude-orch -x 80 -y 20 -- bash -c 'exec -a claude sleep 300')
+cpid="$(tm display-message -p -t '=claude-orch:' '#{pane_pid}')"
+for _ in $(seq 50); do [ "$(tr '\0' '\n' < "/proc/$cpid/cmdline" | head -n1)" = claude ] && break; sleep 0.1; done
+mkdir -p "$CLAUDE_CONFIG_DIR/sessions"
+printf '{"pid":%s,"procStart":"%s","messagingSocketPath":"%s","kind":"interactive"}\n' "$cpid" \
+  "$(sed 's/.*) //' "/proc/$cpid/stat" | awk '{print $20}')" "$T/inbox.sock" > "$CLAUDE_CONFIG_DIR/sessions/$cpid.json"
+socat -u UNIX-LISTEN:"$T/inbox.sock" OPEN:"$T/inbox-received",creat,trunc & inbox_pid=$!
+for _ in $(seq 50); do [ -S "$T/inbox.sock" ] && break; sleep 0.1; done
+tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:claude-orch"
+(cd "$W1" && player DONE "to the inbox"$'\n'"second \"line\"") >"$T/inbox.out" 2>&1; irc=$?
+wait "$inbox_pid"
+check "claude orchestrator: sent to its inbox, tag says inbox" \
+  "[ $irc = 0 ] && grep -qx 'sent to claude-orch (inbox)' '$T/inbox.out' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
+check "the inbox got exactly one NDJSON user frame with the report" \
+  "[ \"\$(wc -l < '$T/inbox-received')\" = 1 ] && python3 -c 'import json,sys; m=json.loads(open(sys.argv[1]).read()); assert m == {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"[player '$S1'] DONE: to the inbox\\nsecond \\\"line\\\"\"}}, m' '$T/inbox-received'"
+check "nothing was typed into the claude pane" "! tm capture-pane -p -t '=claude-orch:' | grep -q 'to the inbox'"
+rm -f "$T/inbox.sock"
+(cd "$W1" && player PROGRESS "socket gone") >"$T/inbox-gone.out" 2>&1
+check "no live inbox socket: falls back to a paste" "grep -qx 'sent to claude-orch (paste)' '$T/inbox-gone.out'"
+tm kill-session -t '=claude-orch'; tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 
 echo "# targeting: by branch in a repo, by exact tagged name anywhere; never by prefix or sanitized form"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x-2 --from HEAD --prompt "second" --no-node-modules >/dev/null 2>&1
@@ -170,7 +195,7 @@ sleep 0.5
 bash "$O/adopt.sh" adopted --repo "$T/repo" --orchestrator tmux:parent >/dev/null 2>&1; check "adopt of a Kirby pane by branch" "[ $? = 0 ] && [ \"\$(tag $SA @orchestra-orchestrator)\" = tmux:parent ]"
 bash "$O/send.sh" adopted --repo "$T/repo" --raw "REPORT" >/dev/null 2>&1; sleep 1.5
 check "report.sh inside the pane delivered under the session name" "grep -q 'sent to parent' '$T/inside.out' && grep -q '\[player $SA\] DONE: from inside' '$T/received-claude'"
-check "last-report on the adopted session" "tag $SA @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
+check "last-report on the adopted session" "tag $SA @orchestra-last-report | grep -Eq '^DONE $STAMP paste\$'"
 tm kill-session -t "=$SA"
 
 echo "# resume: dead pane, restart note only, no task replay"
