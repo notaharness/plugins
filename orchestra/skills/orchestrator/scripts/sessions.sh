@@ -55,20 +55,23 @@ in_scope() { [ -n "$1" ] && [ "$2" = "$SESSION_TYPE_WORKTREE" ] && [ -n "$3" ] &
 # Machines to list: an explicit --machine names exactly one, shown exactly as given. --all with
 # no --machine adds every registered peer to "local", cheaply (one `beam peers --json` call, then
 # one listing per machine); beam not resolving, or having no peers, leaves MACHINES at ("local") —
-# today's behaviour exactly. MACHINE_LABEL carries each discovered peer's label (`beam peers`
-# already returns one), so the MACHINE column reads a name a person chose, not a peerId.
+# today's behaviour exactly. MACHINE_LABEL carries each discovered peer's name — its local alias
+# when one is set, else its label, as `beam peers` itself shows it — so the MACHINE column reads a
+# name a person chose, not a peerId.
 MACHINES=(local); declare -A MACHINE_LABEL
 if [ $EXPLICIT_MACHINE = 1 ]; then MACHINES=("$ORCH_MACHINE")
 elif [ $ALL = 1 ] && beam_cmd 2>/dev/null; then
+  # `beam peers --json` prints `{ "peers": [PeerView…] }`, every page already fetched (the CLI
+  # follows the socket's `next` cursor itself; beam/docs/06-control-socket.md, beam/docs/07-cli.md).
   peers_json="$("${BEAM_CMD[@]}" peers --json 2>/dev/null)" || peers_json=""
   # Split the array properly (json_array_objects, _routing.sh) rather than by scanning for the
   # next "{...}": a label is chosen by a person on the machine that peer belongs to, and one
   # containing "}" would otherwise cut that peer's object short and lose every peer after it.
-  if json_array_objects "$peers_json" 2>/dev/null; then
+  if json_array_objects "$peers_json" peers 2>/dev/null; then
     for obj in ${JSON_OBJECTS[@]+"${JSON_OBJECTS[@]}"}; do
       pid="$(json_string_field "$obj" peerId 2>/dev/null || :)"
       [ -n "$pid" ] || continue
-      lbl="$(json_string_field "$obj" label 2>/dev/null || :)"
+      lbl="$(json_string_field "$obj" alias 2>/dev/null || json_string_field "$obj" label 2>/dev/null || :)"
       MACHINES+=("$pid"); MACHINE_LABEL["$pid"]="${lbl:-$pid}"
     done
   fi

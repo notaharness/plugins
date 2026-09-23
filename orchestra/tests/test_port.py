@@ -192,6 +192,9 @@ BEAM_MOCK = r'''#!/usr/bin/env python3
 import os, sys, json, subprocess
 from pathlib import Path
 b = Path(os.environ['ORCH_TEST_TMP']); a = sys.argv[1:]
+def peer_view(pid, label, state, alias=None):
+    return {'peerId': pid, 'label': label, 'alias': alias, 'state': state, 'inbound': False, 'path': 'direct',
+            'lastSeenAt': 0, 'grant': 'all', 'revokedAt': None, 'pinnedAt': 0, 'queue': {'outbound': 0, 'inbound': 0, 'refused': 0}}
 with (b/'beam-log').open('a') as f: f.write(json.dumps(a)+'\n')
 if a[:1] == ['exec']:
     machine = a[1]; rest = a[2:]
@@ -231,15 +234,15 @@ if a[:1] == ['status']:
                        'label': os.environ.get('TEST_BEAM_LABEL_SELF', 'thishost'), 'running': True}))
     sys.exit(0)
 if a[:1] == ['peers']:
-    raw = os.environ.get('TEST_BEAM_PEERS_JSON')      # verbatim JSON, for labels TEST_BEAM_PEERS cannot express
-    if raw: print(raw); sys.exit(0)
+    # Shaped like the real CLI's output: `{ "peers": [PeerView…] }`, indented (beam/docs/06, 07).
+    raw = os.environ.get('TEST_BEAM_PEERS_JSON')      # the peers array verbatim, for labels TEST_BEAM_PEERS cannot express
+    if raw: print(json.dumps({'peers': json.loads(raw)}, indent=2)); sys.exit(0)
     peers = []
     for item in os.environ.get('TEST_BEAM_PEERS', '').split(','):
         if not item: continue
         parts = item.split(':'); pid = parts[0]
-        peers.append({'peerId': pid, 'label': parts[1] if len(parts) > 1 else pid,
-                       'state': parts[2] if len(parts) > 2 else 'connected', 'endpoint': '', 'queued': 0})
-    print(json.dumps(peers)); sys.exit(0)
+        peers.append(peer_view(pid, parts[1] if len(parts) > 1 else pid, parts[2] if len(parts) > 2 else 'connected'))
+    print(json.dumps({'peers': peers}, indent=2)); sys.exit(0)
 if a[:2] == ['msg', 'send']:
     peer = a[2]; stdin_data = sys.stdin.buffer.read().decode()
     with (b/'beam-sent').open('a') as f: f.write(json.dumps({'peer': peer, 'payload': stdin_data})+'\n')
@@ -598,8 +601,8 @@ class PortTests(unittest.TestCase):
         self.stub('beam', BEAM_MOCK)
         hostile = 'work}box "one" \\ two{'
         self.env['TEST_BEAM_PEERS_JSON'] = json.dumps(
-            [{'peerId': PEER, 'label': hostile, 'state': 'connected', 'endpoint': '', 'queued': 0},
-             {'peerId': 'fedcba0987654321fedcba0987654321', 'label': 'plain', 'state': 'connected', 'endpoint': '', 'queued': 0}])
+            [{'peerId': PEER, 'label': hostile, 'alias': None, 'state': 'connected', 'queue': {'outbound': 0, 'inbound': 0, 'refused': 0}},
+             {'peerId': 'fedcba0987654321fedcba0987654321', 'label': 'peers', 'alias': 'plain', 'state': 'offline', 'queue': {'outbound': 1, 'inbound': 0, 'refused': 0}}])
         rows = self.sessions('--all')
         self.assertEqual(sorted(r['machine'] for r in rows), sorted(['local', hostile, 'plain']), rows)
         self.assertFalse(any(PEER == r['machine'] for r in rows), rows)     # the label, not the raw peerId
@@ -613,6 +616,15 @@ class PortTests(unittest.TestCase):
         x = self.run_cmd(['bash', '-c', '. "$0"; json_array_objects "$1"; printf "%s\\n" "${#JSON_OBJECTS[@]}"',
                            str(ROOT/'player/scripts/_routing.sh'), '[{"a":{"b":"}"}},{"c":"\\""}]'])
         self.assertEqual(x.stdout.strip(), '2')          # nested objects and escaped quotes, both counted once
+        # `beam peers --json` wraps the array in {"peers": …}: unwrapped by field, scanning stops at
+        # the array's own "]", and a "peers" that is not an array (or never closes) yields nothing.
+        wrapped = '{\n  "peers": [\n    {"peerId": "a", "label": "peers", "tags": ["]"]},\n    {"peerId": "b"}\n  ]\n}'
+        x = self.run_cmd(['bash', '-c', '. "$0"; json_array_objects "$1" peers; printf "%s\n" "${#JSON_OBJECTS[@]}"',
+                           str(ROOT/'player/scripts/_routing.sh'), wrapped])
+        self.assertEqual(x.stdout.strip(), '2')
+        for bad in ('{"peers": {}}', '{"peers": [{"peerId":"x"}', '{"other": []}'):
+            x = self.run_cmd(['bash', '-c', '. "$0"; json_array_objects "$1" peers', str(ROOT/'player/scripts/_routing.sh'), bad], ok=False)
+            self.assertNotEqual(x.returncode, 0, bad)
 
     # --- resume ----------------------------------------------------------------------
     def test_resume_default_restart_note_only_no_replay_no_overrides(self):
