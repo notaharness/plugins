@@ -110,7 +110,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-orchestrator` | reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those two |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|queued>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 
 The first four tags are a session's identity, written once when it is created; the name is
 only a label. The pane environment carries `ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET`
@@ -143,8 +143,9 @@ Only known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variabl
 Player `report.sh` routes `codex:` via `codex queue`, `tmux:` via `ORCHESTRA_SOCKET`, and
 `beam:<peer>/…` via `beam msg send`. It prints `queued for …` (Codex) or `sent to …` (tmux, or a
 beam delivery the far side acknowledged) only when the transport accepted the message, and then
-sets `@orchestra-last-report`. A beam send that comes back `queued` — the far machine is offline —
-is also success and is worded to say so plainly; see the player `SKILL.md` for the exact wording.
+sets `@orchestra-last-report`. A beam send that comes back `stored` — the far machine is offline or
+has not acknowledged it yet, and beam keeps delivering it — is also success and is worded to say so
+plainly; see the player `SKILL.md` for the exact wording.
 Otherwise it exits nonzero and prints `delivery failed`
 with the destination, reason, and complete original report to stderr for the player to handle.
 If a player looks finished but nothing arrived, inspect its pane with `screen.sh` and ask it

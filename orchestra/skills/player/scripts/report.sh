@@ -8,20 +8,19 @@
 # The target is the @orchestra-orchestrator tag on this player's own tmux session, set by
 # spawn.sh and adopt.sh; a player cannot change it. codex:<thread-id> or tmux:<session> when the
 # orchestrator is on this machine; beam:<orchestrator peerId>/(codex:<thread-id>|tmux:<session>)
-# when it is on another one (see docs/beam.md), in which case delivery goes through
-# `beam msg send` instead of pasting locally. The session and the socket of the server holding it
-# come from ORCHESTRA_SESSION and ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own tmux
-# environment points at a scratch server, so every local call here passes -S), or from TMUX in a
-# pane spawn.sh did not start (a Kirby session adopted by adopt.sh). No file is read or written.
-# Delivery is reported only when the transport accepted the message; then @orchestra-last-report
-# is set to "<KIND> <ISO-8601 UTC> <delivered|queued>" (a parser that reads only the first two
-# whitespace-separated fields still gets KIND and the timestamp). A beam send that comes back
-# "queued" is still success — the message is durable and will be delivered when that machine
-# reconnects — and is worded to say so plainly, because the reader is a coding agent that would
-# otherwise conclude the report was lost. Failed delivery (a local target gone or unreachable, or
-# beam's own "rejected") exits nonzero and prints the target, reason, and complete original report
-# to stderr so the player can handle the failure. A failed submit may follow a successful paste;
-# inspect before retrying to avoid duplicates. Nothing retries.
+# when it is on another one, in which case delivery goes through `beam msg send` (see
+# beam/docs/05-mailbox.md) instead of pasting locally. The session and the socket of the server
+# holding it come from ORCHESTRA_SESSION and ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own
+# tmux environment points at a scratch server, so every local call here passes -S), or from TMUX
+# in a pane spawn.sh did not start (a Kirby session adopted by adopt.sh). No file is read or
+# written. Delivery is reported only when the transport accepted the message; then
+# @orchestra-last-report is set to "<KIND> <ISO-8601 UTC> <outcome>" (a parser that reads only
+# the first two whitespace-separated fields still gets KIND and the timestamp). A beam send that
+# comes back "stored" is still success — the message is on disk and beam keeps delivering it —
+# and is worded to say so plainly, because the reader is a coding agent that would otherwise
+# conclude the report was lost. Failed delivery (a local target gone or unreachable, or beam's
+# own "rejected") exits nonzero and prints the target, reason, and complete original report to
+# stderr so the player can handle the failure. Nothing retries.
 set -eu
 # A player always acts on its own machine: ORCHESTRA_FORCE_LOCAL pins ORCH_MACHINE to this
 # machine regardless of any --machine/$ORCHESTRA_MACHINE this process happens to inherit (see
@@ -35,7 +34,7 @@ if [ "${1:-}" = "--orchestrator" ]; then
   [ -n "$session" ] || { echo 'report.sh: neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane' >&2; exit 2; }
   target="$(tag_get "$sock" "$session" "$TAG_ORCHESTRATOR")"; printf '%s\n' "${target:-<unset>}"; exit
 fi
-[ $# -ge 2 ] || { sed -n '2,24p' "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,23p' "$0" >&2; exit 2; }
 kind="$1"; shift
 case "$kind" in PROGRESS|QUESTION|BLOCKED|DONE) ;; *) echo "report.sh: KIND must be PROGRESS, QUESTION, BLOCKED or DONE" >&2; exit 2;; esac
 msg="[player $name] $kind: $*"
@@ -70,18 +69,24 @@ case "$target" in
     # opaque payload, so it travels as a one-line header ("target: <local>") plus a blank line
     # before the report text, the way relay.sh (and this function, symmetrically) expects it.
     payload="$(printf 'target: %s\n\n%s' "$local_target" "$msg")"
-    out="$(printf '%s' "$payload" | "${BEAM_CMD[@]}" msg send "$peer" --topic orchestra --message - --json 2>&1)" && rc=0 || rc=$?
-    status="$(json_string_field "$out" status || :)"
-    label="$(json_string_field "$out" label || :)"; label="${label:-$peer}"
-    reason="$(json_string_field "$out" reason || :)"
-    case "$status" in
-      delivered) delivered delivered; echo "sent to $label"; exit 0;;
-      queued)
-        delivered queued
-        # Matches docs/beam.md's canonical wording exactly (the "queued" outcome text every
-        # caller of beam should use, not just this one) — same semantics as before, phrasing only.
-        printf 'queued for %s — that machine is not connected right now. beam will deliver this\nmessage the next time it comes online. Do not send it again.\n' "$label"
-        exit 0;;
-      *) delivery_failed "${reason:-beam rejected the message (exit $rc): $out}";;
-    esac;;
+    # `msg send` has no --json; it prints `delivered to <peer>` or the stored sentence and exits
+    # 0, or `rejected: <reason>` (or an error token) on stderr and exits 1 (beam/docs/07-cli.md).
+    # Exit 0 is the contract: anything other than "delivered" is stored, never lost.
+    out="$(printf '%s' "$payload" | "${BEAM_CMD[@]}" msg send "$peer" --topic orchestra - 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" = 0 ]; then
+      case "$out" in
+        "delivered to "*) delivered delivered; echo "sent to $peer"; exit 0;;
+      esac
+      delivered stored
+      # beam/docs/05-mailbox.md's wording for each pendingReason, which every surface uses.
+      case "$out" in
+        *"has not acknowledged"*)
+          echo "stored for $peer; delivery pending ($peer has not acknowledged it). beam will keep delivering it until $peer does. Do not send it again.";;
+        *)
+          echo "stored for $peer; delivery pending ($peer is offline). beam will deliver it when $peer connects. Do not send it again.";;
+      esac
+      exit 0
+    fi
+    reason="${out%%$nl*}"; reason="${reason#rejected: }"
+    delivery_failed "beam rejected the message (exit $rc): ${reason:-no reason given}";;
 esac

@@ -260,13 +260,15 @@ case "\$1" in
   msg)
     case "\$2" in
       send)
-        peer="\$3"; cat > "$T/beam-sent-payload"
+        # beam msg send <peer> --topic T -: no --json (beam/docs/07-cli.md); anything else is usage.
+        peer="\$3"
+        [ "\$#" = 6 ] && [ "\$4" = --topic ] && [ "\$6" = - ] || { echo usage >&2; exit 2; }
+        cat > "$T/beam-sent-payload"
         printf '%s\n' "\$peer" > "$T/beam-sent-peer"
-        outcome="\${FAKE_BEAM_OUTCOME:-delivered}"; label="\${FAKE_BEAM_LABEL:-\$peer}"
-        case "\$outcome" in
-          delivered) printf '{"status":"delivered","to":"%s","label":"%s"}\n' "\$peer" "\$label";;
-          queued) printf '{"status":"queued","to":"%s","label":"%s","reason":"peer not connected"}\n' "\$peer" "\$label"; ;;
-          *) printf '{"status":"rejected","to":"%s","label":"%s","reason":"%s"}\n' "\$peer" "\$label" "\${FAKE_BEAM_REJECT_REASON:-unknown peer}"; exit 1;;
+        case "\${FAKE_BEAM_OUTCOME:-delivered}" in
+          delivered) printf 'delivered to %s\n' "\$peer";;
+          stored) printf 'stored for %s; delivery pending (%s is offline). beam will deliver it when %s connects. Do not send it again.\n' "\$peer" "\$peer" "\$peer";;
+          *) printf 'rejected: %s\n' "\${FAKE_BEAM_REJECT_REASON:-unknown-peer}" >&2; exit 1;;
         esac
         ;;
       listen)
@@ -311,22 +313,22 @@ tm set-option -t "=$S2:" @orchestra-orchestrator "tmux:parent"    # pin it: no d
 check "report.sh never asks 'workbox' about anything, even with ORCHESTRA_MACHINE set" \
   "grep -q 'sent to parent' '$T/b5.out' && [ ! -s '$T/beam-log' ]"
 
-echo "# report.sh over beam: delivered, queued, rejected"
+echo "# report.sh over beam: delivered, stored, rejected"
 tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent"
-export FAKE_BEAM_LABEL=laptop FAKE_BEAM_OUTCOME=delivered
+export FAKE_BEAM_OUTCOME=delivered
 (cd "$W1" && player DONE "over beam") >"$T/beam-report.out" 2>&1; brc=$?
-check "beam delivered: today's 'sent to' phrasing, tag carries a third field" \
-  "[ $brc = 0 ] && grep -q 'sent to laptop' '$T/beam-report.out' && grep -q 'target: tmux:parent' '$T/beam-sent-payload' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
-export FAKE_BEAM_OUTCOME=queued
-(cd "$W1" && player PROGRESS "still working") >"$T/beam-queued.out" 2>&1; brc=$?
-check "beam queued: success, exact wording, tag says queued" \
-  "[ $brc = 0 ] && grep -qF 'queued for laptop — that machine is not connected right now. beam will deliver this' '$T/beam-queued.out' && grep -qF 'Do not send it again.' '$T/beam-queued.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP queued\$'"
-export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown peer"
+check "beam delivered: 'sent to', payload on stdin, tag carries a third field" \
+  "[ $brc = 0 ] && grep -qx 'sent to deadbeefcafef00ddeadbeefcafef00d' '$T/beam-report.out' && grep -q '^msg send deadbeefcafef00ddeadbeefcafef00d --topic orchestra -\$' '$T/beam-log' && grep -q 'target: tmux:parent' '$T/beam-sent-payload' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
+export FAKE_BEAM_OUTCOME=stored
+(cd "$W1" && player PROGRESS "still working") >"$T/beam-stored.out" 2>&1; brc=$?
+check "beam stored: success, exact wording, tag says stored" \
+  "[ $brc = 0 ] && grep -qxF 'stored for deadbeefcafef00ddeadbeefcafef00d; delivery pending (deadbeefcafef00ddeadbeefcafef00d is offline). beam will deliver it when deadbeefcafef00ddeadbeefcafef00d connects. Do not send it again.' '$T/beam-stored.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP stored\$'"
+export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown-peer"
 before_opts="$(tm show-options -t "=$S1:")"
 (cd "$W1" && player BLOCKED "need help") >"$T/beam-rejected.out" 2>"$T/beam-rejected.err"; brc=$?
-check "beam rejected: today's failure behaviour, unchanged" \
-  "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: unknown peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
-unset FAKE_BEAM_LABEL FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
+check "beam rejected: delivery failed with beam's reason, no session write" \
+  "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: beam rejected the message (exit 1): unknown-peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
+unset FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
 tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 
 echo "# relay.sh delivers a beamed-in envelope to a real local pane"

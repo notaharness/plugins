@@ -15,7 +15,7 @@ TAG_BRANCH=@orchestra-branch              # worktree sessions: the branch, unsan
 TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: codex:<uuid> | tmux:<session>
 TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | opencode | custom
 TAG_LAUNCHING=@orchestra-launching        # 1 while the placeholder pane exists; unset once the harness started
-TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC>" of the last report a transport accepted
+TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
 SESSION_TYPE_WORKTREE=worktree            # a session's name is a label; spawner + session-type say whose it is
 nl=$'\n'                                  # assigned once: ANSI-C quoting inside ${x:+...} is not portable
 

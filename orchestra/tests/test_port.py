@@ -244,14 +244,20 @@ if a[:1] == ['peers']:
         peers.append(peer_view(pid, parts[1] if len(parts) > 1 else pid, parts[2] if len(parts) > 2 else 'connected'))
     print(json.dumps({'peers': peers}, indent=2)); sys.exit(0)
 if a[:2] == ['msg', 'send']:
-    peer = a[2]; stdin_data = sys.stdin.buffer.read().decode()
+    # `beam msg send <peer> [--topic T] [--base64] <payload|->`, and nothing else: the real CLI has
+    # no --json here and exits 2 on any flag it does not know (beam/docs/07-cli.md).
+    peer = a[2]; rest = a[3:]
+    if len(rest) != 3 or rest[:2] != ['--topic', 'orchestra'] or any(x.startswith('--') and x != '--topic' for x in rest):
+        sys.stderr.write('usage: beam msg send <peer> [--topic T] [--base64] <payload|->\n'); sys.exit(2)
+    stdin_data = sys.stdin.buffer.read().decode() if rest[2] == '-' else rest[2]
     with (b/'beam-sent').open('a') as f: f.write(json.dumps({'peer': peer, 'payload': stdin_data})+'\n')
-    outcome = os.environ.get('TEST_BEAM_OUTCOME', 'delivered'); label = os.environ.get('TEST_BEAM_LABEL', peer)
-    if outcome == 'delivered': print(json.dumps({'status': 'delivered', 'to': peer, 'label': label})); sys.exit(0)
-    if outcome == 'queued':
-        print(json.dumps({'status': 'queued', 'to': peer, 'label': label, 'queueDepth': 1, 'reason': 'peer not connected'})); sys.exit(0)
-    print(json.dumps({'status': 'rejected', 'to': peer, 'label': label,
-                       'reason': os.environ.get('TEST_BEAM_REJECT_REASON', 'unknown peer')})); sys.exit(1)
+    outcome = os.environ.get('TEST_BEAM_OUTCOME', 'delivered')
+    if outcome == 'delivered': print('delivered to %s' % peer); sys.exit(0)
+    if outcome == 'stored-offline':
+        print('stored for %s; delivery pending (%s is offline). beam will deliver it when %s connects. Do not send it again.' % (peer, peer, peer)); sys.exit(0)
+    if outcome == 'stored-no-ack':
+        print('stored for %s; delivery pending (%s has not acknowledged it). beam will keep delivering it until %s does. Do not send it again.' % (peer, peer, peer)); sys.exit(0)
+    sys.stderr.write('rejected: %s\n' % os.environ.get('TEST_BEAM_REJECT_REASON', 'unknown-peer')); sys.exit(1)
 if a[:2] == ['msg', 'listen']:
     inbox = b/'beam-inbox'
     if inbox.exists(): sys.stdout.write(inbox.read_text())
@@ -692,7 +698,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('report.sh: delivery failed\nTarget: '+destination+'\nReason: '+reason, result.stderr)
         self.assertTrue(result.stderr.endswith('Report: [player %s] %s: %s\n' % (session or self.session, kind, text)), result.stderr)
-        self.assertNotIn('queued for', result.stdout); self.assertNotIn('sent to', result.stdout)
+        self.assertNotIn('queued for', result.stdout); self.assertNotIn('sent to', result.stdout); self.assertNotIn('stored for', result.stdout)
     def test_report_codex_records_success_and_prints_failure(self):
         self.spawn('--agent', 'codex')
         x = self.report('PROGRESS', 'one\ntwo $(touch BAD)')
@@ -943,31 +949,32 @@ class PortTests(unittest.TestCase):
         self.assertNotEqual(x.returncode, 0)
         self.assertIn('--repo must be an absolute path or start with ~/', x.stderr)
         self.assertEqual(self.beam_calls(), [])          # rejected before anything reached the executor
-    def test_report_beam_target_delivered_queued_rejected(self):
+    def test_report_beam_target_delivered_stored_rejected(self):
         self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
         self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'beam:%s/tmux:controller' % PEER])
-        self.env['TEST_BEAM_LABEL'] = 'laptop'
         self.env['TEST_BEAM_OUTCOME'] = 'delivered'
         x = self.report('DONE', 'finished work')
-        self.assertEqual(x.returncode, 0); self.assertIn('sent to laptop', x.stdout)
+        self.assertEqual(x.returncode, 0); self.assertEqual(x.stdout, 'sent to %s\n' % PEER)
         self.assertRegex(self.last_report(), r'^DONE '+STAMP+r' delivered$')
+        self.assertEqual(self.beam_calls()[-1], ['msg', 'send', PEER, '--topic', 'orchestra', '-'])    # payload on stdin, positional "-"
         sent = self.beam_sent()[-1]
         self.assertEqual(sent['peer'], PEER)
-        self.assertTrue(sent['payload'].startswith('target: tmux:controller\n\n'), sent['payload'])
-        self.assertIn('[player %s] DONE: finished work' % self.session, sent['payload'])
+        self.assertEqual(sent['payload'], 'target: tmux:controller\n\n[player %s] DONE: finished work' % self.session)
 
-        self.env['TEST_BEAM_OUTCOME'] = 'queued'
-        x = self.report('PROGRESS', 'still going')
-        self.assertEqual(x.returncode, 0)
-        self.assertEqual(x.stdout,
-            'queued for laptop — that machine is not connected right now. beam will deliver this\n'
-            'message the next time it comes online. Do not send it again.\n')
-        self.assertRegex(self.last_report(), r'^PROGRESS '+STAMP+r' queued$')
+        # stored is success: on this machine's disk, delivery pending; beam/docs/05's exact sentence.
+        for outcome, sentence in (
+                ('stored-offline', 'stored for {0}; delivery pending ({0} is offline). beam will deliver it when {0} connects. Do not send it again.\n'),
+                ('stored-no-ack', 'stored for {0}; delivery pending ({0} has not acknowledged it). beam will keep delivering it until {0} does. Do not send it again.\n')):
+            with self.subTest(outcome=outcome):
+                self.env['TEST_BEAM_OUTCOME'] = outcome
+                x = self.report('PROGRESS', 'still going')
+                self.assertEqual(x.returncode, 0); self.assertEqual(x.stdout, sentence.format(PEER))
+                self.assertRegex(self.last_report(), r'^PROGRESS '+STAMP+r' stored$')
 
-        self.env['TEST_BEAM_OUTCOME'] = 'rejected'; self.env['TEST_BEAM_REJECT_REASON'] = 'unknown peer'
+        self.env['TEST_BEAM_OUTCOME'] = 'rejected'; self.env['TEST_BEAM_REJECT_REASON'] = 'unknown-peer'
         before = self.state()
         x = self.report('BLOCKED', 'need input', ok=False)
-        self.assert_delivery_failed(x, 'beam:%s/tmux:controller' % PEER, 'unknown peer', 'BLOCKED', 'need input')
+        self.assert_delivery_failed(x, 'beam:%s/tmux:controller' % PEER, 'beam rejected the message (exit 1): unknown-peer', 'BLOCKED', 'need input')
         self.assertEqual(self.state(), before)      # rejected: nothing was stored, no session write, no retry
     def test_last_report_third_field_backward_compatible(self):
         self.spawn('--agent', 'codex'); self.report('DONE', 'ok')

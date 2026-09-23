@@ -66,22 +66,20 @@ if nothing remains independent, finish the turn and await the reply. Finish each
 with one DONE or BLOCKED report. Handoffs may legitimately resend the terminal report.
 
 `report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a tmux orchestrator, or a
-beam delivery the far side acknowledged) only when the transport accepted the message; it then
-records `<KIND> <timestamp> <delivered|queued>` in your session's `@orchestra-last-report` tag —
+beam delivery the far machine acknowledged) only when the transport accepted the message; it then
+records `<KIND> <timestamp> <delivered|stored>` in your session's `@orchestra-last-report` tag —
 a third field beyond the kind and timestamp.
 
-When your orchestrator is on another machine and that machine is not connected right now, beam
-still accepts the report — it is durably queued on disk and will be delivered the moment that
-machine reconnects — and `report.sh` prints exactly this, verbatim except for the machine's label:
+When your orchestrator is on another machine and beam cannot hand the report over right away —
+that machine is offline, or has not acknowledged it yet — beam keeps the report on disk and goes
+on delivering it, and `report.sh` prints beam's own sentence for that case, for example:
 
 ```
-queued for <label> — that machine is not connected right now. beam will deliver this
-message the next time it comes online. Do not send it again.
+stored for <peerId>; delivery pending (<peerId> is offline). beam will deliver it when <peerId> connects. Do not send it again.
 ```
 
-This exits 0 and sets `@orchestra-last-report`'s third field to `queued`. Treat it exactly like
-`sent to …`: the report is done, nothing was lost, and sending it again would duplicate it once
-the machine reconnects.
+This exits 0 and sets `@orchestra-last-report`'s third field to `stored`. Treat it exactly like
+`sent to …`: the report is done, nothing was lost, and sending it again would deliver it twice.
 
 On failure — a local target gone or unreachable, or beam's own `rejected` (unknown peer, revoked
 peer, or the report too large) — it exits nonzero and prints `report.sh: delivery failed`, the

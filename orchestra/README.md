@@ -278,7 +278,7 @@ tmux -u show-options -qv -t '=shop-feature-search:' @orchestra-agent
 | `@orchestra-orchestrator` | Reporting target: `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peer id>/` followed by one of those. Set by `spawn.sh`, replaced by `adopt.sh`. |
 | `@orchestra-agent` | Harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom`. The launcher records what actually started. |
 | `@orchestra-launching` | `1` only while the placeholder pane exists. |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <delivered|queued>` of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
+| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC timestamp> <delivered|stored>` of the last report a transport accepted. The third field was appended to the older two-field form, so a reader that splits on whitespace and takes the first two still gets the kind and the timestamp. |
 
 The first four tags record the session's origin and are written at creation. Spawning or adopting a player sets its supervisor independently.
 
@@ -306,13 +306,13 @@ middle one is a success:
 
 | Outcome | Exit | What the player is told |
 | --- | --- | --- |
-| Delivered | 0 | `sent to …`, as for a local report. |
-| Queued | 0 | That machine is not connected; beam will deliver the report when it comes back online, and the player should not send it again. |
-| Rejected | non-zero | The failure output below, unchanged. |
+| Delivered | 0 | `sent to <peerId>`: the other machine's beam stored the report and acknowledged it. |
+| Stored | 0 | beam's own sentence: the report is on this machine's disk, delivery is pending because that machine is offline or has not acknowledged it yet, and it must not be sent again. |
+| Rejected | non-zero | The failure output below, with beam's reason (`unknown-peer`, `revoked-peer`, `payload-too-large`, …). |
 
-Queued is a success because the report is on disk and will go out. It is stated in those terms
-because the reader is usually a coding agent, which would otherwise conclude its report was lost
-and either duplicate it or wait for an answer that cannot arrive yet.
+Stored is a success because the report is on disk and beam keeps delivering it. It is stated in
+those terms because the reader is usually a coding agent, which would otherwise conclude its
+report was lost and either duplicate it or wait for an answer that cannot arrive yet.
 
 A failed delivery exits nonzero and prints the destination, reason, and complete original report to stderr:
 
