@@ -105,7 +105,6 @@ split_tabs() {
   while case "$line" in *"$TAB"*) true;; *) false;; esac; do F+=("${line%%"$TAB"*}"); line="${line#*"$TAB"}"; done
   F+=("$line")
 }
-json_str() { printf %s "$1" | jq -Rs .; }
 now=$(date +%s); rows=0; first=1
 [ $JSON = 1 ] && printf '['
 # One listing call per machine (never per session): MACHINES is ("local") unless --all expanded

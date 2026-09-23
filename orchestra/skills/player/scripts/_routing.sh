@@ -140,6 +140,23 @@ json_string_field() {
   done
 }
 
+# json_str <text>: <text> as one JSON string literal, quotes included — the encoder matching the
+# decoders above, so building a line for beam's control socket or Claude's inbox needs no jq. A
+# backslash and a quote are escaped, the five control characters with short forms get them, and
+# every other one below U+0020 becomes \u00XX; everything else, non-ASCII included, is copied
+# through as the bytes it is (JSON text is UTF-8). One native substitution per character class,
+# each linear in the length of <text>.
+json_str() {
+  local s="$1" i c
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"; s="${s//$'\b'/\\b}"; s="${s//$'\f'/\\f}"
+  for i in 1 2 3 4 5 6 7 11 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
+    printf -v c "\\$(printf %03o "$i")"
+    case "$s" in *"$c"*) s="${s//"$c"/$(printf '\\u%04x' "$i")}";; esac
+  done
+  printf '"%s"' "$s"
+}
+
 # json_array_objects <json> [<field>]: the object elements of a JSON array, into the array
 # JSON_OBJECTS (a global: setting one keeps the caller out of a subshell). With <field>, the array
 # is that field's value (`beam peers --json` prints `{ "peers": [...] }`; the field is the first

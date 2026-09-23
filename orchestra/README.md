@@ -222,7 +222,6 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 - tmux 3.x; tested with 3.4.
 - An authenticated `claude` or `codex` CLI for each type of player you want to run.
 - `beam` only if you want players on other machines; see [Machines](#machines).
-- `jq` for JSON session listings.
 - util-linux `script` for automatic CLI detection during resume.
 
 Gemini, Copilot, and OpenCode can also be launched, but have more limited resume support. The plugin uses each CLI's existing authentication and permissions.
