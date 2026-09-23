@@ -27,7 +27,8 @@ Every `report.sh` call below uses the command resolved above.
 
 Your orchestrator is recorded on your own tmux session as the session user option (tag)
 `@orchestra-orchestrator`: `codex:<thread-id>` or `tmux:<session>`, or, when your orchestrator is
-on a different machine than you, `beam:<orchestrator peerId>/` followed by one of those two. The
+on a different machine than you, `beam:<orchestrator peerId>/` followed by one of those two (a
+peerId is beam's 32-character lowercase hex machine identity). The
 scripts that spawn or adopt you set it. `report.sh` finds your own session through
 `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` (the tmux server socket that holds it), which
 `spawn.sh` injects; in a pane `spawn.sh` did not start (a session another tool created that an

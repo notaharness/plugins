@@ -258,7 +258,8 @@ player_session_context() {
 # codex:<thread-id>, tmux:<session>, or beam:<orchestrator peerId>/<one of those two>, when the
 # orchestrator is on another machine. Nothing else. Never infer a parent from a player's own ID.
 # tmux session names: tmux itself rewrites "." and ":" but otherwise allows most characters.
-# peerId: the first 16 hex characters of the SHA-256 of the peer's public key (beam.md).
+# peerId: 32 lowercase hex characters, the first 16 bytes of the SHA-256 of the peer's node public
+# key (beam/docs/02-identity.md), validated in full wherever it arrives from outside.
 _valid_local_target() {
   case "$1" in
     codex:*) [[ "${1#codex:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]];;
@@ -273,7 +274,7 @@ normalize_target() {
     beam:*/*)
       local rest peer local_part
       rest="${1#beam:}"; peer="${rest%%/*}"; local_part="${rest#*/}"
-      [[ "$peer" =~ ^[0-9a-fA-F]{16}$ ]] || { echo "invalid beam peerId: $peer" >&2; return 2; }
+      [[ "$peer" =~ ^[0-9a-f]{32}$ ]] || { echo "invalid beam peerId: $peer" >&2; return 2; }
       case "$local_part" in
         codex:*) _valid_local_target "$local_part" || { echo "invalid Codex thread ID: ${local_part#codex:}" >&2; return 2; };;
         tmux:*) _valid_local_target "$local_part" || { echo "invalid tmux session name: ${local_part#tmux:}" >&2; return 2; };;

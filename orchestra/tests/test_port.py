@@ -26,7 +26,7 @@ def player_invocation():
 INV = player_invocation()
 ID = '11111111-2222-3333-4444-555555555555'
 UUID = '0199a000-1111-7000-8000-000000000042'
-PEER = '1234567890abcdef'
+PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-orchestrator',
@@ -227,7 +227,7 @@ if a[:1] == ['exec']:
     r = subprocess.run(argv, cwd=cwd, input=stdin_data, env=env)
     sys.exit(r.returncode)
 if a[:1] == ['status']:
-    print(json.dumps({'peerId': os.environ.get('TEST_BEAM_PEER_ID', 'aaaaaaaaaaaaaaaa'),
+    print(json.dumps({'peerId': os.environ.get('TEST_BEAM_PEER_ID', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
                        'label': os.environ.get('TEST_BEAM_LABEL_SELF', 'thishost'), 'running': True}))
     sys.exit(0)
 if a[:1] == ['peers']:
@@ -599,7 +599,7 @@ class PortTests(unittest.TestCase):
         hostile = 'work}box "one" \\ two{'
         self.env['TEST_BEAM_PEERS_JSON'] = json.dumps(
             [{'peerId': PEER, 'label': hostile, 'state': 'connected', 'endpoint': '', 'queued': 0},
-             {'peerId': 'fedcba0987654321', 'label': 'plain', 'state': 'connected', 'endpoint': '', 'queued': 0}])
+             {'peerId': 'fedcba0987654321fedcba0987654321', 'label': 'plain', 'state': 'connected', 'endpoint': '', 'queued': 0}])
         rows = self.sessions('--all')
         self.assertEqual(sorted(r['machine'] for r in rows), sorted(['local', hostile, 'plain']), rows)
         self.assertFalse(any(PEER == r['machine'] for r in rows), rows)     # the label, not the raw peerId
@@ -963,7 +963,7 @@ class PortTests(unittest.TestCase):
         for good in ('beam:%s/tmux:controller' % PEER, 'beam:%s/codex:%s' % (PEER, ID)):
             x = norm(good); self.assertEqual(x.returncode, 0, good); self.assertEqual(x.stdout, good)
         for bad in ('beam:/tmux:controller', 'beam:%s' % PEER, 'beam:%s/ssh:host' % PEER,
-                    'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'ssh:host'):
+                    'beam:%s/tmux:se:ss' % PEER, 'beam:%s/tmux:se\nss' % PEER, 'beam:1234/tmux:controller', 'beam:%s/tmux:controller' % PEER.upper(), 'beam:%s/tmux:controller' % PEER[:16], 'ssh:host'):
             x = norm(bad); self.assertNotEqual(x.returncode, 0, bad)
     def test_relay_delivers_to_tmux_target(self):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent'); self.stub('beam', BEAM_MOCK)
@@ -1044,8 +1044,8 @@ class PortTests(unittest.TestCase):
         self.assertEqual(x.returncode, 0, x.stderr)
         self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:%s/tmux:new-parent' % PEER)
         # an already beam-qualified --orchestrator is left exactly as given
-        self.orch('adopt.sh', self.session, '--orchestrator', 'beam:deadbeefcafef00d/tmux:elsewhere', '--machine', 'workbox')
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:deadbeefcafef00d/tmux:elsewhere')
+        self.orch('adopt.sh', self.session, '--orchestrator', 'beam:deadbeefcafef00ddeadbeefcafef00d/tmux:elsewhere', '--machine', 'workbox')
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:deadbeefcafef00ddeadbeefcafef00d/tmux:elsewhere')
     def test_repo_root_resolves_remotely(self):
         self.stub('beam', BEAM_MOCK)
         out = self.lib('ORCH_MACHINE=workbox; ORCH_REPO="$1"; repo_root', str(self.repo))
@@ -1086,7 +1086,7 @@ class PortTests(unittest.TestCase):
         # a remote adoption is beam-qualified with this (the orchestrator's) machine's own peerId,
         # learned locally (beam_own_peer_id never goes through the executor) — see spawn.sh's
         # identical treatment and D2's "who am I" rule.
-        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
         self.assertFalse((self.base/'tmux-state.json').exists())
         x = self.orch('send.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox', '--raw', 'ping')
         self.assertEqual(x.returncode, 0, x.stderr)
@@ -1128,7 +1128,7 @@ class PortTests(unittest.TestCase):
         rows = json.loads(self.orch('sessions.sh', *args, '--all', '--json').stdout)
         self.assertEqual([r['session'] for r in rows], [rname], rows)
         self.orch('adopt.sh', rname, *args, '--orchestrator', 'tmux:new-parent')
-        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
         self.orch('send.sh', rname, *args, '--raw', 'ping')
         self.orch('screen.sh', rname, *args)
         self.orch('kill.sh', rname, *args)

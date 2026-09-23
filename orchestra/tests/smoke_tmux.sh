@@ -255,7 +255,7 @@ case "\$1" in
     exec "\$@"
     ;;
   status)
-    printf '{"peerId":"%s","label":"orchestrator-host"}\n' "\${FAKE_BEAM_PEER_ID:-aaaaaaaaaaaaaaaa}"
+    printf '{"peerId":"%s","label":"orchestrator-host"}\n' "\${FAKE_BEAM_PEER_ID:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
     ;;
   msg)
     case "\$2" in
@@ -312,7 +312,7 @@ check "report.sh never asks 'workbox' about anything, even with ORCHESTRA_MACHIN
   "grep -q 'sent to parent' '$T/b5.out' && [ ! -s '$T/beam-log' ]"
 
 echo "# report.sh over beam: delivered, queued, rejected"
-tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00d/tmux:parent"
+tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent"
 export FAKE_BEAM_LABEL=laptop FAKE_BEAM_OUTCOME=delivered
 (cd "$W1" && player DONE "over beam") >"$T/beam-report.out" 2>&1; brc=$?
 check "beam delivered: today's 'sent to' phrasing, tag carries a third field" \
@@ -325,7 +325,7 @@ export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown peer"
 before_opts="$(tm show-options -t "=$S1:")"
 (cd "$W1" && player BLOCKED "need help") >"$T/beam-rejected.out" 2>"$T/beam-rejected.err"; brc=$?
 check "beam rejected: today's failure behaviour, unchanged" \
-  "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: unknown peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
+  "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: unknown peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
 unset FAKE_BEAM_LABEL FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
 tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
 
