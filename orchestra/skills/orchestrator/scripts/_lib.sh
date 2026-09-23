@@ -28,7 +28,7 @@ g() {
   fi
   require_valid_repo_for_machine || return 1
   # git's -C does not itself expand "~/"; beam's own --cwd resolves it on the target machine
-  # (docs/beam.md), so the repo location travels as exec's cwd rather than as a literal -C
+  # (beam/docs/04-streams.md), so the repo location travels as exec's cwd rather than as a literal -C
   # argument that a shell-less remote exec would never expand.
   if [ -n "$ORCH_REPO" ]; then
     beam_cmd || { echo "orchestra: $(beam_unresolved_message "$ORCH_MACHINE")" >&2; return 1; }
@@ -46,7 +46,7 @@ in_repo() { g rev-parse --git-dir >/dev/null 2>&1; }
 # or "--machine" spawns/adopts/kills work against this machine while claiming to act on another.
 # --cwd is the one thing a shell would otherwise give for free (`cd` then run): locally it is a
 # subshell cd; remotely it becomes the same --cwd exec() itself accepts (beam expands "~/" there,
-# see docs/beam.md; a caller must not build "~/..." into argv[0] itself — see D12).
+# see beam/docs/04-streams.md; a caller must not build "~/..." into argv[0] itself — see D12).
 r() {
   local cwd=""
   if [ "${1:-}" = --cwd ]; then cwd="$2"; shift 2; fi

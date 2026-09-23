@@ -87,7 +87,7 @@ beam_own_peer_id() {
 # (\" \\ \/ \b \f \n \r \t; \uXXXX is passed through literally — Orchestra never emits one).
 # Linear in the length of <raw>: each iteration jumps straight to the next backslash with one
 # bash pattern-match (`${s%%\\*}`/`${s#*\\}`, both a single native scan) instead of walking the
-# string one character at a time. A 100 KiB payload (the cap beam enforces) used to take ~45s
+# string one character at a time. A 100 KiB payload (beam enforces 256 KiB) used to take ~45s
 # here — every `out+="$c"` reallocates and copies the whole accumulator, so N one-character
 # appends cost O(N^2) — and now completes in well under a second.
 json_unescape() {

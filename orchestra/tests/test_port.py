@@ -1297,7 +1297,7 @@ class PortTests(unittest.TestCase):
         payload = json.dumps({'payload': value})
         start = time.time()
         # Argument-list limits rule out passing 256 KiB as argv; stdin is how a real envelope of
-        # this size would reach a script anyway (beam's own cap, docs/beam.md).
+        # this size would reach a script anyway (beam's own cap, beam/docs/05-mailbox.md).
         out = self.run_cmd(['bash', '-c', '. "$0"; json_string_field "$(cat)" payload', str(ROOT/'player/scripts/_routing.sh')], stdin=payload)
         elapsed = time.time() - start
         self.assertEqual(out.stdout, value)
