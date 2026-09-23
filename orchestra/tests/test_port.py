@@ -354,7 +354,9 @@ class PortTests(unittest.TestCase):
         f = self.remote/'calls'
         return [json.loads(x) for x in f.read_text().splitlines()] if f.exists() else []
     def run_cmd(self, args, cwd=None, ok=True, env=None, stdin=None):
-        x = subprocess.run(args, cwd=cwd or self.repo, env=env or self.env, text=True, capture_output=True, input=stdin)
+        # No input means an empty stdin, never the runner's own: the beam mock's exec forwards stdin
+        # to EOF, which an inherited terminal or socket would never reach.
+        x = subprocess.run(args, cwd=cwd or self.repo, env=env or self.env, text=True, capture_output=True, input=stdin or '')
         if ok: self.assertEqual(x.returncode, 0, x.stderr+'\n'+x.stdout)
         return x
     def script(self, name): return str(ROOT/('player/scripts/report.sh' if name == 'report.sh' else 'orchestrator/scripts/'+name))
