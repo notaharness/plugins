@@ -49,18 +49,16 @@ is_local_machine() { [ -z "$ORCH_MACHINE" ] || [ "$ORCH_MACHINE" = local ]; }
 machine_label() { is_local_machine && printf 'this machine' || printf '%s' "$ORCH_MACHINE"; }
 
 # --- beam executor ---------------------------------------------------------------------------
-# beam_cmd: resolve how to invoke beam into the BEAM_CMD array (so a two-word form like "n10 beam"
-# is never re-split by a shell). First hit wins: $ORCHESTRA_BEAM, `beam` on PATH, `n10 beam`.
-# Fails, leaving BEAM_CMD unset, when none resolve — callers must not fall back to running
+# beam_cmd: resolve how to invoke beam into the BEAM_CMD array. First hit wins: $ORCHESTRA_BEAM,
+# then `beam` on PATH. Fails, leaving BEAM_CMD unset, when neither resolves — callers must not fall back to running
 # anything locally on that failure, which would silently act on the wrong machine.
 beam_cmd() {
   if [ -n "${ORCHESTRA_BEAM:-}" ]; then BEAM_CMD=("$ORCHESTRA_BEAM"); return 0; fi
   if command -v beam >/dev/null 2>&1; then BEAM_CMD=(beam); return 0; fi
-  if command -v n10 >/dev/null 2>&1; then BEAM_CMD=(n10 beam); return 0; fi
   return 1
 }
 beam_unresolved_message() {
-  printf "no beam binary found to reach machine '%s' (tried \$ORCHESTRA_BEAM, 'beam' on PATH, 'n10 beam')" "$1"
+  printf "no beam binary found to reach machine '%s' (tried \$ORCHESTRA_BEAM and 'beam' on PATH)" "$1"
 }
 # beam_exec <machine> <argv…>: run argv on <machine> via `beam exec <machine> -- <argv…>`. Neither
 # this function nor beam_cmd touches stdin, so it is forwarded to the remote process exactly as

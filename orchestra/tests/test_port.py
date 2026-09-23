@@ -914,11 +914,15 @@ class PortTests(unittest.TestCase):
         self.assertEqual(load, ['exec', 'workbox', '--', 'tmux', '-u', '-S', self.sock, 'load-buffer', '-b', load[-2], '-'])
         self.assertEqual(sum(c[3:5] == ['sh', '-c'] for c in exec_calls), 1, exec_calls)   # asked once, then cached
         self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] ' + big)     # stdin reached the mock intact
-    def test_missing_beam_binary_fails_names_three_options_and_runs_nothing_locally(self):
+    def test_missing_beam_binary_fails_names_both_options_and_runs_nothing_locally(self):
         calls_before = len(self.tmux_calls())
-        x = self.run_cmd(['bash', '-c', '. "$0"; ORCH_MACHINE=ghost tmux_on "" list-sessions', self.script('_lib.sh')], cwd=self.base, ok=False)
+        # Only the stubs and the system directories: a beam installed on the host running the
+        # suite must not resolve here, and neither may an n10 binary stand in for it.
+        self.stub('n10', CLI_MOCK); env = dict(self.env, PATH=str(self.bin)+':/usr/bin:/bin')
+        x = self.run_cmd(['bash', '-c', '. "$0"; ORCH_MACHINE=ghost tmux_on "" list-sessions', self.script('_lib.sh')], cwd=self.base, ok=False, env=env)
         self.assertNotEqual(x.returncode, 0)
-        self.assertIn('$ORCHESTRA_BEAM', x.stderr); self.assertIn("'beam' on PATH", x.stderr); self.assertIn("'n10 beam'", x.stderr)
+        self.assertIn('$ORCHESTRA_BEAM', x.stderr); self.assertIn("'beam' on PATH", x.stderr); self.assertNotIn('n10', x.stderr)
+        self.assertEqual(self.calls(), [])
         self.assertIn('refusing to run this locally', x.stderr)
         self.assertEqual(len(self.tmux_calls()), calls_before)
     def test_relative_repo_with_machine_rejected(self):

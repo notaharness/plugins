@@ -176,8 +176,8 @@ its orchestrator. Omitting the flag, or the literal `local`, means this machine.
 
 Naming a machine runs the same Git and tmux commands, with the same arguments, over
 `beam exec <machine>` instead of locally. The `beam` binary is resolved in order:
-`$ORCHESTRA_BEAM`, `beam` on `PATH`, then `n10 beam`. If a machine was named and none of the three
-resolve, the script fails and says so — it never falls back to running here, which would create or
+`$ORCHESTRA_BEAM`, then `beam` on `PATH`. If a machine was named and neither resolves, the script
+fails and says so — it never falls back to running here, which would create or
 act on a player on the wrong machine.
 
 - `--repo` on a remote machine must be absolute or start with `~/`. A relative path is refused

@@ -25,7 +25,7 @@
 # Run this directly only when supervising remote players from a plain terminal with nothing else
 # already relaying — N10 Desktop runs its own relay, so do not run this alongside it; two
 # listeners on the same topic would both try to deliver the same envelopes. Requires a beam
-# binary (see _routing.sh's beam_cmd: $ORCHESTRA_BEAM, then `beam` on PATH, then `n10 beam`) and
+# binary (see _routing.sh's beam_cmd: $ORCHESTRA_BEAM, then `beam` on PATH) and
 # a running local beam node (`beam serve`) so `beam msg listen` has something to listen through.
 # Always acts on this, the orchestrator's, machine, whatever --machine/$ORCHESTRA_MACHINE this
 # process happens to inherit: ORCHESTRA_FORCE_LOCAL below pins that unconditionally.

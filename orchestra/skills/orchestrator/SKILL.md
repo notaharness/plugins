@@ -54,9 +54,9 @@ seam through which a player can run on a different machine than its orchestrator
 same commands, same tmux and git argv, same output. Naming a machine runs the same tmux/git
 commands there instead,
 through `beam exec <machine> -- <argv…>` (stdin forwarded, exit status propagated), resolving the
-`beam` binary in order: `$ORCHESTRA_BEAM`, `beam` on `PATH`, `n10 beam`. If none resolve and a
-machine was named, the script fails and names all three — it never silently runs the command
-here, which would create or act on a player on the wrong machine.
+`beam` binary in order: `$ORCHESTRA_BEAM`, then `beam` on `PATH`. If neither resolves and a
+machine was named, the script fails and names both — it never silently runs the command here,
+which would create or act on a player on the wrong machine.
 
 - `--repo` on a remote machine must be an absolute path or start with `~/`; a relative path is
   refused rather than resolved against this machine's working directory.

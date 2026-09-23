@@ -299,8 +299,8 @@ check "--machine asks the target for its socket, then names it on every tmux cal
   "grep -q \"^exec workbox -- sh -c \" '$T/beam-log' && grep -q '^exec workbox -- tmux -u -S $SOCK ' '$T/beam-log' && ! grep -qE '^exec workbox -- tmux -u [^-]' '$T/beam-log'"
 
 env PATH=/usr/bin:/bin bash -c '. "'"$P"'/_routing.sh"; ORCH_MACHINE=ghost tmux_on "" list-sessions' >"$T/missing-beam.out" 2>"$T/missing-beam.err"; mbrc=$?
-check "missing beam binary fails loudly, names three options, runs nothing locally" \
-  "[ $mbrc != 0 ] && [ ! -s '$T/missing-beam.out' ] && grep -q ORCHESTRA_BEAM '$T/missing-beam.err' && grep -q \"'beam' on PATH\" '$T/missing-beam.err' && grep -q \"'n10 beam'\" '$T/missing-beam.err' && grep -q 'refusing to run this locally' '$T/missing-beam.err'"
+check "missing beam binary fails loudly, names both options, runs nothing locally" \
+  "[ $mbrc != 0 ] && [ ! -s '$T/missing-beam.out' ] && grep -q ORCHESTRA_BEAM '$T/missing-beam.err' && grep -q \"'beam' on PATH\" '$T/missing-beam.err' && ! grep -q n10 '$T/missing-beam.err' && grep -q 'refusing to run this locally' '$T/missing-beam.err'"
 
 echo "# B4/B5: report.sh ignores an inherited ORCHESTRA_MACHINE; resolve_orchestrator answers locally"
 # $S1 is a stranger by this point (the "resume when a stranger has taken the label" section
