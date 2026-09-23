@@ -29,6 +29,12 @@
 # conversation silently. --model/--effort are applied on resume only when given; otherwise the
 # CLI's restored/configured settings apply.
 #
+# The task is the new CLI's initial prompt argument (see _launch.sh), never typed and never
+# queued: Claude Code does not run a skill invocation posted to its inbox socket, and a Codex
+# conversation has no thread to queue to before its first turn. Messages after that go through
+# send.sh, which queues where the agent allows it. Claude players are pre-trusted for their
+# worktree and started with --strict-mcp-config, so no startup dialog stops them.
+#
 # Naming (see _lib.sh): worktree at <main checkout>/.claude/worktrees/<branch with / → ->;
 # the tmux session is a label, <repo basename>-<branch> with "/", "." and ":" replaced by "-"
 # and a -2, -3, … suffix when any session already has that name. The name is chosen once and
@@ -56,7 +62,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,51p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,57p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 [ -n "$BRANCH" ] || { echo "spawn.sh: --branch is required" >&2; exit 2; }
 git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
