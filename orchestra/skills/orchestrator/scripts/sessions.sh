@@ -6,8 +6,9 @@
 #   dead   the pane's command has exited
 #
 # A player is a session tagged @orchestra-spawner (any value), @orchestra-repo and
-# @orchestra-session-type worktree, whoever created it; sessions missing any of these and
-# Kirby's shell/agent tabs are never listed.
+# @orchestra-session-type worktree or dir, whoever created it; sessions missing any of these and
+# Kirby's shell/agent tabs are never listed. A dir player's @orchestra-repo is its directory and
+# its BRANCH is empty, so it is in a repo's scope only when that directory is the main checkout.
 # Scope: players whose @orchestra-repo is this repo (--repo <path>, else the cwd's repo) when
 # the cwd is inside a git repo; every player on the machine (--all) otherwise. --all adds a
 # REPO column (the @orchestra-repo tag value, cut to 40 characters like SESSION; --json has
@@ -41,16 +42,16 @@ while [ $# -gt 0 ]; do case "$1" in
   --all) ALL=1;; --repo) ORCH_REPO="$2"; shift;;
   --machine) ORCH_MACHINE="$2"; EXPLICIT_MACHINE=1; shift;;
   --quiet) QUIET="$2"; shift;; --sample) SAMPLE="$2"; shift;; --json) JSON=1;;
-  -h|--help) sed -n '2,33p' "$0"; exit 0;;
+  -h|--help) sed -n '2,34p' "$0"; exit 0;;
   *) echo "sessions.sh: unknown argument $1" >&2; exit 0;; esac; shift; done
 command -v tmux >/dev/null || { echo "tmux is not installed"; exit 0; }
 require_valid_repo_for_machine || exit 0
 
 in_repo || ALL=1
 scope=""; [ $ALL = 1 ] || scope="$(repo_root)"
-# A row is in scope when its tags say player (spawner, repo, session-type worktree) and, unless
-# --all, its repo tag equals this repo.
-in_scope() { [ -n "$1" ] && [ "$2" = "$SESSION_TYPE_WORKTREE" ] && [ -n "$3" ] && { [ $ALL = 1 ] || [ "$3" = "$scope" ]; }; }
+# A row is in scope when its tags say player (spawner, repo, session-type worktree or dir) and,
+# unless --all, its repo tag equals this repo.
+in_scope() { [ -n "$1" ] && { [ "$2" = "$SESSION_TYPE_WORKTREE" ] || [ "$2" = "$SESSION_TYPE_DIR" ]; } && [ -n "$3" ] && { [ $ALL = 1 ] || [ "$3" = "$scope" ]; }; }
 
 # Machines to list: an explicit --machine names exactly one, shown exactly as given. --all with
 # no --machine adds every registered peer to "local", cheaply (one `beam peers --json` call, then

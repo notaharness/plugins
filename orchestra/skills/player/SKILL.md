@@ -1,6 +1,6 @@
 ---
 name: player
-description: Runs as a coding player in a tmux session and git worktree, reporting to the Claude tmux or Codex desktop/CLI orchestrator recorded on its session.
+description: Runs as a coding player in a tmux session and git worktree (or an existing directory), reporting to the Claude tmux or Codex desktop/CLI orchestrator recorded on its session.
 disable-model-invocation: true
 argument-hint: "[task]"
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/report.sh *)
@@ -8,8 +8,10 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/report.sh *)
 
 # Player
 
-You are a coding player in a dedicated tmux session, git worktree and branch. Nobody
-necessarily watches the pane. Anything a human must know goes through
+You are a coding player in a dedicated tmux session, git worktree and branch — or, as a dir
+player, in an existing directory with no branch or worktree of your own (a reviewer, or work
+outside any repo). Your session's `@orchestra-session-type` tag says which: `worktree` or `dir`.
+Nobody necessarily watches the pane. Anything a human must know goes through
 the bundled `scripts/report.sh`. Invoke this skill explicitly with the assignment
 supplied by the orchestrator.
 
@@ -42,15 +44,17 @@ orchestrator. Nothing is stored in files.
 What follows the invocation decides what to do:
 - Task text: carry out the task.
 - A note that your session was restarted: pick up your existing task where it stopped.
-  Check `git status`/`git log`, re-read your plan; do not redo finished work.
+  Check `git status`/`git log` (in a repo), re-read your plan; do not redo finished work.
 - A new assignment after a restart: finish or park the old task as instructed and do the new one.
 - Nothing: a handoff. A different orchestrator now supervises you and knows nothing of your
-  history. Send one PROGRESS report with branch/worktree, the task, what is done, what is
-  left and any question that was waiting; then carry on. If already finished, resend DONE.
+  history. Send one PROGRESS report with branch/worktree (or directory), the task, what is done,
+  what is left and any question that was waiting; then carry on. If already finished, resend DONE.
 
 ## Work and report
 
-Stay in this worktree; respect repo `AGENTS.md`, `CLAUDE.md` and applicable conventions.
+Stay in this worktree, or as a dir player in this directory, and change nothing outside the
+task (a reviewer changes nothing at all unless told to); respect repo `AGENTS.md`, `CLAUDE.md`
+and applicable conventions.
 Your tmux environment is redirected to a scratch server to prevent accidental access to
 user sessions; `report.sh` reaches the real server through `ORCHESTRA_SOCKET`. `report.sh`
 is the sanctioned reporting route; do not bypass isolation.
@@ -62,7 +66,7 @@ session name (a label; the orchestrator resolves it through the tags):
 - PROGRESS: meaningful milestones only.
 - QUESTION: collect unresolved user decisions together, with suggested defaults.
 - BLOCKED: explain what prevents progress and what would unblock it.
-- DONE: summarize verified outcome, PR/branch and remaining limitations.
+- DONE: summarize verified outcome, PR/branch (if any) and remaining limitations.
 
 Answer routine decisions yourself. After asking questions, continue independent work;
 if nothing remains independent, finish the turn and await the reply. Finish each task

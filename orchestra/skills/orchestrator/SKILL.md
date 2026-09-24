@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: Runs and supervises parallel coding agents ("players") in git worktrees and tmux sessions across any number of repos — groups a backlog into PR-sized sessions, spawns them (Claude, OpenCode, Codex, Gemini, Copilot), adopts players other orchestrators started, receives their reports, relays questions to the user, nudges them. Use when the user wants several agents working in parallel, or wants to supervise the players already running on this machine.
+description: Runs and supervises parallel coding agents ("players") in tmux sessions, each in its own git worktree or an existing directory, across any number of repos — groups a backlog into PR-sized sessions, spawns them (Claude, OpenCode, Codex, Gemini, Copilot), adopts players other orchestrators started, receives their reports, relays questions to the user, nudges them. Use when the user wants several agents working in parallel, or wants to supervise the players already running on this machine.
 argument-hint: "[backlog, instructions, or 'status']"
 disable-model-invocation: true
 allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/sessions.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/screen.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/spawn.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/send.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/adopt.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/kill.sh *), Bash(git worktree list *), Bash(git status *), Bash(git log *)
@@ -8,10 +8,10 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/sessions.sh *), Bash(${CLAUDE_SK
 
 # Orchestrator
 
-Split work into players, each in its own tmux session and git worktree. Players code;
-you supervise, answer questions and verify their results. Supports Claude Code and
-Codex CLI players from a Claude Code (terminal, tmux or Desktop) or Codex desktop/CLI orchestrator
-on the same host.
+Split work into players, each in its own tmux session and git worktree, or, for work tied to no
+branch, in an existing directory. Players code; you supervise, answer questions and verify their
+results. Supports Claude Code and Codex CLI players from a Claude Code (terminal, tmux or Desktop)
+or Codex desktop/CLI orchestrator on the same host.
 
 ## Start
 
@@ -31,14 +31,19 @@ Start with `sessions.sh --all` using the path above. Every script name below is
 shorthand for that resolved script path. Run the scripts; do not reimplement
 them. Read repo `AGENTS.md`, `CLAUDE.md`, and applicable parent docs.
 
-- One session = one branch = one PR in one repo. Group related backlog items; avoid overlapping work.
-- Spawn players for branch-to-PR tasks. Handle reviews, investigations and operational work
-  here, or delegate separately when authorized. Do not use this workflow just to launch a reviewer.
+- One worktree player = one branch = one PR in one repo. Group related backlog items; avoid
+  overlapping work.
+- A dir player (`spawn.sh --dir PATH`) runs in an existing directory with no branch and no
+  worktree: a reviewer reading a checkout, or ad-hoc work outside any repo such as tidying files.
+  It creates nothing on disk and is a player in every other respect. Keep a dir player out of a
+  directory another player is changing.
 - Every script accepts `--repo PATH`. Supply it when outside the target repo.
 - Scripts take a player as its branch (`feature/x`: resolved in the current or `--repo` repo,
   or uniquely across repos) or as the exact tmux session name `sessions.sh` shows. Names are
   labels (`<repo directory>-<branch>`, `-2`, `-3`, … when taken) chosen at spawn and never
   parsed; the tags identify a player, so a session without them is never touched or listed.
+  A dir player has no branch: it is addressed only by its session name, `<directory>-dir`
+  (`-2`, … when taken), which `spawn.sh` prints as `started <name>`.
   Preserve `.claude/worktrees/` locations. Session names are only unique **per machine**: once
   more than one machine is registered, a bare name is not enough to pick one player, and
   `--machine` may be needed alongside it.
@@ -59,8 +64,8 @@ through `beam exec <machine> -- <argv…>` (stdin forwarded, exit status propaga
 machine was named, the script fails and names both — it never silently runs the command here,
 which would create or act on a player on the wrong machine.
 
-- `--repo` on a remote machine must be an absolute path or start with `~/`; a relative path is
-  refused rather than resolved against this machine's working directory.
+- `--repo` or `--dir` on a remote machine must be an absolute path or start with `~/`; a
+  relative path is refused rather than resolved against this machine's working directory.
 - The plugin must be installed on the remote machine at the same `$HOME`-relative path as here
   (Claude Code's plugin cache on both): the player's launcher runs in the pane, there. A spawn
   stops before creating anything when it is missing and says what to install.
@@ -113,21 +118,22 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | Tag | Value |
 | --- | --- |
 | `@orchestra-spawner` | `orchestra` or `kirby`: which program created the session |
-| `@orchestra-repo` | absolute, symlink-resolved path of the main checkout |
-| `@orchestra-session-type` | `worktree` for every player; `shell`/`agent` are Kirby terminal tabs, never players |
-| `@orchestra-branch` | the branch the session was spawned under, unsanitized (`feature/x`) |
+| `@orchestra-repo` | absolute, symlink-resolved path of the main checkout; for a dir player, of its directory, which need not be a repo |
+| `@orchestra-session-type` | `worktree` or `dir` for a player; `shell`/`agent` are Kirby terminal tabs, never players |
+| `@orchestra-branch` | worktree players only: the branch the session was spawned under, unsanitized (`feature/x`) |
 | `@orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
 | `@orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
+| `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 
-The first four tags are a session's identity, written once when it is created; the name is
-only a label. The pane environment carries `ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET`
-(the tmux server socket that holds the session; the player's own tmux environment is redirected
-to a scratch server), `ORCHESTRA_MODE`, `ORCHESTRA_HARNESS`, `ORCHESTRA_MODEL`,
-`ORCHESTRA_EFFORT`, `ORCHESTRA_PERMISSION_MODE`, `ORCHESTRA_COMMAND` and
-`ORCHESTRA_CLAUDE_SKILL`. The orchestrator target is not an environment variable: the player
+The first four tags (three for a dir player, which has no branch) are a session's identity,
+written once when it is created; the name is only a label. The pane environment carries
+`ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET` (the tmux server socket that holds the
+session; the player's own tmux environment is redirected to a scratch server), `ORCHESTRA_MODE`,
+`ORCHESTRA_HARNESS`, `ORCHESTRA_MODEL`, `ORCHESTRA_EFFORT`, `ORCHESTRA_PERMISSION_MODE`,
+`ORCHESTRA_COMMAND` and `ORCHESTRA_CLAUDE_SKILL`. The orchestrator target is not an environment variable: the player
 reads the tag. Sessions created by earlier versions of these scripts are not recognised.
 
 ## Reporting destination
@@ -153,9 +159,11 @@ The destination is written to the player session's `@orchestra-orchestrator` tag
 and adopt; a player cannot change it and never uses its own Codex ID as parent. A local `claude:`
 destination also records this process's Claude config directory (`$CLAUDE_CONFIG_DIR`, else
 `~/.claude`) in `@orchestra-orchestrator-config`, since the player may run with a different one.
-Only known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variables,
-`CODEX_THREAD_ID`, …) are removed from the player's environment; `CLAUDE_CONFIG_DIR`,
-`ANTHROPIC_API_KEY` and `CODEX_HOME` are inherited unchanged.
+A pane gets the tmux server's environment, not the orchestrator's, so a local player is given
+this process's `CLAUDE_CONFIG_DIR` explicitly (when set) and runs on the same Claude account;
+`ANTHROPIC_API_KEY`, `CODEX_HOME` and the rest are whatever the tmux server started with. Only
+known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variables,
+`CODEX_THREAD_ID`, …) are removed from it.
 
 Player `report.sh` routes `claude:` to that session's inbox socket, found in Claude's registry
 under `@orchestra-orchestrator-config` (else the player's `$CLAUDE_CONFIG_DIR`, else `~/.claude`)
@@ -207,6 +215,7 @@ the original choice must be guaranteed. Do not silently substitute a model.
    ```
    spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent codex
    spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent claude --model fable --effort high
+   spawn.sh --dir PATH --prompt-file FILE --agent claude       # a dir player: no branch, no worktree
    ```
    `--permission-mode auto` (Claude only) when appropriate to the existing authorization;
    `--dry-run` previews without writes or fetches; `--from REF` deliberately stacks work.
@@ -241,6 +250,10 @@ the original choice must be guaranteed. Do not silently substitute a model.
   else the session's `@orchestra-agent` tag, else Claude `--continue` and, only when Claude
   prints "No conversation found to continue", the newest Codex conversation recorded for
   that worktree. Any other failure leaves a dead pane to inspect; nothing starts fresh silently.
+- A dir player resumes with `spawn.sh --dir PATH --resume`. Its directory may hold other
+  conversations (yours, say), so a Claude dir player continues exactly the conversation recorded in
+  `@orchestra-claude-session`. That tag dies with the session, so after `kill.sh` a Claude dir
+  player cannot be resumed; a Codex one takes the newest Codex conversation for the directory.
 - Reassignment: `spawn.sh ... --resume --prompt "Next: …"` (or `--prompt-file`) restores the
   conversation with a new assignment; the player reports to the target on its session tag.
 - Sessions outlive the conversation. Leave them running. Kill only a user-named player

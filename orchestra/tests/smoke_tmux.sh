@@ -305,6 +305,31 @@ sleep 1
 check "resume recreates under the next label" "[ $rc = 0 ] && grep -q '^started *$S2\$' '$T/resume2.out' && grep -qx 'env ORCHESTRA_SESSION=$S2' '$T/last-claude' && [ \"\$(tag $S2 @orchestra-branch)\" = feature/x ]"
 check "stranger untouched" "tm has-session -t '=$S1' && [ -z \"\$(tag $S1 @orchestra-spawner)\" ]"
 
+echo "# dir player: no branch, no worktree, addressed by its session name"
+DP="$T/loose"; mkdir -p "$DP"; SD=loose-dir; DPR="$(cd "$DP" && pwd -P)"
+bash "$O/spawn.sh" --dir "$DP" --prompt "tidy up" --agent claude --orchestrator tmux:parent >"$T/spawn-dir.out" 2>&1; rc=$?
+sleep 1.5
+check "dir spawn starts under the directory's name" "[ $rc = 0 ] && grep -q '^started *$SD\$' '$T/spawn-dir.out' && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_current_path}')\" = '$DPR' ]"
+check "dir player tags: type dir, its directory as repo, no branch" \
+  "[ \"\$(tag $SD @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $SD @orchestra-session-type)\" = dir ] && [ \"\$(tag $SD @orchestra-repo)\" = '$DPR' ] && [ -z \"\$(tag $SD @orchestra-branch)\" ]"
+check "claude starts a conversation with the id recorded on the session" "[ -n \"\$(tag $SD @orchestra-claude-session)\" ] && grep -qx 'arg=--session-id' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude'"
+check "nothing was created in the directory" "[ -z \"\$(ls -A '$DP')\" ]"
+bash "$O/sessions.sh" --all --json > "$T/sessions-dir.json" 2>/dev/null
+check "sessions.sh lists it with its directory and no branch" "jq -e '.[] | select(.session == \"$SD\") | .repo == \"$DPR\" and .branch == \"\" and .agent == \"claude\"' '$T/sessions-dir.json' >/dev/null"
+(cd "$DP" && ORCHESTRA_SESSION="$SD" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" PROGRESS "from the dir") >"$T/report-dir.out" 2>&1; sleep 0.5
+check "its report reaches the orchestrator under its session name" "grep -q '\[player $SD\] PROGRESS: from the dir' '$T/received-claude' && tag $SD @orchestra-last-report | grep -q '^PROGRESS '"
+bash "$O/send.sh" "$SD" --raw "ping-dir" >/dev/null && sleep 0.6
+check "send.sh and screen.sh by session name" "grep -q ping-dir '$T/received-claude' && bash '$O/screen.sh' '$SD' >/dev/null"
+check "adopt.sh by session name" "bash '$O/adopt.sh' '$SD' --orchestrator tmux:parent >/dev/null 2>&1 && [ \"\$(tag $SD @orchestra-orchestrator)\" = tmux:parent ]"
+tm send-keys -t "=$SD:" C-d; sleep 0.8
+bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; rc=$?; sleep 1
+check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
+bash "$O/kill.sh" "$SD" >/dev/null
+check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
+rm -f "$T/last-call"; bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; sleep 1
+check "after kill.sh, resume refuses to guess a conversation" "[ ! -e '$T/last-call' ] && bash '$O/screen.sh' '$SD' | grep -q 'no Claude conversation is recorded'"
+tm kill-session -t "=$SD"
+
 echo "# machines: a fake beam, real tmux behind it"
 # Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd
 # to --cwd first, if given) so it reaches the real tmux/codex fakes with stdin forwarded intact —

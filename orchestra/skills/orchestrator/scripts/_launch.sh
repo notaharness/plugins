@@ -30,13 +30,22 @@
 # every Claude launch here passes --strict-mcp-config (no "new MCP server found" prompt for the
 # repo's .mcp.json; players run without MCP servers) and pre-accepts the workspace-trust dialog
 # for this worktree first (claude_trust_here).
+#
+# A dir player (@orchestra-session-type dir) may share its directory with other conversations, the
+# orchestrator's own included, so Claude's "newest conversation here" is not necessarily its own: a
+# fresh Claude launch picks the conversation id itself (--session-id), records it in
+# @orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
+# with the session) a Claude resume refuses rather than guess; so does auto mode, which for a dir
+# player means Claude only.
 set -u
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
 model="${ORCHESTRA_MODEL:-}"; effort="${ORCHESTRA_EFFORT:-}"; perm="${ORCHESTRA_PERMISSION_MODE:-}"
 session="${ORCHESTRA_SESSION:?ORCHESTRA_SESSION is required}"; sock="${ORCHESTRA_SOCKET:?ORCHESTRA_SOCKET is required}"
 NO_CONVERSATION='No conversation found to continue'
-RESTART_NOTE='Your session was restarted in this worktree; files and commits are intact, so do not redo finished work.'
+stype="$(tag_get "$sock" "$session" "$TAG_SESSION_TYPE")"
+where=worktree; [ "$stype" = "$SESSION_TYPE_DIR" ] && where=directory
+RESTART_NOTE="Your session was restarted in this $where; files and commits are intact, so do not redo finished work."
 
 fail() { echo "player launch: $*" >&2; exit 1; }
 buf="$(prompt_buffer_name "$session")"
@@ -55,6 +64,21 @@ preamble() {
   fi
 }
 codex_effort_args() { [ -n "$effort" ] && printf '%s\n' -c "model_reasoning_effort=\"$effort\""; true; }
+# claude_conversation_args: which Claude conversation to start or continue (see the header); fails
+# for a dir player's resume with no recorded conversation.
+claude_conversation_args() {
+  local id=""
+  if [ "$stype" != "$SESSION_TYPE_DIR" ]; then [ "$mode" = resume ] && printf '%s\n' --continue; return 0; fi
+  if [ "$mode" = resume ]; then
+    id="$(tag_get "$sock" "$session" "$TAG_CLAUDE_SESSION")"
+    [ -n "$id" ] && printf '%s\n' --resume "$id"
+    return
+  fi
+  id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null)" || :
+  id="$(printf %s "$id" | tr A-F a-f)"
+  [ -n "$id" ] && tag_set "$sock" "$session" "$TAG_CLAUDE_SESSION" "$id" && printf '%s\n' --session-id "$id"
+  return 0
+}
 # claude_trust_here: record this worktree as trusted in Claude Code's global config
 # ($CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json), as answering its workspace-trust dialog
 # would: projects[<path>].hasTrustDialogAccepted, for this exact path — a trusted ancestor is no
@@ -88,7 +112,7 @@ PY
 fresh() {
   local prompt; prompt="$(preamble "$1")"; remember "$1"
   case "$1" in
-    claude)   claude_trust_here; exec claude ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt";;
+    claude)   claude_trust_here; exec claude $(claude_conversation_args) ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt";;
     codex)    exec codex ${model:+-m "$model"} $(codex_effort_args) "$prompt";;
     gemini)   exec gemini ${model:+-m "$model"} -i "$prompt";;
     copilot)  exec copilot ${model:+--model "$model"} -i "$prompt";;
@@ -119,10 +143,13 @@ resume_codex() {
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
 resume_claude() {
-  local prompt; prompt="$(preamble claude)"; remember claude; claude_trust_here
-  exec claude --continue ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
+  local prompt conv; prompt="$(preamble claude)"
+  conv="$(claude_conversation_args)" || fail "no Claude conversation is recorded on this dir player's session (kill.sh removes it); nothing to resume. Spawn it fresh, or pass --agent codex for a Codex player"
+  remember claude; claude_trust_here
+  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
 }
 resume_auto() {
+  [ "$stype" = "$SESSION_TYPE_DIR" ] && resume_claude
   command -v script >/dev/null || fail "cannot detect the harness without util-linux script(1); rerun with --agent claude or --agent codex"
   local log rc
   claude_trust_here

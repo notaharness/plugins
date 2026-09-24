@@ -3,6 +3,7 @@
 #
 # Usage: spawn.sh --branch <name> (--prompt-file <f> | --prompt <text>)      fresh launch
 #        spawn.sh --branch <name> --resume [--prompt <text> | --prompt-file <f>]
+#        spawn.sh --dir <path> …              a dir player: no branch, no worktree (below)
 #                 [--repo <path>]             the repo to spawn into; defaults to the
 #                                             cwd's repo. Any path inside it will do.
 #                 [--agent claude|codex|gemini|copilot|opencode]  (fresh default claude)
@@ -16,7 +17,8 @@
 #                                             then current Codex ID, then current tmux
 #                 [--machine NAME]            beam peer label or peerId to spawn the player on;
 #                                             default $ORCHESTRA_MACHINE, else this machine. A
-#                                             remote --repo must be absolute or start with ~/.
+#                                             remote --repo or --dir must be absolute or start
+#                                             with ~/.
 #                 [--no-node-modules] [--dry-run]
 # Fresh defaults: Claude opus/high (fable/high for --model fable), Codex gpt-6-astra/medium,
 # other Codex models high. --dry-run resolves local refs without fetching or writing.
@@ -29,6 +31,13 @@
 # worktree). Any other failure stops with a dead pane for inspection; nothing starts a fresh
 # conversation silently. --model/--effort are applied on resume only when given; otherwise the
 # CLI's restored/configured settings apply.
+#
+# --dir starts a dir player in an existing directory (a reviewer, or work outside any repo) instead
+# of a worktree; it takes no --branch, --repo or --from and creates nothing on disk. It is a player
+# in every other respect, tagged @orchestra-session-type dir with its directory (resolved) in
+# @orchestra-repo and no @orchestra-branch, labelled <basename of the directory>-dir, and addressed
+# by that session name everywhere; --dir <path> --resume finds it again by its directory (see
+# _launch.sh for which conversation it continues).
 #
 # The task is the new CLI's initial prompt argument (see _launch.sh), never typed and never
 # queued: Claude Code does not run a skill invocation posted to its inbox socket, and a Codex
@@ -53,25 +62,32 @@
 # is written to disk. The launcher prefixes it with the player invocation: $player for Codex,
 # and for Claude the plugin-namespaced skill (/<plugin>:player), with ORCHESTRA_CLAUDE_SKILL=/player
 # for a standalone Claude skill install. The pane's environment is the tmux server's, not this
-# process's: a local player gets this process's PATH, HOME and CLAUDE_CONFIG_DIR (so it runs on the
-# orchestrator's Claude account) passed explicitly; anything else, ANTHROPIC_API_KEY and CODEX_HOME
-# included, is whatever the server started with. Only the known parent-session markers are removed
-# from it (see _lib.sh). The agent runs with TMUX unset and TMUX_TMPDIR on a scratch directory, so
+# process's: a local player is given this process's PATH, HOME and CLAUDE_CONFIG_DIR (set or unset,
+# so it runs on the orchestrator's Claude account) explicitly; anything else, ANTHROPIC_API_KEY
+# and CODEX_HOME included, is whatever the server started with. Only the known parent-session
+# markers are removed from it (see _lib.sh). The agent runs with TMUX unset and TMUX_TMPDIR on a scratch directory, so
 # tests it runs cannot reach the user's tmux; ORCHESTRA_SOCKET names the real server for
 # the launcher and report.sh.
 . "$(dirname "$(realpath "$0")")/_lib.sh"
-AGENT=""; MODEL=""; EFFORT=""; PERM=""; CMD=""; FROM=""; LINK_NM=1; DRY=0; RESUME=0; BRANCH=""; PROMPT=""; PFILE=""; ORCH=""
+AGENT=""; MODEL=""; EFFORT=""; PERM=""; CMD=""; FROM=""; LINK_NM=1; DRY=0; RESUME=0; BRANCH=""; DIR=""; PROMPT=""; PFILE=""; ORCH=""
 while [ $# -gt 0 ]; do case "$1" in
-  --branch) BRANCH="$2"; shift;; --prompt-file) PFILE="$2"; shift;; --prompt) PROMPT="$2"; shift;;
+  --branch) BRANCH="$2"; shift;; --dir) DIR="$2"; shift;; --prompt-file) PFILE="$2"; shift;; --prompt) PROMPT="$2"; shift;;
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,61p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,70p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
-[ -n "$BRANCH" ] || { echo "spawn.sh: --branch is required" >&2; exit 2; }
-git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
-require_valid_repo_for_machine || exit 2
-in_repo || { echo "spawn.sh: ${ORCH_REPO:-$PWD} is not inside a git repo; pass --repo <path>" >&2; exit 1; }
+if [ -n "$DIR" ]; then
+  [ -z "$BRANCH$ORCH_REPO$FROM" ] || { echo "spawn.sh: --dir starts a player without a worktree; it takes no --branch, --repo or --from" >&2; exit 2; }
+  is_local_machine || case "$DIR" in /*|"~/"*) ;; *) echo "spawn.sh: --dir must be an absolute path or start with ~/ when --machine is set (got '$DIR')" >&2; exit 2;; esac
+  TYPE="$SESSION_TYPE_DIR"; LINK_NM=0
+else
+  [ -n "$BRANCH" ] || { echo "spawn.sh: --branch (or --dir) is required" >&2; exit 2; }
+  git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
+  require_valid_repo_for_machine || exit 2
+  in_repo || { echo "spawn.sh: ${ORCH_REPO:-$PWD} is not inside a git repo; pass --repo <path>" >&2; exit 1; }
+  TYPE="$SESSION_TYPE_WORKTREE"
+fi
 if [ -n "$PFILE" ]; then PROMPT="$(cat "$PFILE")" || exit 1; fi
 if [ -z "$PROMPT" ] && [ $RESUME = 0 ]; then echo "spawn.sh: task prompt is required (--prompt or --prompt-file)" >&2; exit 2; fi
 # tmux itself is only ever invoked through tmux_on/beam_exec; on a remote machine this process
@@ -124,8 +140,16 @@ if ! is_local_machine; then
   LAUNCHER="$remote_launcher"
 fi
 CLAUDE_INVOCATION="$(claude_player_invocation)"
-root="$(repo_root)"
-dir="$(worktree_dir_for_branch "$BRANCH")"
+# root is what @orchestra-repo holds and workdir where the pane runs: the main checkout and its
+# worktree, or for a dir player its directory, both times (resolved on ORCH_MACHINE, which also
+# proves it exists there; r's --cwd expands a remote "~/").
+if [ -n "$DIR" ]; then
+  root="$(r --cwd "$DIR" pwd -P)" && [ -n "$root" ] || { echo "spawn.sh: $DIR is not a directory on $(machine_label); nothing was created" >&2; exit 1; }
+  workdir="$root"
+else
+  root="$(repo_root)"
+  dir="$(worktree_dir_for_branch "$BRANCH")"; workdir="$root/$dir"
+fi
 # Existence of the worktree directory is a question for ORCH_MACHINE, not this one, and asking
 # another machine has three answers rather than two: there, not there, or the machine did not
 # answer. A failed exec is not a statement about its filesystem, so the probe reports what it
@@ -159,7 +183,7 @@ case "$EXISTING" in
   running) echo "spawn.sh: session already exists and is running: $name (kill.sh it first, or adopt.sh it)" >&2; exit 1;;
   dead) [ $RESUME = 1 ] || { echo "spawn.sh: $name has a dead player; use --resume, or kill.sh it for a fresh start" >&2; exit 1; };;
 esac
-if [ $RESUME = 1 ]; then
+if [ $RESUME = 1 ] && [ -z "$DIR" ]; then
   dir_exists || { echo "spawn.sh: nothing to resume: worktree $root/$dir does not exist on $(machine_label)" >&2; exit 1; }
 fi
 
@@ -167,7 +191,7 @@ fi
 # from whatever the invoking checkout happens to have as HEAD — the orchestrator
 # often runs inside a feature worktree whose commits must not leak into the agent's
 # branch. --from overrides for deliberate stacking. Resume never creates a branch.
-if [ -z "$FROM" ] && [ $RESUME = 0 ] && ! dir_exists; then
+if [ -z "$DIR" ] && [ -z "$FROM" ] && [ $RESUME = 0 ] && ! dir_exists; then
   FROM="$(default_branch_ref)"
   [ -n "$FROM" ] || { echo "spawn.sh: could not resolve the default branch; pass --from <ref>" >&2; exit 1; }
 fi
@@ -215,9 +239,11 @@ case "$HARNESS" in
   custom) desc="$CMD";;
   *) [ $RESUME = 1 ] && desc="$HARNESS (resume)"; [ -n "$MODEL" ] && desc="$desc model=$MODEL"; [ -n "$EFFORT" ] && desc="$desc effort=$EFFORT"; [ -n "$PERM" ] && desc="$desc permission-mode=$PERM";;
 esac
-[ "$EXISTING" = none ] && name="$(session_label "$root" worktree "$BRANCH")"     # preferred label; the free one is picked at creation
-printf 'repo      %s\nbranch    %s%s\nworktree  %s/%s\ntmux      %s (%s)\nreports   %s\nmode      %s\ncommand   %s\nprompt    %s\n' \
-  "$root" "$BRANCH" "${FROM:+ (from $FROM)}" "$root" "$dir" "$name" "$EXISTING" "$ORCH" "$MODE" "$desc" "$(printf %s "$PROMPT" | head -c 80 | tr '\n' ' ')" | cut -c1-200
+[ "$EXISTING" = none ] && name="$(session_label "$root" "$TYPE" "$BRANCH")"     # preferred label; the free one is picked at creation
+{ if [ -n "$DIR" ]; then printf 'dir       %s\n' "$workdir"
+  else printf 'repo      %s\nbranch    %s%s\nworktree  %s\n' "$root" "$BRANCH" "${FROM:+ (from $FROM)}" "$workdir"; fi
+  printf 'tmux      %s (%s)\nreports   %s\nmode      %s\ncommand   %s\nprompt    %s\n' \
+    "$name" "$EXISTING" "$ORCH" "$MODE" "$desc" "$(printf %s "$PROMPT" | head -c 80 | tr '\n' ' ')"; } | cut -c1-200
 [ $DRY = 1 ] && exit 0
 
 # Everything below that is not a tmux call (git, the node_modules copy, the scratch tmux
@@ -225,7 +251,9 @@ printf 'repo      %s\nbranch    %s%s\nworktree  %s/%s\ntmux      %s (%s)\nreport
 # run here. Local behaviour is unchanged (still a plain `cd` and bare commands against this
 # machine's filesystem); a remote machine has no shell of its own to `cd` for, so `g` and `r`
 # carry an explicit --cwd/-C instead (see _lib.sh; D12 — no "$(id -u)", no "~" left for a shell).
-if is_local_machine; then
+# A dir player has nothing to create: its directory is used as it is.
+if [ -n "$DIR" ]; then :
+elif is_local_machine; then
   cd "$root" || exit 1
   if dir_exists; then
     [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] &&
@@ -279,9 +307,9 @@ if [ "$EXISTING" = none ]; then
     # inherited orchestrator session to leak markers from in the first place, but the same strip
     # travels with it for consistency; -u matches every other tmux_on call there.
     if is_local_machine; then
-      env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -s "$name" -c "$root/$dir" -x 220 -y 50 && break
+      env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -s "$name" -c "$workdir" -x 220 -y 50 && break
     else
-      beam_exec "$ORCH_MACHINE" env "${strip[@]}" tmux -u -S "$ORCH_SOCK" new-session -d -s "$name" -c "$root/$dir" -x 220 -y 50 && break
+      beam_exec "$ORCH_MACHINE" env "${strip[@]}" tmux -u -S "$ORCH_SOCK" new-session -d -s "$name" -c "$workdir" -x 220 -y 50 && break
     fi
     # Lost a race for the name (it exists now): probe again from the preferred label, so a second
     # lost race yields -3, not -2-2. Anything else is fatal.
@@ -289,7 +317,7 @@ if [ "$EXISTING" = none ]; then
   done
   CREATED=1
   tt="$(tmux_target "$name")"
-  tag "$TAG_SPAWNER" orchestra && tag "$TAG_REPO" "$root" && tag "$TAG_SESSION_TYPE" "$SESSION_TYPE_WORKTREE" && tag "$TAG_BRANCH" "$BRANCH" ||
+  tag "$TAG_SPAWNER" orchestra && tag "$TAG_REPO" "$root" && tag "$TAG_SESSION_TYPE" "$TYPE" && { [ -z "$BRANCH" ] || tag "$TAG_BRANCH" "$BRANCH"; } ||
     { t kill-session -t "=$name" 2>/dev/null; echo "spawn.sh: could not tag session $name; removed" >&2; exit 1; }
 fi
 buf="$(prompt_buffer_name "$name")"
@@ -301,16 +329,14 @@ t set-option -t "$tt" remain-on-exit on
 # The task body, from stdin. tmux never creates an empty buffer, so a newline is appended
 # (the launcher's command substitution drops it again); an empty body is then still a buffer.
 printf '%s\n' "$PROMPT" | t load-buffer -b "$buf" - || { echo "spawn.sh: tmux could not load the task prompt into buffer $buf" >&2; exit 1; }
-# respawn-pane gives the pane the tmux SERVER's environment, which is the orchestrator's only if
-# the orchestrator happened to start that server. PATH, HOME and CLAUDE_CONFIG_DIR (the Claude
-# account; unset means the default one, so nothing is passed) are this process's own values, only
-# right for a local pane; on a remote machine they would overwrite the correct, already-remote-native
+# PATH, HOME and CLAUDE_CONFIG_DIR are this (the orchestrator's) process's own values, only right
+# for a local pane; on a remote machine they would overwrite the correct, already-remote-native
 # values the target's own tmux server captured when beam_exec started it above, with this machine's —
 # the harness would then not be found on what is now the wrong PATH. Left unset there, the pane
 # keeps what its own server gave it, same as every other user option this call does not name.
 path_env=(); is_local_machine && path_env=(-e "PATH=$PATH" -e "HOME=$HOME")
 is_local_machine && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && path_env+=(-e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR")
-if ! t respawn-pane -k -t "$tt" -c "$root/$dir" \
+if ! t respawn-pane -k -t "$tt" -c "$workdir" \
   "${path_env[@]}" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
   -e "ORCHESTRA_MODE=$MODE" -e "ORCHESTRA_HARNESS=$HARNESS" -e "ORCHESTRA_MODEL=$MODEL" -e "ORCHESTRA_EFFORT=$EFFORT" \
