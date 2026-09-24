@@ -76,7 +76,8 @@ claude_conversation_args() {
   fi
   id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null)" || :
   id="$(printf %s "$id" | tr A-F a-f)"
-  [ -n "$id" ] && tag_set "$sock" "$session" "$TAG_CLAUDE_SESSION" "$id" && printf '%s\n' --session-id "$id"
+  if [ -n "$id" ] && tag_set "$sock" "$session" "$TAG_CLAUDE_SESSION" "$id"; then printf '%s\n' --session-id "$id"
+  else echo "player launch: could not record a Claude conversation id on $session; this dir player cannot be resumed" >&2; fi
   return 0
 }
 # claude_trust_here: record this worktree as trusted in Claude Code's global config

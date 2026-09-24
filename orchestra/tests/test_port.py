@@ -130,6 +130,7 @@ if c == 'show-options':
     print(v); sys.exit(0)
 if c == 'set-option':
     n = target(a.index('-t')+1)
+    if '-u' not in a and a[-2] == os.environ.get('TEST_SET_OPTION_FAIL'): sys.stderr.write('mock tmux: set-option refused\n'); sys.exit(1)
     if '-u' in a: state[n]['options'].pop(a[-1], None)
     else: state[n]['options'][a[-2]] = a[-1]
     save(); sys.exit(0)
@@ -424,8 +425,9 @@ class PortTests(unittest.TestCase):
     def last_report(self, sock=None):
         v = self.tag('@orchestra-last-report', sock=sock); self.assertIsNotNone(v, '@orchestra-last-report is unset'); return v
     def set_state(self, s, sock=None): self.state_file(sock).write_text(json.dumps(s))
-    def drop_tag(self, name):
-        s = self.state(); s[self.session]['options'].pop(name, None); self.set_state(s)
+    def drop_tag(self, name): self.drop_tag_of(self.session, name)
+    def drop_tag_of(self, session, name):
+        s = self.state(); s[session]['options'].pop(name, None); self.set_state(s)
     def rename(self, old, new, sock=None):
         s = self.state(sock); s[new] = s.pop(old); self.set_state(s, sock)
     # A session some other program created: no tags unless given (mock tmux, so any name works).
@@ -632,18 +634,24 @@ class PortTests(unittest.TestCase):
         self.assertEqual(c['args'][:2], ['--resume', pin]); self.assertNotIn('--continue', c['args'])       # never "the newest conversation here"
         self.assertTrue(c['args'][-1].startswith(INV+' Your session was restarted in this directory;'), c['args'][-1])
         self.assertEqual(self.tag('@orchestra-claude-session', 'notes-dir'), pin)
-        # kill.sh ends the session and the record of its conversation: a later --resume recreates the
-        # session, identity and all, but refuses to guess at a conversation, with or without --agent.
-        self.orch('kill.sh', 'notes-dir', cwd=self.base)
+        # A dead pane whose record is gone (dropped here by hand) refuses in the launcher, pane kept.
+        self.drop_tag_of('notes-dir', '@orchestra-claude-session'); n = len(self.calls()); self.dir_spawn(d, '--resume', prompt=False)
+        self.assertEqual(self.calls()[n:], []); self.assertEqual((self.state()['notes-dir']['dead'], self.state()['notes-dir']['status']), (1, 1))
+        # kill.sh ends the session and the record of its conversation: a later Claude or auto --resume
+        # refuses before creating anything, as a worktree resume does without its worktree.
+        self.orch('kill.sh', 'notes-dir', cwd=self.base); n = len(self.tmux_calls())
         for extra in ((), ('--agent', 'claude')):
-            n = len(self.calls()); self.dir_spawn(d, '--resume', *extra, prompt=False)
-            self.assertEqual(self.calls()[n:], [], extra); self.assertEqual(self.state()['notes-dir']['status'], 1)
-            self.assertEqual(self.state()['notes-dir']['dead'], 1)
-        opts = self.state()['notes-dir']['options']
-        self.assertEqual((opts['@orchestra-session-type'], opts['@orchestra-repo'], opts.get('@orchestra-branch')), ('dir', real, None))
-        # Codex: the newest conversation recorded for that directory
-        self.orch('kill.sh', 'notes-dir', cwd=self.base); self.dir_spawn(d, '--agent', 'codex'); self.rollout(real)
-        self.dir_spawn(d, '--resume', prompt=False); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
+            x = self.dir_spawn(d, '--resume', *extra, prompt=False, ok=False)
+            self.assertEqual(x.returncode, 1, extra); self.assertIn('no Claude conversation is recorded', x.stderr)
+        self.assertNotIn('notes-dir', self.state()); self.assertEqual([c for c in self.tmux_calls()[n:] if 'new-session' in c], [])
+        # Codex: the newest conversation recorded for that directory, even once the session is gone
+        self.dir_spawn(d, '--agent', 'codex'); self.orch('kill.sh', 'notes-dir', cwd=self.base); self.rollout(real)
+        self.dir_spawn(d, '--resume', '--agent', 'codex', prompt=False); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
+        self.assertEqual(self.tag('@orchestra-session-type', 'notes-dir'), 'dir')
+    def test_dir_player_warns_when_its_claude_conversation_cannot_be_recorded(self):
+        self.env['TEST_SET_OPTION_FAIL'] = '@orchestra-claude-session'
+        x = self.dir_spawn(self.notes_dir(), '--agent', 'claude')
+        self.assertNotIn('--session-id', self.calls()[-1]['args']); self.assertIn('cannot be resumed', x.stderr)
 
     # --- names are labels, tags are identity --------------------------------------------
     def test_sanitize_and_label_table_pinned_with_kirby(self):

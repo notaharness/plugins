@@ -326,9 +326,8 @@ bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; rc=$?; sleep 1
 check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
 bash "$O/kill.sh" "$SD" >/dev/null
 check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
-rm -f "$T/last-call"; bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; sleep 1
-check "after kill.sh, resume refuses to guess a conversation" "[ ! -e '$T/last-call' ] && bash '$O/screen.sh' '$SD' | grep -q 'no Claude conversation is recorded'"
-tm kill-session -t "=$SD"
+bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?
+check "after kill.sh, resume refuses before creating anything" "[ $rc = 1 ] && grep -q 'no Claude conversation is recorded' '$T/resume-gone.err' && ! tm has-session -t '=$SD' 2>/dev/null"
 
 echo "# machines: a fake beam, real tmux behind it"
 # Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd

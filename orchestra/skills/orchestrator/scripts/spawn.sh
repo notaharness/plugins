@@ -211,6 +211,11 @@ if [ $RESUME = 0 ]; then
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
+# A dir player's Claude conversation is known only from its session's tag (see _launch.sh), so once
+# the session is gone there is nothing to resume for Claude, or for auto, which is Claude there.
+if [ -n "$DIR" ] && [ $RESUME = 1 ] && [ "$EXISTING" = none ]; then
+  case "$HARNESS" in claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh, or pass --agent codex for a Codex player" >&2; exit 1;; esac
+fi
 # The harness has to be on PATH where the player will actually run. On this machine that is
 # checkable now; on another one there is no cheap way to ask without a round trip for a check
 # that respawn-pane will make anyway (a missing binary there fails loudly, just later, with a dead
