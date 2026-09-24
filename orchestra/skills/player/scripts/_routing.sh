@@ -12,7 +12,8 @@ TAG_SPAWNER=@orchestra-spawner            # kirby | orchestra: whichever program
 TAG_REPO=@orchestra-repo                  # main checkout, absolute and symlink-resolved
 TAG_SESSION_TYPE=@orchestra-session-type  # worktree (players) | shell | agent (Kirby's terminal tabs)
 TAG_BRANCH=@orchestra-branch              # worktree sessions: the branch, unsanitized (feature/x)
-TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: codex:<uuid> | tmux:<session>
+TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: claude:<uuid> | codex:<uuid> | tmux:<session>
+TAG_ORCH_CONFIG=@orchestra-orchestrator-config    # claude:<uuid> targets only: the orchestrator's Claude config dir
 TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | opencode | custom
 TAG_LAUNCHING=@orchestra-launching        # 1 while the placeholder pane exists; unset once the harness started
 TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
@@ -284,40 +285,52 @@ player_session_context() {
 }
 
 # --- Reporting targets -----------------------------------------------------------------------
-# codex:<thread-id>, tmux:<session>, or beam:<orchestrator peerId>/<one of those two>, when the
-# orchestrator is on another machine. Nothing else. Never infer a parent from a player's own ID.
-# tmux session names: tmux itself rewrites "." and ":" but otherwise allows most characters.
-# peerId: 32 lowercase hex characters, the first 16 bytes of the SHA-256 of the peer's node public
-# key (beam/docs/02-identity.md), validated in full wherever it arrives from outside.
+# claude:<session-id>, codex:<thread-id>, tmux:<session>, or beam:<orchestrator peerId>/<one of
+# those three>, when the orchestrator is on another machine. Nothing else. Never infer a parent from
+# a player's own ID. A Claude session id survives resume, compaction and renaming, and is random,
+# where a tmux name is neither. tmux session names: tmux itself rewrites "." and ":" but otherwise
+# allows most characters. peerId: 32 lowercase hex characters, the first 16 bytes of the SHA-256 of
+# the peer's node public key (beam/docs/02-identity.md), validated in full wherever it arrives from
+# outside.
 _valid_local_target() {
   case "$1" in
-    codex:*) [[ "${1#codex:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]];;
+    claude:*|codex:*) [[ "${1#*:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]];;
     tmux:*) [[ -n "${1#tmux:}" && ! "${1#tmux:}" =~ [:[:cntrl:]] ]];;
     *) return 1;;
   esac
 }
+_TARGET_FORMS='claude:<session-id>, codex:<thread-id> or tmux:<session>'
 normalize_target() {
+  local local_part="$1" peer
   case "$1" in
-    codex:*) _valid_local_target "$1" || { echo "invalid Codex thread ID: ${1#codex:}" >&2; return 2; };;
-    tmux:*) _valid_local_target "$1" || { echo "invalid tmux session name: ${1#tmux:}" >&2; return 2; };;
     beam:*/*)
-      local rest peer local_part
-      rest="${1#beam:}"; peer="${rest%%/*}"; local_part="${rest#*/}"
+      local_part="${1#beam:}"; peer="${local_part%%/*}"; local_part="${local_part#*/}"
       [[ "$peer" =~ ^[0-9a-f]{32}$ ]] || { echo "invalid beam peerId: $peer" >&2; return 2; }
-      case "$local_part" in
-        codex:*) _valid_local_target "$local_part" || { echo "invalid Codex thread ID: ${local_part#codex:}" >&2; return 2; };;
-        tmux:*) _valid_local_target "$local_part" || { echo "invalid tmux session name: ${local_part#tmux:}" >&2; return 2; };;
-        *) echo "invalid beam-qualified target: $1 (the local part must be codex:<thread-id> or tmux:<session>)" >&2; return 2;;
-      esac;;
-    *) echo "invalid orchestrator target: $1 (use codex:<thread-id>, tmux:<session>, or beam:<peerId>/codex:<thread-id>|tmux:<session>)" >&2; return 2;;
+      case "$local_part" in claude:*|codex:*|tmux:*) ;;
+        *) echo "invalid beam-qualified target: $1 (the local part must be $_TARGET_FORMS)" >&2; return 2;; esac;;
+    claude:*|codex:*|tmux:*) ;;
+    *) echo "invalid orchestrator target: $1 (use $_TARGET_FORMS, or beam:<peerId>/ followed by one of those)" >&2; return 2;;
   esac
+  _valid_local_target "$local_part" || {
+    case "$local_part" in
+      claude:*) echo "invalid Claude session ID: ${local_part#claude:}" >&2;;
+      codex:*) echo "invalid Codex thread ID: ${local_part#codex:}" >&2;;
+      *) echo "invalid tmux session name: ${local_part#tmux:}" >&2;;
+    esac
+    return 2; }
   printf '%s' "$1"
 }
-# An explicit target wins. A Codex ID identifies the orchestrator only when the caller is not a
-# Claude session: Claude marks itself with CLAUDECODE, and any CODEX_* ID it sees is inherited from
-# some unrelated Codex ancestor, so its players would otherwise report to the wrong conversation.
+# An explicit target wins. Inside Claude Code, the session id Claude exports to the commands it
+# runs identifies the orchestrator even inside tmux, where $TMUX may name some other session; it is
+# accepted only when Claude's registry entry for CLAUDE_PID confirms it (claude_own_session). A
+# Codex ID identifies the orchestrator only when the caller is not a Claude session: Claude marks
+# itself with CLAUDECODE, and any CODEX_* ID it sees is inherited from some unrelated Codex
+# ancestor, so its players would otherwise report to the wrong conversation.
 resolve_orchestrator() {
   if [[ -n "${1:-}" ]]; then normalize_target "$1"
+  elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    claude_own_session || return 2
+    normalize_target "claude:$CLAUDE_CODE_SESSION_ID"
   elif [[ -z "${CLAUDECODE:-}" && -n "${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}" ]]; then
     normalize_target "codex:${CODEX_THREAD_ID:-$CODEX_SESSION_ID}"
   elif [[ -n "${TMUX:-}" ]]; then
@@ -326,7 +339,7 @@ resolve_orchestrator() {
     # target from its own pane, not from whatever session happens to be current on the target.
     normalize_target "tmux:$(tmux_local display-message -p '#S')"
   else
-    echo 'Cannot identify orchestrator; pass --orchestrator codex:<thread-id> or tmux:<session>.' >&2
+    echo "Cannot identify orchestrator; pass --orchestrator $_TARGET_FORMS." >&2
     return 2
   fi
 }
@@ -394,30 +407,70 @@ pane_owned_by_agent() {
 # {"type":"user","message":{"role":"user","content":"<text>"}}, and hands it to that session as a
 # cross-session message: read between tool calls while it works, a new turn while it is idle,
 # never typed into its prompt box (https://code.claude.com/docs/en/cross-session-messaging).
-# claude_inbox_socket <pid>: that socket for the Claude Code process <pid>, from the registry file
-# Claude writes for each live session, <config dir>/sessions/<pid>.json ("messagingSocketPath").
-# CLAUDE_CODE_MESSAGING_SOCKET is no help here: Claude exports it only to its own children, so the
-# process's own environment holds, at most, a parent session's socket. The config directory is
-# the one that process runs with (its CLAUDE_CONFIG_DIR, where /proc shows it), then this
-# process's, then ~/.claude. Where /proc is available the file's "procStart" must match the
-# process's start time, so a recycled pid is never taken for the session that used to hold it.
-# Fails when no live socket is found; the caller then pastes instead, as it does when neither nc
-# nor socat is installed to write to one.
+# Each live session has a registry file, <config dir>/sessions/<pid>.json, naming its
+# "sessionId", its "messagingSocketPath", its start time ("procStart") and, in recent versions, the
+# pid namespace its pid belongs to ("pidDomain": linux:<machine-id>:pid:[<namespace inode>]). A
+# session that exits uncleanly leaves the file and its socket behind, so neither is proof of life.
+# claude_pid_domain: this process's pidDomain, as Claude 2.1.280 writes it; fails where it cannot be read.
+claude_pid_domain() {
+  local id ns
+  id="$(cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null)" && ns="$(readlink /proc/self/ns/pid 2>/dev/null)" &&
+    [ -n "$id" ] && [ -n "$ns" ] && printf 'linux:%s:%s' "$id" "$ns"
+}
+# claude_registry_socket <registry json> <pid>: its inbox socket, only while the session that wrote
+# it is alive — the pid exists, is in this pid namespace (when both sides say which), and, where
+# /proc is available, started at the recorded "procStart", so a recycled pid is never taken for the
+# session that used to hold it.
+claude_registry_socket() {
+  local json="$1" pid="$2" sock recorded domain own
+  sock="$(json_string_field "$json" messagingSocketPath)" || return 1
+  domain="$(json_string_field "$json" pidDomain || :)"
+  if [ -n "$domain" ] && own="$(claude_pid_domain)"; then [ "$domain" = "$own" ] || return 1; fi
+  kill -0 "$pid" 2>/dev/null || return 1
+  recorded="$(json_string_field "$json" procStart || :)"
+  if [ -n "$recorded" ] && [ -d /proc/self ]; then
+    [ "$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')" = "$recorded" ] || return 1
+  fi
+  [ -S "$sock" ] && printf '%s' "$sock"
+}
+# claude_inbox_socket <pid>: the inbox socket of the Claude Code process <pid>. CLAUDE_CODE_MESSAGING_SOCKET
+# is no help here: Claude exports it only to its own children, so the process's own environment
+# holds, at most, a parent session's socket. The config directory is the one that process runs with
+# (its CLAUDE_CONFIG_DIR, where /proc shows it), then this process's, then ~/.claude. Fails when no
+# live socket is found; the caller then pastes instead, as it does when neither nc nor socat is
+# installed to write to one.
 claude_inbox_socket() {
-  local pid="$1" own_dir="" dir json sock recorded started
+  local pid="$1" own_dir="" dir json
   [ -r "/proc/$pid/environ" ] && own_dir="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n1)"
   for dir in "$own_dir" "${CLAUDE_CONFIG_DIR:-}" "${HOME:-}/.claude"; do
     [ -n "$dir" ] && [ -f "$dir/sessions/$pid.json" ] || continue
     json="$(cat "$dir/sessions/$pid.json" 2>/dev/null)" || continue
-    sock="$(json_string_field "$json" messagingSocketPath)" || continue
-    recorded="$(json_string_field "$json" procStart || :)"
-    if [ -n "$recorded" ] && [ -r "/proc/$pid/stat" ]; then
-      started="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')"
-      [ "$started" = "$recorded" ] || continue
-    fi
-    [ -S "$sock" ] || continue
-    printf '%s' "$sock"; return 0
+    claude_registry_socket "$json" "$pid" && return 0
   done
+  return 1
+}
+# claude_session_socket <config dir> <session id>: the inbox socket of the live session with that
+# id, scanning every registry file under <config dir> (a claude:<session-id> target names no pid).
+claude_session_socket() {
+  local f pid json
+  for f in "$1"/sessions/*.json; do
+    pid="${f##*/}"; pid="${pid%.json}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    json="$(cat "$f" 2>/dev/null)" || continue
+    [ "$(json_string_field "$json" sessionId || :)" = "$2" ] || continue
+    claude_registry_socket "$json" "$pid" && return 0
+  done
+  return 1
+}
+# claude_own_session: does Claude's registry entry for CLAUDE_PID, under this process's config dir,
+# name CLAUDE_CODE_SESSION_ID as a live session with an inbox? Guards resolve_orchestrator against
+# an id inherited from some other session, or one no report could ever reach.
+claude_own_session() {
+  local dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" json=""
+  [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]] && json="$(cat "$dir/sessions/$CLAUDE_PID.json" 2>/dev/null)"
+  [ -n "$json" ] && [ "$(json_string_field "$json" sessionId || :)" = "$CLAUDE_CODE_SESSION_ID" ] &&
+    claude_registry_socket "$json" "$CLAUDE_PID" >/dev/null && return 0
+  echo "Cannot identify orchestrator: CLAUDE_CODE_SESSION_ID $CLAUDE_CODE_SESSION_ID is not the session registered, live and with an inbox socket, for CLAUDE_PID ${CLAUDE_PID:-<unset>} in $dir/sessions; pass --orchestrator $_TARGET_FORMS." >&2
   return 1
 }
 # claude_inbox_client: can this machine write to a Unix socket at all (nc -N -U, else socat)?
@@ -516,18 +569,26 @@ deliver_to_pane() {
   paste_into_pane "$sock" "$session" "$msg" || return 1
   DELIVER_ROUTE=paste
 }
-# deliver_to_local_target <socket> <codex:…|tmux:…> <text>: the one place a report (or a relayed
-# envelope) is delivered on this machine — codex queue, or deliver_to_pane gated by
-# pane_owned_by_agent so a message never lands in a shell. report.sh (a local codex:/tmux: target)
-# and relay.sh (an envelope's embedded local target) both call this; a message that arrived from
-# another machine gets exactly the same scrutiny as one typed locally. On success DELIVER_ROUTE
-# says which way it went (queue, inbox or paste); on failure the reason is left in DELIVER_REASON
-# rather than printed here, so each caller keeps its own error wording (report.sh's "delivery
-# failed" block, relay.sh's log line).
+# deliver_to_local_target <socket> <claude:…|codex:…|tmux:…> <text> [<Claude config dir>]: the one
+# place a report (or a relayed envelope) is delivered on this machine — a Claude session's inbox,
+# codex queue, or deliver_to_pane gated by pane_owned_by_agent so a message never lands in a shell.
+# report.sh (a local target) and relay.sh (an envelope's embedded local target) both call this; a
+# message that arrived from another machine gets exactly the same scrutiny as one typed locally.
+# A claude: target is found in the registry under <Claude config dir>, else this process's
+# CLAUDE_CONFIG_DIR, else ~/.claude; it names no pane, so it is never pasted anywhere, whatever
+# fails. On success DELIVER_ROUTE says which way it went (inbox, queue or paste); on failure the
+# reason is left in DELIVER_REASON rather than printed here, so each caller keeps its own error
+# wording (report.sh's "delivery failed" block, relay.sh's log line).
 deliver_to_local_target() {
-  local sock="$1" target="$2" msg="$3"
+  local sock="$1" target="$2" msg="$3" dir="${4:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}" inbox
   DELIVER_ROUTE=""
   case "$target" in
+    claude:*)
+      claude_inbox_client || { DELIVER_REASON="neither nc nor socat is installed to write to a Claude inbox socket"; return 1; }
+      inbox="$(claude_session_socket "$dir" "${target#claude:}")" ||
+        { DELIVER_REASON="no live Claude session ${target#claude:} is registered in $dir/sessions"; return 1; }
+      claude_inbox_post "$inbox" "$msg" || { DELIVER_REASON="claude inbox socket refused the connection"; return 1; }
+      DELIVER_ROUTE=inbox; return 0;;
     codex:*)
       codex queue --thread "${target#codex:}" --message "$msg" </dev/null && { DELIVER_ROUTE=queue; return 0; }
       DELIVER_REASON='Codex queue refused the message; inspect before retrying to avoid duplicate reports'

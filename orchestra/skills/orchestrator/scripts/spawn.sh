@@ -11,8 +11,9 @@
 #                 [--permission-mode MODE]    Claude only; otherwise CLI settings apply
 #                 [--cmd "COMMAND"]           custom harness; receives $PROMPT
 #                 [--from REF]                base for a new branch; default origin/HEAD
-#                 [--orchestrator TARGET]     codex:<thread-id> or tmux:<session>
-#                                             auto: current Codex ID, then current tmux
+#                 [--orchestrator TARGET]     claude:<session-id>, codex:<thread-id> or
+#                                             tmux:<session>; auto: current Claude session,
+#                                             then current Codex ID, then current tmux
 #                 [--machine NAME]            beam peer label or peerId to spawn the player on;
 #                                             default $ORCHESTRA_MACHINE, else this machine. A
 #                                             remote --repo must be absolute or start with ~/.
@@ -44,7 +45,8 @@
 #
 # Session state lives on the tmux session as user options (see _routing.sh for the names):
 # @orchestra-spawner/-repo/-session-type/-branch (identity, written once at creation),
-# @orchestra-orchestrator (reporting target), @orchestra-agent (harness) and
+# @orchestra-orchestrator (reporting target, with @orchestra-orchestrator-config for a Claude
+# session), @orchestra-agent (harness) and
 # @orchestra-launching (placeholder marker), all set before anything else sees the session. The task body is
 # loaded into the paste buffer orchestra-prompt-<session> from stdin and read by _launch.sh
 # inside the pane, so prompt size is not bounded by tmux's ~16 KiB command limit and nothing
@@ -62,7 +64,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,57p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,59p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 [ -n "$BRANCH" ] || { echo "spawn.sh: --branch is required" >&2; exit 2; }
 git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
@@ -287,7 +289,7 @@ if [ "$EXISTING" = none ]; then
 fi
 buf="$(prompt_buffer_name "$name")"
 tag "$TAG_LAUNCHING" 1 || exit 1
-tag "$TAG_ORCHESTRATOR" "$ORCH" || exit 1
+set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
 case "$HARNESS" in auto) ;; *) tag "$TAG_AGENT" "$HARNESS";; esac
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on

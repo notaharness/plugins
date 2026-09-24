@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Runs on the orchestrator's machine: subscribes to reports beamed in from remote players and
 # delivers each one exactly as report.sh would deliver a local one — the same shared
-# deliver_to_local_target sequence (Claude's inbox socket, load-buffer/paste-buffer/send-keys, or
-# codex queue), gated by the same pane_owned_by_agent check, so a message that arrived from
-# another machine gets no more trust than one typed locally.
+# deliver_to_local_target sequence (a Claude session's inbox socket, load-buffer/paste-buffer/
+# send-keys, or codex queue), gated by the same pane_owned_by_agent check for a pane, so a message
+# that arrived from another machine gets no more trust than one typed locally. A claude: target is
+# looked up under this relay's own $CLAUDE_CONFIG_DIR, else ~/.claude.
 #
 # Usage: relay.sh [--topic T] [--allow <local target>]...    default topic: orchestra
-#   --allow codex:<thread-id>|tmux:<session>   an additional local target this relay may deliver
-#                                               to, repeatable. With no --allow, the only allowed
-#                                               target is the session relay.sh runs from ($TMUX);
-#                                               that requires running it inside a pane.
+#   --allow claude:<session-id>|codex:<thread-id>|tmux:<session>
+#                    an additional local target this relay may deliver to, repeatable. With no
+#                    --allow, the only allowed target is the session relay.sh runs from: the Claude
+#                    Code session ($CLAUDE_CODE_SESSION_ID) when run by one, else the tmux session
+#                    ($TMUX), which requires running it inside a pane.
 #
 # Two rules:
 #   - An envelope is acked only once local delivery has actually succeeded, never on receipt.
@@ -45,15 +47,18 @@ while [ $# -gt 0 ]; do case "$1" in
   --allow)
     norm="$(normalize_target "$2")" || exit 2
     case "$norm" in
-      codex:*|tmux:*) ;;
-      *) echo "relay.sh: --allow must be a local target (codex:<thread-id> or tmux:<session>): $2" >&2; exit 2;;
+      claude:*|codex:*|tmux:*) ;;
+      *) echo "relay.sh: --allow must be a local target ($_TARGET_FORMS): $2" >&2; exit 2;;
     esac
     ALLOW+=("$norm"); shift;;
-  -h|--help) sed -n '2,12p' "$0"; exit 0;;
+  -h|--help) sed -n '2,14p' "$0"; exit 0;;
   *) echo "relay.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
+# Inside Claude Code, $TMUX can name a session that is not this one's (the pane Claude was started
+# from, someone else's), so the session id comes first.
 if [ "${#ALLOW[@]}" -eq 0 ]; then
-  [ -n "${TMUX:-}" ] || { echo "relay.sh: not running inside a tmux pane, so there is no default target; pass --allow <target> at least once" >&2; exit 2; }
-  ALLOW=("tmux:$(tmux_local display-message -p '#S')")
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then ALLOW=("$(normalize_target "claude:$CLAUDE_CODE_SESSION_ID")") || exit 2
+  elif [ -n "${TMUX:-}" ]; then ALLOW=("tmux:$(tmux_local display-message -p '#S')")
+  else echo "relay.sh: not running inside a Claude Code session or a tmux pane, so there is no default target; pass --allow <target> at least once" >&2; exit 2; fi
 fi
 is_allowed() { local want="$1" have; for have in "${ALLOW[@]}"; do [ "$have" = "$want" ] && return 0; done; return 1; }
 beam_cmd || { echo "relay.sh: $(beam_unresolved_message "this machine")" >&2; exit 1; }

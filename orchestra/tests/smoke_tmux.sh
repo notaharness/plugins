@@ -39,6 +39,7 @@ FAKE
 chmod +x "$T/bin/$cli"; done
 export PATH="$T/bin:$PATH"
 export CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CODEX_THREAD_ID=11111111-2222-3333-4444-555555555555
+unset CLAUDE_CODE_SESSION_ID CLAUDE_PID     # the session running this script is not the orchestrator under test
 export CLAUDE_CONFIG_DIR="$T/claude-config" ANTHROPIC_API_KEY=fake-key CODEX_HOME="$T/codex-home"
 for v in $(env | grep -oE '^(ORCHESTRA_|ORCHESTRATOR_|PLAYER_)[A-Z_]+'); do unset "$v"; done
 
@@ -137,6 +138,39 @@ rm -f "$T/inbox.sock"
 (cd "$W1" && player PROGRESS "socket gone") >"$T/inbox-gone.out" 2>&1
 check "no live inbox socket: falls back to a paste" "grep -qx 'sent to claude-orch (paste)' '$T/inbox-gone.out'"
 tm kill-session -t '=claude-orch'; tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
+
+echo "# a Claude orchestrator outside tmux is addressed by session id: no pane, never a paste"
+# A Claude Code process with no pane, registered under its OWN config dir (not the player's) the
+# way Claude Code (or Claude Desktop) registers a live session, and a socat listener as its inbox.
+SID=7c0ffee0-1234-4abc-8def-0123456789ab; OCFG="$T/orchestrator-claude-config"; SC=repo-feature-c
+bash -c 'exec -a claude sleep 300' & opid=$!
+for _ in $(seq 50); do [ "$(tr '\0' '\n' < "/proc/$opid/cmdline" | head -n1)" = claude ] && break; sleep 0.1; done
+ostart="$(sed 's/.*) //' "/proc/$opid/stat" | awk '{print $20}')"
+register() { mkdir -p "$OCFG/sessions"; printf '{"pid":%s,"sessionId":"%s","procStart":"%s","pidDomain":"linux:%s:%s","messagingSocketPath":"%s","kind":"interactive","entrypoint":"claude-desktop"}\n' \
+  "$opid" "$SID" "$1" "$(cat /etc/machine-id)" "$(readlink /proc/self/ns/pid)" "$T/sid.sock" > "$OCFG/sessions/$opid.json"; }
+listen() { rm -f "$T/sid.sock" "$T/sid-received"; socat -u UNIX-LISTEN:"$T/sid.sock" OPEN:"$T/sid-received",creat 2>/dev/null & sid_listener=$!
+  for _ in $(seq 50); do [ -S "$T/sid.sock" ] && break; sleep 0.1; done; }
+unlisten() { for _ in $(seq 30); do kill -0 "$sid_listener" 2>/dev/null || break; sleep 0.1; done; kill "$sid_listener" 2>/dev/null; wait "$sid_listener" 2>/dev/null; }
+register "$ostart"; listen
+(export CLAUDE_CODE_SESSION_ID="$SID" CLAUDE_PID="$opid" CLAUDE_CONFIG_DIR="$OCFG"   # $TMUX still names parent's pane
+ bash "$O/spawn.sh" --repo "$T/repo" --branch feature/c --from HEAD --prompt c --no-node-modules --agent claude) >"$T/spawn-c.out" 2>&1
+check "spawned from Claude inside tmux: the target is its session id, beside its config dir" \
+  "[ \"\$(tag $SC @orchestra-orchestrator)\" = 'claude:$SID' ] && [ \"\$(tag $SC @orchestra-orchestrator-config)\" = '$OCFG' ]"
+sc() { (cd "$T/repo/.claude/worktrees/feature-c" && ORCHESTRA_SESSION="$SC" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" "$@"); }
+sc DONE "by session id"$'\n'"second \"line\"" >"$T/sid.out" 2>&1; src=$?; unlisten
+check "report reached the session registered under the orchestrator's config dir" \
+  "[ $src = 0 ] && grep -qx 'sent to $SID (inbox)' '$T/sid.out' && tag $SC @orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
+check "its inbox got exactly one NDJSON user frame with the report" \
+  "python3 -c 'import json,sys; m=json.loads(open(sys.argv[1]).read()); assert m == {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"[player '$SC'] DONE: by session id\\nsecond \\\"line\\\"\"}}, m' '$T/sid-received'"
+register 1; listen                                                   # a recycled pid: the entry is stale
+sc DONE "stale entry" >"$T/sid-stale.out" 2>"$T/sid-stale.err"; src=$?; unlisten
+check "a stale registry entry is refused: delivery failed, nothing received" \
+  "[ $src = 1 ] && grep -qx 'Target: claude:$SID' '$T/sid-stale.err' && grep -q '^Reason: no live Claude session $SID is registered in $OCFG/sessions' '$T/sid-stale.err' && [ ! -s '$T/sid-received' ]"
+register "$ostart"; rm -f "$T/sid.sock"                              # live entry, inbox gone
+sc DONE "no inbox" >"$T/sid-gone.out" 2>"$T/sid-gone.err"; src=$?
+check "no inbox: delivery failed with no paste fallback anywhere" \
+  "[ $src = 1 ] && grep -qx 'report.sh: delivery failed' '$T/sid-gone.err' && ! grep -q 'no inbox' '$T/received-claude' && [ -z \"\$(tm list-buffers -F '#{buffer_name}')\" ]"
+kill "$opid"; wait "$opid" 2>/dev/null; tm kill-session -t "=$SC"
 
 echo "# targeting: by branch in a repo, by exact tagged name anywhere; never by prefix or sanitized form"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x-2 --from HEAD --prompt "second" --no-node-modules >/dev/null 2>&1

@@ -26,16 +26,18 @@ Every `report.sh` call below uses the command resolved above.
 ## Reporting target
 
 Your orchestrator is recorded on your own tmux session as the session user option (tag)
-`@orchestra-orchestrator`: `codex:<thread-id>` or `tmux:<session>`, or, when your orchestrator is
-on a different machine than you, `beam:<orchestrator peerId>/` followed by one of those two (a
-peerId is beam's 32-character lowercase hex machine identity). The
-scripts that spawn or adopt you set it. `report.sh` finds your own session through
+`@orchestra-orchestrator`: `claude:<session-id>` (a Claude Code or Claude Desktop session, found
+by its id whether or not it runs in tmux), `codex:<thread-id>` or `tmux:<session>`, or, when your
+orchestrator is on a different machine than you, `beam:<orchestrator peerId>/` followed by one of
+those three (a peerId is beam's 32-character lowercase hex machine identity). The
+scripts that spawn or adopt you set it, with the orchestrator's Claude config directory beside a
+`claude:` target in `@orchestra-orchestrator-config`. `report.sh` finds your own session through
 `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` (the tmux server socket that holds it), which
 `spawn.sh` injects; in a pane `spawn.sh` did not start (a session another tool created that an
 orchestrator adopted) it derives them from tmux's own `TMUX` variable instead. You cannot change
 the target and do not need to know it: `report.sh --orchestrator` prints the current value when
-asked. Never substitute your own `CODEX_THREAD_ID` for the orchestrator. Nothing is stored in
-files.
+asked. Never substitute your own `CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID` for the
+orchestrator. Nothing is stored in files.
 
 What follows the invocation decides what to do:
 - Task text: carry out the task.
@@ -66,11 +68,13 @@ Answer routine decisions yourself. After asking questions, continue independent 
 if nothing remains independent, finish the turn and await the reply. Finish each task
 with one DONE or BLOCKED report. Handoffs may legitimately resend the terminal report.
 
-`report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a tmux orchestrator, or a
-beam delivery the far machine acknowledged) only when the transport accepted the message. A tmux
-orchestrator running Claude Code receives the report on its inbox socket, as a message it reads
-between tool calls, and `report.sh` prints `sent to <session> (inbox)`; a Codex TUI gets it through
-`codex queue` (`(queue)`); any other orchestrator gets it pasted into its pane (`(paste)`). It then
+`report.sh` prints `queued for …` (a Codex orchestrator) or `sent to …` (a Claude session or tmux
+orchestrator, or a beam delivery the far machine acknowledged) only when the transport accepted the
+message. A `claude:` orchestrator receives the report on its inbox socket, as a message it reads
+between tool calls, and `report.sh` prints `sent to <session-id> (inbox)`; it is never pasted
+anywhere. A tmux orchestrator running Claude Code gets it the same way (`sent to <session>
+(inbox)`); a Codex TUI gets it through `codex queue` (`(queue)`); any other orchestrator gets it
+pasted into its pane (`(paste)`). It then
 records `<KIND> <timestamp> <delivered|stored|inbox|queue|paste>` in your session's `@orchestra-last-report`
 tag — a third field beyond the kind and timestamp.
 
@@ -85,8 +89,8 @@ stored for <peerId>; delivery pending (<peerId> is offline). beam will deliver i
 This exits 0 and sets `@orchestra-last-report`'s third field to `stored`. Treat it exactly like
 `sent to …`: the report is done, nothing was lost, and sending it again would deliver it twice.
 
-On failure — a local target gone or unreachable, a Claude inbox socket that refused the
-connection, or beam's own `rejected` (unknown peer, revoked peer, or the report too large) — it
+On failure — a local target gone or unreachable, a Claude session that is no longer running, a
+Claude inbox socket that refused the connection, or beam's own `rejected` (unknown peer, revoked peer, or the report too large) — it
 exits nonzero and prints `report.sh: delivery failed`, the
 destination (or `<unknown>` if it cannot be read), the reason, and the complete original report to
 stderr. Surface the delivery failure in your response and quote the full report so the result
