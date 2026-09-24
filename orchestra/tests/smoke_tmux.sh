@@ -156,6 +156,8 @@ register "$ostart"; listen
  bash "$O/spawn.sh" --repo "$T/repo" --branch feature/c --from HEAD --prompt c --no-node-modules --agent claude) >"$T/spawn-c.out" 2>&1
 check "spawned from Claude inside tmux: the target is its session id, beside its config dir" \
   "[ \"\$(tag $SC @orchestra-orchestrator)\" = 'claude:$SID' ] && [ \"\$(tag $SC @orchestra-orchestrator-config)\" = '$OCFG' ]"
+sleep 1                                                              # the server started under $T/claude-config
+check "the player runs on the orchestrator's Claude config dir, not the tmux server's" "grep -q 'CLAUDE_CONFIG_DIR=$OCFG ' '$T/last-claude'"
 sc() { (cd "$T/repo/.claude/worktrees/feature-c" && ORCHESTRA_SESSION="$SC" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" "$@"); }
 sc DONE "by session id"$'\n'"second \"line\"" >"$T/sid.out" 2>&1; src=$?; unlisten
 check "report reached the session registered under the orchestrator's config dir" \

@@ -99,8 +99,13 @@ if c == 'has-session':
     t = a[a.index('-t')+1]
     sys.exit(0 if t.startswith('=') and t[1:] in state else 1)
 if c == 'show-environment': sys.exit(0)
+# A pane's environment is the SERVER's (captured when its first session started) plus respawn-pane -e,
+# never the caller's. The mock passes the caller's through so tests can steer the fakes (TEST_*)
+# between calls, except for CLAUDE_CONFIG_DIR, the account selector, which follows tmux.
+server_env_file = b/('tmux-env%s.json' % tail)
 if c == 'new-session':
     n = a[a.index('-s')+1]
+    if not state: server_env_file.write_text(json.dumps({'CLAUDE_CONFIG_DIR': os.environ.get('CLAUDE_CONFIG_DIR')}))
     # TEST_NEW_SESSION_RACE=<name>[,<name>…]: another creator takes each such name just before this call lands.
     if n in os.environ.get('TEST_NEW_SESSION_RACE', '').split(',') and n not in state: create(n, '/elsewhere'); save()
     if n in state: sys.stderr.write('duplicate session: %s\n' % n); sys.exit(1)
@@ -130,7 +135,9 @@ if c == 'set-option':
 if c == 'respawn-pane':
     n = target(a.index('-t')+1)
     if os.environ.get('TEST_RESPAWN_FAIL'): sys.stderr.write('mock respawn failure\n'); sys.exit(1)
-    env = os.environ.copy(); cwd = None
+    env = os.environ.copy(); cwd = None; env.pop('CLAUDE_CONFIG_DIR', None)
+    cfg = json.loads(server_env_file.read_text())['CLAUDE_CONFIG_DIR'] if server_env_file.exists() else None
+    if cfg is not None: env['CLAUDE_CONFIG_DIR'] = cfg
     for i, arg in enumerate(a[:a.index('--')]):
         if arg == '-e': k, v = a[i+1].split('=', 1); env[k] = v
         if arg == '-c': cwd = a[i+1]
@@ -516,6 +523,16 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); e = self.calls()[-1]['env']
         self.assertIsNone(e['CLAUDECODE']); self.assertIsNone(e['CLAUDE_CODE_CHILD_SESSION']); self.assertIsNone(e['CODEX_THREAD_ID'])
         self.assertEqual(e['CLAUDE_CONFIG_DIR'], str(self.base/'claude-config')); self.assertEqual(e['ANTHROPIC_API_KEY'], 'secret'); self.assertEqual(e['CODEX_HOME'], str(self.base/'codex-home'))
+    def test_orchestrator_claude_config_dir_reaches_a_local_player(self):
+        # The server is already running, started from a shell on the default account: respawn-pane
+        # hands the pane that server's environment, so the orchestrator's own account has to be passed.
+        mine = str(self.base/'claude-config')
+        self.run_cmd(['tmux', 'new-session', '-d', '-s', 'user-shell'], env=dict(self.env, CLAUDE_CONFIG_DIR=str(self.base/'other-account')))
+        self.spawn('--agent', 'claude'); self.assertEqual(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'], mine)
+        self.kill_pane(); self.spawn('--resume', prompt=False); self.assertEqual(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'], mine)
+        # An orchestrator on the default account gets a player on the default account too.
+        del self.env['CLAUDE_CONFIG_DIR']; self.kill_pane(); self.spawn('--resume', prompt=False)
+        self.assertIsNone(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'])
     def test_large_prompt_and_failed_launch_retry(self):
         big = 'x'*40000; pf = self.base/'task.txt'; pf.write_text('Task: '+big+'\nEND')
         self.orch('spawn.sh', '--repo', str(self.repo), '--branch', 'feature/test', '--from', 'HEAD', '--prompt-file', str(pf), '--no-node-modules', '--agent', 'claude')

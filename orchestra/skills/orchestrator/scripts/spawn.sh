@@ -52,9 +52,11 @@
 # inside the pane, so prompt size is not bounded by tmux's ~16 KiB command limit and nothing
 # is written to disk. The launcher prefixes it with the player invocation: $player for Codex,
 # and for Claude the plugin-namespaced skill (/<plugin>:player), with ORCHESTRA_CLAUDE_SKILL=/player
-# for a standalone Claude skill install. Only the known parent-session markers are removed from
-# the player's environment (see _lib.sh); CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY and CODEX_HOME
-# are inherited. The agent runs with TMUX unset and TMUX_TMPDIR on a scratch directory, so
+# for a standalone Claude skill install. The pane's environment is the tmux server's, not this
+# process's: a local player gets this process's PATH, HOME and CLAUDE_CONFIG_DIR (so it runs on the
+# orchestrator's Claude account) passed explicitly; anything else, ANTHROPIC_API_KEY and CODEX_HOME
+# included, is whatever the server started with. Only the known parent-session markers are removed
+# from it (see _lib.sh). The agent runs with TMUX unset and TMUX_TMPDIR on a scratch directory, so
 # tests it runs cannot reach the user's tmux; ORCHESTRA_SOCKET names the real server for
 # the launcher and report.sh.
 . "$(dirname "$(realpath "$0")")/_lib.sh"
@@ -64,7 +66,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,59p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,61p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 [ -n "$BRANCH" ] || { echo "spawn.sh: --branch is required" >&2; exit 2; }
 git check-ref-format --branch "$BRANCH" >/dev/null || exit 2
@@ -201,6 +203,9 @@ fi
 # Environment: the launcher runs under env(1) with the parent-session markers removed and
 # tmux redirected to the scratch server. Nothing user-controlled enters this command string.
 strip=(); for v in "${PARENT_SESSION_MARKERS[@]}"; do strip+=(-u "$v"); done
+# A local player runs on this process's Claude account: CLAUDE_CONFIG_DIR is passed below when set,
+# and removed here when not, since the tmux server may have started with some other value.
+is_local_machine && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && strip+=(-u CLAUDE_CONFIG_DIR)
 guard="$(printf '%q ' env -u TMUX -u TMUX_PANE "${strip[@]}" "TMUX_TMPDIR=$AGENT_TMUX_TMPDIR")"
 shell_cmd="${guard}$(printf '%q' bash) $(printf '%q' "$LAUNCHER")"
 
@@ -296,12 +301,15 @@ t set-option -t "$tt" remain-on-exit on
 # The task body, from stdin. tmux never creates an empty buffer, so a newline is appended
 # (the launcher's command substitution drops it again); an empty body is then still a buffer.
 printf '%s\n' "$PROMPT" | t load-buffer -b "$buf" - || { echo "spawn.sh: tmux could not load the task prompt into buffer $buf" >&2; exit 1; }
-# PATH and HOME are this (the orchestrator's) process's own values, only right for a local pane;
-# on a remote machine they would overwrite the correct, already-remote-native values the target's
-# own tmux server captured when beam_exec started it above, with this machine's — the harness
-# would then not be found on what is now the wrong PATH. Left unset there, the pane keeps what
-# its own server gave it, same as every other user option this call does not name.
+# respawn-pane gives the pane the tmux SERVER's environment, which is the orchestrator's only if
+# the orchestrator happened to start that server. PATH, HOME and CLAUDE_CONFIG_DIR (the Claude
+# account; unset means the default one, so nothing is passed) are this process's own values, only
+# right for a local pane; on a remote machine they would overwrite the correct, already-remote-native
+# values the target's own tmux server captured when beam_exec started it above, with this machine's —
+# the harness would then not be found on what is now the wrong PATH. Left unset there, the pane
+# keeps what its own server gave it, same as every other user option this call does not name.
 path_env=(); is_local_machine && path_env=(-e "PATH=$PATH" -e "HOME=$HOME")
+is_local_machine && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && path_env+=(-e "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR")
 if ! t respawn-pane -k -t "$tt" -c "$root/$dir" \
   "${path_env[@]}" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
