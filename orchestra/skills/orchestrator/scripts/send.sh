@@ -15,8 +15,8 @@
 # --machine: the beam peer label or peerId the session is on; default $ORCHESTRA_MACHINE, else
 # this machine. A remote --repo must be absolute or start with ~/.
 # The session is a branch (resolved in this repo, --repo, or uniquely across repos) or an exact
-# tmux session name of a tagged player; never a prefix, never a session without the tags. Long
-# text is fine: it is pasted from a buffer, not passed on the tmux command line. Prints
+# tmux session name of a tagged player (a dir player's only name); never a prefix, never an
+# untagged session. Long text is fine: it is pasted from a buffer, not on the command line. Prints
 # "sent to <session> (inbox|queue|paste)".
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 [ $# -ge 2 ] || { sed -n '2,20p' "$0" >&2; exit 2; }

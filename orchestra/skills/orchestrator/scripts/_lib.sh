@@ -121,10 +121,13 @@ cap_name() {
   else printf '%s-%s' "${s:0:$((NAME_MAX - HASH_TAIL - 1))}" "$(printf %s "$1" | sha256sum | cut -c1-"$HASH_TAIL")"; fi
 }
 # session_label <repo> <type> [branch]: the preferred name. worktree: "<basename(repo)>-<branch>";
-# shell/agent (Kirby's terminal tabs): "<basename(repo)>-shell" / "-agent".
+# shell/agent (Kirby's terminal tabs): "<basename(repo)>-shell" / "-agent"; dir (a player with no
+# worktree, which Kirby never creates; <repo> is its directory): "<basename(dir)>-dir", so a reviewer
+# in .claude/worktrees/<branch> is never named like the branch it would otherwise shadow.
 session_label() {
   case "$2" in
     worktree) cap_name "$(basename "$1")-$3";;
+    dir) cap_name "$(basename "$1")-dir";;
     shell|agent) cap_name "$(basename "$1")-$2";;
     *) echo "session_label: unknown session type $2" >&2; return 2;;
   esac
@@ -149,27 +152,29 @@ TAB=$'\t'
 list_sessions_tagged() {
   tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}" 2>/dev/null || true
 }
-# Player sessions = spawner set, repo set AND session-type worktree, whoever created them (Kirby's
-# worktree sessions included). Same tab-separated fields as above. This is the one definition of
-# "ours" for listing, resolving, killing and adopting: a session whose name we would have chosen
-# but that lacks any of these tags is foreign, never attached, killed, adopted or listed.
+# Player sessions = spawner set, repo set AND session-type worktree or dir, whoever created them
+# (Kirby's worktree sessions included). Same tab-separated fields as above. This is the one
+# definition of "ours" for listing, resolving, killing and adopting: a session whose name we would
+# have chosen but that lacks any of these tags is foreign, never attached, killed, adopted or listed.
 player_sessions() {
-  list_sessions_tagged | awk -F "$TAB" -v type="$SESSION_TYPE_WORKTREE" '$4 != "" && $5 != "" && $6 == type'
+  list_sessions_tagged | awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" '$4 != "" && $5 != "" && ($6 == wt || $6 == dir)'
 }
 all_player_sessions() { player_sessions | cut -f1; }
 is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
-# find_player_session <repo> <branch>: the session whose tags equal (repo, branch); with several
-# (should not happen) the one created first, the others named on stderr and left alone.
+# find_player_session <repo> <branch>: the session whose tags equal (repo, branch); a dir player,
+# the only kind without a branch, is (its directory, ""). With several (should not happen) the one
+# created first, the others named on stderr and left alone.
 find_player_session() {
   local matches
   matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v branch="$2" '$5 == repo && $7 == branch' | sort -t "$TAB" -k2,2n)"
   [ -n "$matches" ] || return 1
   if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
-    echo "warning: several sessions carry repo $1 branch $2; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
+    echo "warning: several sessions carry repo $1${2:+ branch $2}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
   fi
   printf '%s\n' "$matches" | head -n1 | cut -f1
 }
-# resolve_session <arg>: an exact tmux name whose tags say it is a player, else <arg> is a branch:
+# resolve_session <arg>: an exact tmux name whose tags say it is a player (the only way to name a
+# dir player, which has no branch), else <arg> is a worktree player's branch:
 # in a repo (--repo or cwd) the player of (that repo, branch); outside one the unique player of
 # that branch across all repos, ambiguity listing the candidates. Never a foreign session.
 resolve_session() {
@@ -206,9 +211,9 @@ AGENT_TMUX_TMPDIR=/tmp/orchestra-agent-tmux
 # lookup over beam instead of asking their own machine (see _routing.sh's ORCHESTRA_FORCE_LOCAL,
 # which is the other half of this fix — that one covers a value inherited any other way, this one
 # stops it being captured into the tmux server's global environment in the first place). Only
-# these known markers are removed: configuration and credentials such as CLAUDE_CONFIG_DIR
-# (selected per directory by the user's claude wrapper), ANTHROPIC_API_KEY and CODEX_HOME are
-# deliberately inherited.
+# these known markers are removed: credentials such as ANTHROPIC_API_KEY are deliberately left as
+# the tmux server has them, and spawn.sh passes a local orchestrator's CLAUDE_CONFIG_DIR (selected
+# per directory by the user's claude wrapper) and CODEX_HOME explicitly.
 PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ATTENDED
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)

@@ -11,8 +11,8 @@
 # Inspect screen.sh first and adopt only players idle at their input prompt. The pane must be
 # alive with an agent (not a shell) at the terminal; otherwise nothing is changed or typed.
 # <session> is a branch (resolved in this repo, --repo, or uniquely across repos) or an exact
-# tmux session name; only a session tagged as a player (@orchestra-spawner set,
-# @orchestra-session-type worktree) is adopted, whoever created it. The target is written to the
+# tmux session name, a dir player's only name; only a session tagged as a player (spawner set,
+# @orchestra-session-type worktree or dir) is adopted, whoever created it. The target is written to the
 # session's @orchestra-orchestrator tag (and a Claude session's config dir to
 # @orchestra-orchestrator-config), which report.sh reads; the player's own ORCHESTRA_SOCKET
 # already names this server. Sessions without an @orchestra-agent tag default to Claude.
@@ -45,7 +45,7 @@ case "$ORCH" in
   *) is_local_machine || { own_peer="$(beam_own_peer_id)" || exit 1; ORCH="beam:$own_peer/$ORCH"; };;
 esac
 target="$(resolve_session "$session")" || exit 1
-is_player_session "$target" || { echo "adopt.sh: $target is not a player session (its tags do not say $TAG_SPAWNER + $TAG_SESSION_TYPE $SESSION_TYPE_WORKTREE); nothing changed" >&2; exit 1; }
+is_player_session "$target" || { echo "adopt.sh: $target is not a player session (its tags do not say $TAG_SPAWNER + $TAG_SESSION_TYPE $SESSION_TYPE_WORKTREE or $SESSION_TYPE_DIR); nothing changed" >&2; exit 1; }
 session_exists "$target" || exit 1
 tt="$(tmux_target "$target")"
 [ "$(tmux_on "" display-message -p -t "$tt" '#{pane_dead}')" = 0 ] || { echo "adopt.sh: $target has a dead pane; use spawn.sh --resume instead" >&2; exit 1; }

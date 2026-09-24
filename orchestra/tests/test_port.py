@@ -30,7 +30,8 @@ PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-orchestrator',
-        '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config']
+        '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config',
+        '@orchestra-claude-session']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -99,8 +100,13 @@ if c == 'has-session':
     t = a[a.index('-t')+1]
     sys.exit(0 if t.startswith('=') and t[1:] in state else 1)
 if c == 'show-environment': sys.exit(0)
+# A pane's environment is the SERVER's (captured when its first session started) plus respawn-pane -e,
+# never the caller's. The mock passes the caller's through so tests can steer the fakes (TEST_*)
+# between calls, except for the account selectors CLAUDE_CONFIG_DIR and CODEX_HOME, which follow tmux.
+server_env_file = b/('tmux-env%s.json' % tail)
 if c == 'new-session':
     n = a[a.index('-s')+1]
+    if not state: server_env_file.write_text(json.dumps({k: os.environ.get(k) for k in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME')}))
     # TEST_NEW_SESSION_RACE=<name>[,<name>…]: another creator takes each such name just before this call lands.
     if n in os.environ.get('TEST_NEW_SESSION_RACE', '').split(',') and n not in state: create(n, '/elsewhere'); save()
     if n in state: sys.stderr.write('duplicate session: %s\n' % n); sys.exit(1)
@@ -124,6 +130,7 @@ if c == 'show-options':
     print(v); sys.exit(0)
 if c == 'set-option':
     n = target(a.index('-t')+1)
+    if '-u' not in a and a[-2] == os.environ.get('TEST_SET_OPTION_FAIL'): sys.stderr.write('mock tmux: set-option refused\n'); sys.exit(1)
     if '-u' in a: state[n]['options'].pop(a[-1], None)
     else: state[n]['options'][a[-2]] = a[-1]
     save(); sys.exit(0)
@@ -131,6 +138,10 @@ if c == 'respawn-pane':
     n = target(a.index('-t')+1)
     if os.environ.get('TEST_RESPAWN_FAIL'): sys.stderr.write('mock respawn failure\n'); sys.exit(1)
     env = os.environ.copy(); cwd = None
+    server_env = json.loads(server_env_file.read_text()) if server_env_file.exists() else {}
+    for k in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME'):
+        env.pop(k, None)
+        if server_env.get(k) is not None: env[k] = server_env[k]
     for i, arg in enumerate(a[:a.index('--')]):
         if arg == '-e': k, v = a[i+1].split('=', 1); env[k] = v
         if arg == '-c': cwd = a[i+1]
@@ -414,8 +425,9 @@ class PortTests(unittest.TestCase):
     def last_report(self, sock=None):
         v = self.tag('@orchestra-last-report', sock=sock); self.assertIsNotNone(v, '@orchestra-last-report is unset'); return v
     def set_state(self, s, sock=None): self.state_file(sock).write_text(json.dumps(s))
-    def drop_tag(self, name):
-        s = self.state(); s[self.session]['options'].pop(name, None); self.set_state(s)
+    def drop_tag(self, name): self.drop_tag_of(self.session, name)
+    def drop_tag_of(self, session, name):
+        s = self.state(); s[session]['options'].pop(name, None); self.set_state(s)
     def rename(self, old, new, sock=None):
         s = self.state(sock); s[new] = s.pop(old); self.set_state(s, sock)
     # A session some other program created: no tags unless given (mock tmux, so any name works).
@@ -516,6 +528,26 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); e = self.calls()[-1]['env']
         self.assertIsNone(e['CLAUDECODE']); self.assertIsNone(e['CLAUDE_CODE_CHILD_SESSION']); self.assertIsNone(e['CODEX_THREAD_ID'])
         self.assertEqual(e['CLAUDE_CONFIG_DIR'], str(self.base/'claude-config')); self.assertEqual(e['ANTHROPIC_API_KEY'], 'secret'); self.assertEqual(e['CODEX_HOME'], str(self.base/'codex-home'))
+    def test_orchestrator_claude_config_dir_reaches_a_local_player(self):
+        # The server is already running, started from a shell on the default account: respawn-pane
+        # hands the pane that server's environment, so the orchestrator's own account has to be passed.
+        mine = str(self.base/'claude-config')
+        self.run_cmd(['tmux', 'new-session', '-d', '-s', 'user-shell'], env=dict(self.env, CLAUDE_CONFIG_DIR=str(self.base/'other-account')))
+        self.spawn('--agent', 'claude'); self.assertEqual(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'], mine)
+        self.kill_pane(); self.spawn('--resume', prompt=False); self.assertEqual(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'], mine)
+        # An orchestrator on the default account gets a player on the default account too.
+        del self.env['CLAUDE_CONFIG_DIR']; self.kill_pane(); self.spawn('--resume', prompt=False)
+        self.assertIsNone(self.calls()[-1]['env']['CLAUDE_CONFIG_DIR'])
+    def test_orchestrator_codex_home_reaches_a_local_player(self):
+        # As for Claude above: the server started under another Codex home, and the player must
+        # run, and look for conversations to resume, under the orchestrator's.
+        mine = str(self.base/'codex-home')
+        self.run_cmd(['tmux', 'new-session', '-d', '-s', 'user-shell'], env=dict(self.env, CODEX_HOME=str(self.base/'other-codex')))
+        self.spawn('--agent', 'codex'); self.assertEqual(self.calls()[-1]['env']['CODEX_HOME'], mine)
+        self.kill_pane(); self.rollout(str(self.wt.resolve())); self.spawn('--resume', prompt=False)
+        self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID]); self.assertEqual(self.calls()[-1]['env']['CODEX_HOME'], mine)
+        del self.env['CODEX_HOME']; self.spawn('--agent', 'codex', branch='feature/two')      # the default home, not the server's
+        self.assertIsNone(self.calls()[-1]['env']['CODEX_HOME'])
     def test_large_prompt_and_failed_launch_retry(self):
         big = 'x'*40000; pf = self.base/'task.txt'; pf.write_text('Task: '+big+'\nEND')
         self.orch('spawn.sh', '--repo', str(self.repo), '--branch', 'feature/test', '--from', 'HEAD', '--prompt-file', str(pf), '--no-node-modules', '--agent', 'claude')
@@ -535,6 +567,91 @@ class PortTests(unittest.TestCase):
         x = self.spawn('--agent', 'codex', '--dry-run'); self.assertFalse((self.repo/'.claude').exists()); self.assertFalse((self.base/'tmux-state.json').exists())
         self.assertRegex(x.stdout, r'(?m)^tmux +repo-feature-test ')          # the label it would get
         x = self.orch('sessions.sh', '--all', '--json'); self.assertEqual(json.loads(x.stdout), [])
+
+    # --- dir players: no branch, no worktree ------------------------------------------
+    def dir_spawn(self, path, *extra, ok=True, prompt='Tidy $(touch BAD) up'):
+        p = ['--prompt', prompt] if prompt else []
+        return self.run_cmd(['bash', self.script('spawn.sh'), '--dir', str(path), *p, *extra], ok=ok, cwd=self.base)
+    def notes_dir(self):
+        d = self.base/'real/notes'; d.mkdir(parents=True, exist_ok=True); link = self.base/'notes-link'
+        if not link.exists(): link.symlink_to(d)
+        return link                                                       # a symlink: the tag and label come from the resolved path
+    def test_dir_player_spawn_tags_and_refusals(self):
+        d = self.notes_dir(); real = str(d.resolve())
+        x = self.dir_spawn(d, '--agent', 'codex', '--dry-run'); self.assertRegex(x.stdout, r'(?m)^dir +%s$' % re.escape(real))
+        self.assertRegex(x.stdout, r'(?m)^tmux +notes-dir '); self.assertFalse((self.base/'tmux-state.json').exists())
+        x = self.dir_spawn(d, '--agent', 'codex'); c = self.calls()[-1]
+        self.assertRegex(x.stdout, r'(?m)^started +notes-dir$'); self.assertEqual(c['cwd'], real); self.assertEqual(c['env']['ORCHESTRA_SESSION'], 'notes-dir')
+        self.assertTrue(c['args'][-1].startswith('$player Tidy $(touch BAD) up')); self.assertFalse((d/'BAD').exists())
+        self.assertEqual(self.state()['notes-dir']['options'], {
+            'status': 'off', 'remain-on-exit': 'on', '@orchestra-agent': 'codex', '@orchestra-spawner': 'orchestra',
+            '@orchestra-session-type': 'dir', '@orchestra-repo': real, '@orchestra-orchestrator': 'codex:'+ID})
+        self.assertEqual(sorted(p.name for p in d.iterdir()), [])      # no worktree, no .claude, nothing written there
+        s = self.state(); s['notes-dir']['dead'] = 0; self.set_state(s)
+        self.assertIn('running: notes-dir', self.dir_spawn(d, ok=False).stderr)
+        for extra in (('--branch', 'feature/x'), ('--repo', str(self.repo)), ('--from', 'HEAD')):
+            x = self.dir_spawn(d, *extra, ok=False); self.assertEqual(x.returncode, 2, extra); self.assertIn('--dir', x.stderr)
+        n = len(self.tmux_calls())
+        x = self.dir_spawn(self.base/'missing', ok=False); self.assertEqual(x.returncode, 1); self.assertIn('missing', x.stderr)
+        self.assertEqual([c for c in self.tmux_calls()[n:] if 'new-session' in c], [])
+        self.assertEqual(self.lib('session_label "$1" dir', '/x/my.dir'), 'my-dir-dir')
+    def test_dir_player_is_addressed_by_its_session_name(self):
+        self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex')                                    # a worktree player, and a reviewer in its worktree
+        self.dir_spawn(self.wt, '--agent', 'codex'); rev = 'feature-test-dir'
+        self.assertEqual(self.tag('@orchestra-session-type', rev), 'dir'); self.assertIsNone(self.tag('@orchestra-branch', rev))
+        self.dir_spawn(self.repo, '--agent', 'codex', prompt='review')     # one at the repo root
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], 'repo-dir')
+        rows = {r['session']: r for r in self.sessions('--all')}
+        self.assertEqual(sorted(rows), sorted([self.session, rev, 'repo-dir']))
+        self.assertEqual((rows[rev]['repo'], rows[rev]['branch']), (str(self.wt.resolve()), ''))
+        self.assertEqual(sorted(r['session'] for r in self.sessions('--repo', str(self.repo))), sorted([self.session, 'repo-dir']))   # repo scope: the tag equals the root
+        text = self.orch('sessions.sh', '--all').stdout; self.assertIn(rev, text)
+        self.clear_log(); self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi')                 # the branch still names the worktree player
+        self.assertIn('"=%s:"' % self.session, self.tmux_log()); self.assertNotIn('"=%s:"' % rev, self.tmux_log())
+        self.report('PROGRESS', 'reviewed', env=self.player_env(ORCHESTRA_SESSION=rev), cwd=self.base)
+        self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player %s] PROGRESS: reviewed' % rev])
+        self.assertRegex(self.tag('@orchestra-last-report', rev), '^PROGRESS '+STAMP+' delivered$')
+        for args in (('send.sh', rev, 'hi'), ('screen.sh', rev), ('adopt.sh', rev, '--orchestrator', 'tmux:new-parent')):
+            self.clear_log(); self.orch(*args, cwd=self.base); self.assertIn('"=%s:"' % rev, self.tmux_log(), args)
+        self.assertEqual(self.tag('@orchestra-orchestrator', rev), 'tmux:new-parent')
+        self.assertIn('running: %s' % rev, self.dir_spawn(self.wt, ok=False).stderr)                           # found by its tags
+        self.assertIn('running: %s' % self.session, self.spawn(ok=False).stderr)
+        self.orch('kill.sh', rev, cwd=self.base); self.assertEqual(sorted(self.state()), sorted([self.session, 'repo-dir']))
+    def test_a_slash_free_branch_never_resolves_to_the_reviewer_in_its_worktree(self):
+        # The reviewer's directory is the worktree .claude/worktrees/fix-login, so a label of the bare
+        # basename would equal the branch, and an exact-name match would win over the branch.
+        self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex', branch='fix-login'); self.dir_spawn(self.repo/'.claude/worktrees/fix-login', '--agent', 'codex')
+        self.orch('kill.sh', 'fix-login', '--repo', str(self.repo))
+        self.assertEqual(sorted(self.state()), ['fix-login-dir'])
+    def test_dir_player_resume_continues_its_own_claude_conversation(self):
+        d = self.notes_dir(); real = str(d.resolve())
+        self.dir_spawn(d, '--agent', 'claude'); c = self.calls()[-1]
+        pin = self.tag('@orchestra-claude-session', 'notes-dir'); self.assertRegex(pin or '', r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+        self.assertEqual(c['args'][:2], ['--session-id', pin]); self.assertTrue(c['args'][-1].startswith(INV+' Tidy'))
+        self.dir_spawn(d, '--resume', prompt=False); c = self.calls()[-1]
+        self.assertEqual(c['args'][:2], ['--resume', pin]); self.assertNotIn('--continue', c['args'])       # never "the newest conversation here"
+        self.assertTrue(c['args'][-1].startswith(INV+' Your session was restarted in this directory;'), c['args'][-1])
+        self.assertEqual(self.tag('@orchestra-claude-session', 'notes-dir'), pin)
+        # A dead pane whose record is gone (dropped here by hand) refuses in the launcher, pane kept.
+        self.drop_tag_of('notes-dir', '@orchestra-claude-session'); n = len(self.calls()); self.dir_spawn(d, '--resume', prompt=False)
+        self.assertEqual(self.calls()[n:], []); self.assertEqual((self.state()['notes-dir']['dead'], self.state()['notes-dir']['status']), (1, 1))
+        # kill.sh ends the session and the record of its conversation: a later Claude or auto --resume
+        # refuses before creating anything, as a worktree resume does without its worktree.
+        self.orch('kill.sh', 'notes-dir', cwd=self.base); n = len(self.tmux_calls())
+        for extra in ((), ('--agent', 'claude')):
+            x = self.dir_spawn(d, '--resume', *extra, prompt=False, ok=False)
+            self.assertEqual(x.returncode, 1, extra); self.assertIn('no Claude conversation is recorded', x.stderr)
+        self.assertNotIn('notes-dir', self.state()); self.assertEqual([c for c in self.tmux_calls()[n:] if 'new-session' in c], [])
+        # Codex: the newest conversation recorded for that directory, even once the session is gone
+        self.dir_spawn(d, '--agent', 'codex'); self.orch('kill.sh', 'notes-dir', cwd=self.base); self.rollout(real)
+        self.dir_spawn(d, '--resume', '--agent', 'codex', prompt=False); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
+        self.assertEqual(self.tag('@orchestra-session-type', 'notes-dir'), 'dir')
+    def test_dir_player_warns_when_its_claude_conversation_cannot_be_recorded(self):
+        self.env['TEST_SET_OPTION_FAIL'] = '@orchestra-claude-session'
+        x = self.dir_spawn(self.notes_dir(), '--agent', 'claude')
+        self.assertNotIn('--session-id', self.calls()[-1]['args']); self.assertIn('cannot be resumed', x.stderr)
 
     # --- names are labels, tags are identity --------------------------------------------
     def test_sanitize_and_label_table_pinned_with_kirby(self):
@@ -1224,7 +1341,7 @@ class PortTests(unittest.TestCase):
         'send-keys':      [('-u',)],
         'set-option':     [('-u',), ('-u', '-S', 'SOCK')],
         'show-buffer':    [('-S', 'SOCK')],
-        'show-options':   [('-u',)],
+        'show-options':   [('-u',), ('-u', '-S', 'SOCK')],     # the launcher reads its session type
     }
     def test_local_tmux_argv_is_pinned_at_every_call_site(self):
         # The machine dimension moved call sites that used a bare `tmux` — kill-session and
@@ -1438,6 +1555,18 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')
         self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'new-session' in c for c in self.beam_calls()), self.beam_calls())
         self.rname = rname; self.remote_repo = remote_repo
+    def test_machine_dir_spawn_uses_the_remote_directory(self):
+        self.enable_remote_machine(); self.env['TEST_PANE_ALIVE'] = '1'
+        d = self.remote/'scratch'; d.mkdir()
+        x = self.run_cmd(['bash', self.script('spawn.sh'), '--machine', 'workbox', '--dir', 'scratch', '--prompt', 'p'], ok=False)
+        self.assertEqual(x.returncode, 2); self.assertIn('--dir must be an absolute path', x.stderr)
+        self.run_cmd(['bash', self.script('spawn.sh'), '--machine', 'workbox', '--dir', str(d), '--prompt', 'p', '--agent', 'codex'])
+        self.assertFalse((self.base/'tmux-state.json').exists(), 'a local tmux server was started')
+        opts = self.remote_state()['scratch-dir']['options']
+        self.assertEqual((opts['@orchestra-session-type'], opts['@orchestra-repo'], opts['@orchestra-orchestrator']), ('dir', str(d.resolve()), 'beam:%s/codex:%s' % ('a'*32, ID)))
+        self.assertEqual(self.remote_calls()[-1]['cwd'], str(d.resolve()))
+        self.assertEqual([r['session'] for r in self.sessions('--all', '--machine', 'workbox')], ['scratch-dir'])
+        self.orch('kill.sh', 'scratch-dir', '--machine', 'workbox'); self.assertEqual(self.remote_state(), {})
     def test_machine_spawn_runs_the_launcher_installed_on_the_remote_machine(self):
         # The pane runs _launch.sh on the target, where this machine's absolute plugin path does
         # not exist: the launcher is the one under the target's own $HOME, at the same path

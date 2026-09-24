@@ -9,15 +9,17 @@
 # or as #{@orchestra-agent} in a format. Absent means unset; no sentinels. Values contain no
 # tabs or newlines.
 TAG_SPAWNER=@orchestra-spawner            # kirby | orchestra: whichever program created the session
-TAG_REPO=@orchestra-repo                  # main checkout, absolute and symlink-resolved
-TAG_SESSION_TYPE=@orchestra-session-type  # worktree (players) | shell | agent (Kirby's terminal tabs)
-TAG_BRANCH=@orchestra-branch              # worktree sessions: the branch, unsanitized (feature/x)
+TAG_REPO=@orchestra-repo                  # main checkout, absolute and symlink-resolved; a dir player's directory
+TAG_SESSION_TYPE=@orchestra-session-type  # worktree | dir (players) | shell | agent (Kirby's terminal tabs)
+TAG_BRANCH=@orchestra-branch              # worktree sessions only: the branch, unsanitized (feature/x)
 TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: claude:<uuid> | codex:<uuid> | tmux:<session>
 TAG_ORCH_CONFIG=@orchestra-orchestrator-config    # claude:<uuid> targets only: the orchestrator's Claude config dir
 TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | opencode | custom
 TAG_LAUNCHING=@orchestra-launching        # 1 while the placeholder pane exists; unset once the harness started
 TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
+TAG_CLAUDE_SESSION=@orchestra-claude-session  # dir players: the id of the Claude conversation the launcher started
 SESSION_TYPE_WORKTREE=worktree            # a session's name is a label; spawner + session-type say whose it is
+SESSION_TYPE_DIR=dir                      # a player in an existing directory: no branch, no worktree, maybe no repo
 nl=$'\n'                                  # assigned once: ANSI-C quoting inside ${x:+...} is not portable
 
 # Exact tmux targeting. `=name` is exact for has-session, but pane/window commands (send-keys,
