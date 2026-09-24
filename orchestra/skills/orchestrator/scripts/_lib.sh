@@ -211,9 +211,9 @@ AGENT_TMUX_TMPDIR=/tmp/orchestra-agent-tmux
 # lookup over beam instead of asking their own machine (see _routing.sh's ORCHESTRA_FORCE_LOCAL,
 # which is the other half of this fix — that one covers a value inherited any other way, this one
 # stops it being captured into the tmux server's global environment in the first place). Only
-# these known markers are removed: configuration and credentials such as ANTHROPIC_API_KEY and
-# CODEX_HOME are deliberately left as the tmux server has them, and spawn.sh passes a local
-# orchestrator's CLAUDE_CONFIG_DIR (selected per directory by the user's claude wrapper) explicitly.
+# these known markers are removed: credentials such as ANTHROPIC_API_KEY are deliberately left as
+# the tmux server has them, and spawn.sh passes a local orchestrator's CLAUDE_CONFIG_DIR (selected
+# per directory by the user's claude wrapper) and CODEX_HOME explicitly.
 PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ATTENDED
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)

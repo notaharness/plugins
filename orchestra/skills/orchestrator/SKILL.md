@@ -160,8 +160,9 @@ and adopt; a player cannot change it and never uses its own Codex ID as parent. 
 destination also records this process's Claude config directory (`$CLAUDE_CONFIG_DIR`, else
 `~/.claude`) in `@orchestra-orchestrator-config`, since the player may run with a different one.
 A pane gets the tmux server's environment, not the orchestrator's, so a local player is given
-this process's `CLAUDE_CONFIG_DIR` explicitly (when set) and runs on the same Claude account;
-`ANTHROPIC_API_KEY`, `CODEX_HOME` and the rest are whatever the tmux server started with. Only
+this process's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly (unset when they are unset) and runs
+on the same Claude and Codex accounts; `ANTHROPIC_API_KEY` and the rest are whatever the tmux
+server started with. Only
 known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variables,
 `CODEX_THREAD_ID`, …) are removed from it.
 

@@ -429,7 +429,7 @@ sequenceDiagram
 
 ## Environment and limitations
 
-A pane starts with the tmux server's environment, which is the orchestrator's only if the orchestrator started that server. A local player is therefore given the orchestrator's `PATH`, `HOME` and, when set, `CLAUDE_CONFIG_DIR` explicitly, so it runs on the same Claude account. Other configuration and authentication variables, such as `ANTHROPIC_API_KEY` and `CODEX_HOME`, come from the tmux server's environment. Known parent-session markers are removed so the new CLI has its own session identity.
+A pane starts with the tmux server's environment, which is the orchestrator's only if the orchestrator started that server. A local player is therefore given the orchestrator's `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly (the last two unset when the orchestrator has them unset), so it runs on the same Claude and Codex accounts. Other configuration and authentication variables, such as `ANTHROPIC_API_KEY`, come from the tmux server's environment. Known parent-session markers are removed so the new CLI has its own session identity.
 
 The launcher unsets `TMUX` and redirects `TMUX_TMPDIR` to a scratch directory to reduce accidental interaction with the user's tmux server. Reporting reaches the real server through `ORCHESTRA_SOCKET` and reads the target from the session tag. This environment setup is not a security boundary and does not grant access through a sandbox.
 
