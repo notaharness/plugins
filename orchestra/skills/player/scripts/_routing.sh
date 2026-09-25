@@ -391,7 +391,7 @@ pane_owned_by_agent() {
   [ "$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_dead}' 2>/dev/null)" = 0 ] || return 1
   cmd="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_current_command}' 2>/dev/null)"
   case "$cmd" in
-    sh|bash|zsh|fish|dash|"")
+    sh|bash|zsh|fish|dash|script|"")      # script(1): the launcher's wrapper around a resumed Claude
       pid="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_pid}' 2>/dev/null)"
       agent="$(pane_has_agent "$pid")" || return 1;;
     *)

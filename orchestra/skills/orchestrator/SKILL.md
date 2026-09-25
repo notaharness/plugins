@@ -254,12 +254,42 @@ the original choice must be guaranteed. Do not silently substitute a model.
   that worktree. Any other failure leaves a dead pane to inspect; nothing starts fresh silently.
 - A dir player resumes with `spawn.sh --dir PATH --resume`. Its directory may hold other
   conversations (yours, say), so a Claude dir player continues exactly the conversation recorded in
-  `@orchestra-claude-session`. That tag dies with the session, so after `kill.sh` a Claude dir
+  `@orchestra-claude-session`. That tag dies with the session, so after `kill.sh` or a crash a Claude dir
   player cannot be resumed; a Codex one takes the newest Codex conversation for the directory.
 - Reassignment: `spawn.sh ... --resume --prompt "Next: …"` (or `--prompt-file`) restores the
   conversation with a new assignment; the player reports to the target on its session tag.
+- In each status update to the user, include a one-line roster per player: session, repo,
+  branch or dir, agent and account (config dir, or default). It keeps accounts visible through
+  context compaction and is the record a crash recovery works from.
 - Sessions outlive the conversation. Leave them running. Kill only a user-named player
   with `kill.sh SESSION`; branch/worktree cleanup remains separate.
+
+## Recovering after a crash
+
+A power loss, reboot or dead tmux server takes every player session and its tags with it. Nothing
+else records the players: your own conversation is the record.
+
+1. Resume your conversation (`claude --resume`, `codex resume`) on your own account.
+2. From its history (the status rosters, the spawn commands), list how each player was spawned.
+3. `sessions.sh` shows nothing, as expected: the tags died with the server, but the worktrees
+   and conversations did not.
+4. Resume each player with `spawn.sh --repo PATH --branch NAME --resume --agent AGENT` (or
+   `--dir PATH`) under the account it was spawned with: set
+   `CLAUDE_CONFIG_DIR` to its dir, or run with it unset (`env -u CLAUDE_CONFIG_DIR spawn.sh …`)
+   for the default; `CODEX_HOME` likewise for a Codex player. An explicit
+   `CLAUDE_CONFIG_DIR=~/.claude` is not the default: Claude reads `~/.claude/.claude.json` and
+   opens its first-run screen. A resume that finds no conversation usually means the wrong config dir.
+   Pass `--orchestrator tmux:<your session>` when your tmux session name changed, or when the
+   player's config dir differs from yours (a `claude:` target is looked up under `spawn.sh`'s
+   config dir). Pass `--model`/`--effort` again if they matter; resume adds none.
+5. Check each player's screen (`screen.sh`) before sending anything.
+6. Recreate scheduled check-ins; they lived in the dead session. Task files and helper scripts
+   kept in `/tmp` may be gone after a reboot.
+
+Resume restores the conversation up to its last saved message, and the worktree's files and
+commits. It loses whatever was in flight: the step that was running, background subagents and
+waits. A Claude dir player cannot be resumed (see above): spawn it fresh with its task and
+what it had already reported.
 
 ## Runtime limitations
 

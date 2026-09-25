@@ -19,9 +19,10 @@
 # is not part of the prompt: report.sh reads @orchestra-orchestrator from the session.
 #
 # Resume never starts a fresh conversation: a harness that cannot find one exits nonzero and the
-# pane stays for inspection (spawn.sh sets remain-on-exit). In auto mode Claude runs first under
-# script(1) so its output can be checked for the exact "No conversation found to continue"
-# diagnostic; only then is Codex tried, with the newest recorded conversation for this worktree.
+# pane stays for inspection (spawn.sh sets remain-on-exit). A worktree player's Claude resume runs
+# under script(1) so its output can be checked for the exact "No conversation found to continue"
+# diagnostic, which the pane then follows with the active Claude config dir; in auto mode only
+# that diagnostic lets Codex be tried, with the newest recorded conversation for this worktree.
 #
 # The task reaches a fresh harness as its initial-prompt argument, never typed: the CLI submits
 # it itself. Nothing can queue it instead — Claude Code never runs a skill invocation posted to its
@@ -137,36 +138,51 @@ codex_session_here() {
   return 1
 }
 
+# resume_codex [message]: the message replaces the default one when no Codex conversation exists.
 resume_codex() {
   local prompt id; prompt="$(preamble codex)"
-  id="$(codex_session_here)" || fail "no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)"
+  id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
   remember codex
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
-resume_claude() {
-  local prompt conv; prompt="$(preamble claude)"
-  conv="$(claude_conversation_args)" || fail "no Claude conversation is recorded on this dir player's session (kill.sh removes it); nothing to resume. Spawn it fresh, or pass --agent codex for a Codex player"
-  remember claude; claude_trust_here
-  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
-}
-resume_auto() {
-  [ "$stype" = "$SESSION_TYPE_DIR" ] && resume_claude
-  command -v script >/dev/null || fail "cannot detect the harness without util-linux script(1); rerun with --agent claude or --agent codex"
+# claude_continue_probed: `claude --continue` under script(1), so its output can be checked for the
+# exact NO_CONVERSATION diagnostic. Returns Claude's exit status; NOCONV=1 when it printed that.
+claude_continue_probed() {
   local log rc
-  claude_trust_here
   log="$(mktemp /tmp/orchestra-resume-probe.XXXXXX)" || fail "cannot create a probe log in /tmp"
   # The prompt and options travel in the environment; the sh -c string contains no user text.
   # script(1) runs the command through $SHELL: pin /bin/sh so a login shell's rc files cannot
   # reorder PATH or otherwise change which claude binary starts.
   PROMPT="$(preamble claude)" SHELL=/bin/sh script -qefc \
     'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} --strict-mcp-config "$PROMPT"' "$log"
-  rc=$?
-  if [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log"; then
-    rm -f "$log"
-    echo "player launch: Claude has no conversation for this worktree; trying Codex" >&2
-    resume_codex
+  rc=$?; NOCONV=0
+  [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log" && NOCONV=1
+  rm -f "$log"; return $rc
+}
+# The usual cause of a missing Claude conversation is a resume under another account than the spawn's.
+NO_CLAUDE_HERE="no Claude conversation for $PWD exists under the active config dir, ${CLAUDE_CONFIG_DIR:-the default ~/.claude (CLAUDE_CONFIG_DIR unset)}"
+SPAWN_ACCOUNT="resume under the config dir this player was spawned with (env -u CLAUDE_CONFIG_DIR for the default)"
+resume_claude() {
+  local prompt conv rc; prompt="$(preamble claude)"
+  conv="$(claude_conversation_args)" || fail "no Claude conversation is recorded on this dir player's session (kill.sh removes it); nothing to resume. Spawn it fresh, or pass --agent codex for a Codex player"
+  remember claude; claude_trust_here
+  if [ "$stype" != "$SESSION_TYPE_DIR" ] && command -v script >/dev/null; then
+    claude_continue_probed; rc=$?
+    [ "$NOCONV" = 1 ] && fail "$NO_CLAUDE_HERE; $SPAWN_ACCOUNT"
+    exit $rc
   fi
-  rm -f "$log"
+  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
+}
+resume_auto() {
+  [ "$stype" = "$SESSION_TYPE_DIR" ] && resume_claude
+  command -v script >/dev/null || fail "cannot detect the harness without util-linux script(1); rerun with --agent claude or --agent codex"
+  local rc
+  claude_trust_here
+  claude_continue_probed; rc=$?
+  if [ "$NOCONV" = 1 ]; then
+    echo "player launch: Claude has no conversation for this worktree; trying Codex" >&2
+    resume_codex "$NO_CLAUDE_HERE, and no Codex one either; $SPAWN_ACCOUNT"
+  fi
   [ $rc = 0 ] && remember claude
   exit $rc
 }
