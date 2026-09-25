@@ -84,7 +84,7 @@ checkout.
 For a Claude orchestrator, open Claude Code inside tmux. A Codex orchestrator can use a desktop or CLI conversation directly.
 
 ```text
-/orchestra:orchestrator Add search to this repo. Give the task to a Fable player and have it open a draft PR.
+/orchestra:orchestrator Add search to this repo. Give the task to an Opus player and have it open a draft PR.
 /orchestra:orchestrator Show me the status of my players.
 ```
 
@@ -237,7 +237,8 @@ N10 Desktop is itself the relay, so do not run `relay.sh` alongside it.
 
 - Linux or macOS with Bash, Git, coreutils (`realpath`, `sha256sum`), and `ps`/`pgrep`. Tested on Linux.
 - tmux 3.x; tested with 3.4.
-- An authenticated `claude` or `codex` CLI for each type of player you want to run.
+- An authenticated `claude` or `codex` CLI for each type of player you want to run. Codex
+  players need Codex CLI 0.157 or later for the default `gpt-6-sol` model; older versions reject it.
 - `beam` only if you want players on other machines, plus `socat` or an `nc` with `-U` on the
   orchestrator's machine for `relay.sh`; see [Machines](#machines).
 - `python3` to pre-accept Claude Code's workspace-trust dialog for new worktrees; without it Claude may ask on first launch.
@@ -252,8 +253,11 @@ Gemini, Copilot, and OpenCode can also be launched, but have more limited resume
 | --- | --- | --- |
 | Claude Code | `opus` | `high` |
 | Claude Code with `--model fable` | `fable` | `high` |
-| Codex | `gpt-6-astra` | `medium` |
+| Codex | `gpt-6-sol` | `medium` |
+| Codex with another `gpt-6-*` model, such as `gpt-6-astra` | The supplied model | `medium` |
 | Codex with another model | The supplied model | `high` |
+
+`opus` is the recommended Claude model for all work; `fable` is available as an alternative.
 
 Use `--model` and `--effort` to override these defaults. The scripts accept `low`, `medium`, `high`, `xhigh`, and `max`; the selected CLI determines which combinations are available. `--permission-mode` applies only to Claude Code.
 

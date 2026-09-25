@@ -187,13 +187,14 @@ before submission failed, so another attempt could duplicate the report.
 
 | Harness | Selection | Default effort |
 | --- | --- | --- |
-| Claude Code default | `opus` | `high` |
-| Claude Code advanced/debugging | `fable` | `high` |
-| Codex default | `gpt-6-astra` | `medium` |
-| Codex alternative | `gpt-5.6-sol` | `high` |
+| Claude Code default, for all work | `opus` | `high` |
+| Claude Code alternative | `fable` | `high` |
+| Codex default | `gpt-6-sol` | `medium` |
+| Codex alternative | `gpt-6-astra` | `medium` |
 
-`--model` and `--effort` override the presets on fresh launches; other Codex model IDs pass
-through with high effort. Effort values: low, medium, high, xhigh, max; availability is the
+`--model` and `--effort` override the presets on fresh launches; every `gpt-6-*` model gets
+medium effort and other Codex model IDs pass through with high effort. `gpt-6-sol` needs
+Codex CLI 0.157 or later. Effort values: low, medium, high, xhigh, max; availability is the
 CLI's responsibility. On `--resume` nothing is added unless given: Claude continues its
 conversation with its own settings, and Codex resumes with its configured default model
 (it logs when that differs from the previous turn). Pass `--model`/`--effort` explicitly when
@@ -215,7 +216,7 @@ the original choice must be guaranteed. Do not silently substitute a model.
    `spawn.sh` or `adopt.sh`.
    ```
    spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent codex
-   spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent claude --model fable --effort high
+   spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent claude --model opus --effort high
    spawn.sh --dir PATH --prompt-file FILE --agent claude       # a dir player: no branch, no worktree
    ```
    `--permission-mode auto` (Claude only) when appropriate to the existing authorization;
