@@ -84,7 +84,7 @@ checkout.
 For a Claude orchestrator, open Claude Code inside tmux. A Codex orchestrator can use a desktop or CLI conversation directly.
 
 ```text
-/orchestra:orchestrator Add search to this repo. Give the task to a Fable player and have it open a draft PR.
+/orchestra:orchestrator Add search to this repo. Give the task to an Opus player and have it open a draft PR.
 /orchestra:orchestrator Show me the status of my players.
 ```
 
