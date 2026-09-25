@@ -863,13 +863,15 @@ class PortTests(unittest.TestCase):
             n = len(self.calls()); self.env['TEST_CLAUDE_EXIT'] = exit_code; self.spawn('--resume', prompt=False)
             self.assertEqual([c['cli'] for c in self.calls()[n:]], ['claude'])
         self.assertEqual(self.tag('@orchestra-agent'), 'claude')
-    def test_resume_auto_with_no_conversation_anywhere_names_the_config_dir(self):
+    def test_resume_with_no_conversation_names_the_config_dir(self):
         self.spawn('--agent', 'claude'); self.kill_pane(); self.drop_tag('@orchestra-agent')
         self.env['TEST_CLAUDE_NOCONV'] = '1'
         for named in (str(self.base/'claude-config'), 'the default ~/.claude (CLAUDE_CONFIG_DIR unset)'):
-            x = self.spawn('--resume', prompt=False, ok=False); self.kill_pane()
-            self.assertIn('no Claude conversation for %s exists under the active config dir, %s,' % (self.wt, named), x.stderr.strip().splitlines()[-1])
-            self.assertNotIn('no Codex conversation is recorded', x.stderr)
+            for agent in ((), ('--agent', 'claude')):      # auto mode, then the explicit harness
+                x = self.spawn('--resume', *agent, prompt=False, ok=False); self.kill_pane()
+                last = x.stderr.strip().splitlines()[-1]
+                self.assertIn('no Claude conversation for %s exists under the active config dir, %s' % (self.wt, named), last, agent)
+                self.assertIn('spawned with', last, agent); self.assertNotIn('no Codex conversation is recorded', x.stderr)
             self.env.pop('CLAUDE_CONFIG_DIR', None)
     def test_resume_explicit_agent_wins_and_session_gone(self):
         self.spawn('--agent', 'codex'); self.orch('kill.sh', self.session, '--repo', str(self.repo))

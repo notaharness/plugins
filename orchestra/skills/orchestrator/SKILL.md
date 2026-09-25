@@ -272,8 +272,8 @@ else records the players: your own conversation is the record.
 2. From its history (the status rosters, the spawn commands), list how each player was spawned.
 3. `sessions.sh` shows nothing, as expected: the tags died with the server, but the worktrees
    and conversations did not.
-4. Resume each player with `spawn.sh --repo PATH --branch NAME --resume` (or `--dir PATH`; add
-   `--agent codex` for a Codex player) under the account it was spawned with: set
+4. Resume each player with `spawn.sh --repo PATH --branch NAME --resume --agent AGENT` (or
+   `--dir PATH`) under the account it was spawned with: set
    `CLAUDE_CONFIG_DIR` to its dir, or run with it unset (`env -u CLAUDE_CONFIG_DIR spawn.sh …`)
    for the default; `CODEX_HOME` likewise for a Codex player. An explicit
    `CLAUDE_CONFIG_DIR=~/.claude` is not the default: Claude reads `~/.claude/.claude.json` and
