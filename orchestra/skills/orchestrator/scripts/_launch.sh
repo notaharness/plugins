@@ -137,9 +137,10 @@ codex_session_here() {
   return 1
 }
 
+# resume_codex [message]: the message replaces the default one when no Codex conversation exists.
 resume_codex() {
   local prompt id; prompt="$(preamble codex)"
-  id="$(codex_session_here)" || fail "no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)"
+  id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
   remember codex
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
@@ -164,7 +165,7 @@ resume_auto() {
   if [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log"; then
     rm -f "$log"
     echo "player launch: Claude has no conversation for this worktree; trying Codex" >&2
-    resume_codex
+    resume_codex "no Claude conversation for $PWD exists under the active config dir, ${CLAUDE_CONFIG_DIR:-the default ~/.claude (CLAUDE_CONFIG_DIR unset)}, and no Codex one either; resume under the config dir this player was spawned with (env -u CLAUDE_CONFIG_DIR for the default)"
   fi
   rm -f "$log"
   [ $rc = 0 ] && remember claude
