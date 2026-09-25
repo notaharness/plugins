@@ -90,6 +90,8 @@ For a Claude orchestrator, open Claude Code inside tmux. A Codex orchestrator ca
 
 In Codex, use `$orchestrator` with the same task text. The orchestrator chooses a branch and starts a player, then receives its reports in the conversation. Each assignment should fit one branch and PR; the orchestrator can coordinate assignments across multiple repositories.
 
+The orchestrator keeps its replies focused on what you last answered and asks one decision at a time. It tracks what you have not yet acknowledged and brings it back at a natural moment. Ask for status to see every open item and a roster of the players.
+
 The spawn command prints the worktree (or directory) and tmux session name. To inspect a player yourself:
 
 ```bash

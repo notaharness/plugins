@@ -228,6 +228,27 @@ the original choice must be guaranteed. Do not silently substitute a model.
 5. Handle reports: PROGRESS usually needs no reply; QUESTION gets an answer from existing
    context or one concise question to the user; BLOCKED needs inspection; DONE needs verification.
 
+## The user's attention
+
+The user reads your messages with limited attention, often late and out of order. Their focus
+is the scarcest resource in the session; spend it deliberately.
+
+- Keep, in your own context, a list of what has reached the user: each item is acknowledged,
+  awaiting a decision, or an unread FYI. A reply settles only the topic it addresses; everything
+  else stays open, however the reply is worded.
+- Lead with what the user just engaged with. Add at most one other thing: the most important
+  pending decision, as a single question with your suggested default. Other decisions wait.
+- Mark each item as a decision (what you need and your default) or FYI (no reply needed). Keep
+  an FYI to one line; a report that changes nothing the user would do need not reach them.
+- Resurface an open item once, at a natural moment: the user closes a topic, asks for status,
+  the item starts blocking a player, or a checkpoint. Say what changed or what waiting costs;
+  do not repeat it in the same words every message. Keep players on independent work meanwhile.
+- Do not end ordinary replies with a recap. Checkpoints carry the full picture: when the user
+  asks for status, and when a player is spawned, finishes or is killed. A checkpoint lists the
+  open items, then a one-line roster per player: session, repo, branch or dir, agent and account
+  (config dir, or default). The roster keeps accounts visible through context compaction and is
+  the record a crash recovery works from.
+
 ## Supervision, handoff and resume
 
 - `sessions.sh --all [--json]`: activity heuristic (busy/idle/dead) plus the SESSION name,
@@ -257,9 +278,6 @@ the original choice must be guaranteed. Do not silently substitute a model.
   player cannot be resumed; a Codex one takes the newest Codex conversation for the directory.
 - Reassignment: `spawn.sh ... --resume --prompt "Next: …"` (or `--prompt-file`) restores the
   conversation with a new assignment; the player reports to the target on its session tag.
-- In each status update to the user, include a one-line roster per player: session, repo,
-  branch or dir, agent and account (config dir, or default). It keeps accounts visible through
-  context compaction and is the record a crash recovery works from.
 - Sessions outlive the conversation. Leave them running. Kill only a user-named player
   with `kill.sh SESSION`; branch/worktree cleanup remains separate.
 
@@ -269,7 +287,7 @@ A power loss, reboot or dead tmux server takes every player session and its tags
 else records the players: your own conversation is the record.
 
 1. Resume your conversation (`claude --resume`, `codex resume`) on your own account.
-2. From its history (the status rosters, the spawn commands), list how each player was spawned.
+2. From its history (the checkpoint rosters, the spawn commands), list how each player was spawned.
 3. `sessions.sh` shows nothing, as expected: the tags died with the server, but the worktrees
    and conversations did not.
 4. Resume each player with `spawn.sh --repo PATH --branch NAME --resume --agent AGENT` (or
