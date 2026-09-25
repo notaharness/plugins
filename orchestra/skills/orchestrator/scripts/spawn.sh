@@ -8,7 +8,7 @@
 #                                             cwd's repo. Any path inside it will do.
 #                 [--agent claude|codex|gemini|copilot|opencode]  (fresh default claude)
 #                 [--effort low|medium|high|xhigh|max] (Claude/Codex)
-#                 [--model M]                 Claude: opus; Codex: gpt-6-astra
+#                 [--model M]                 Claude: opus; Codex: gpt-6-sol
 #                 [--permission-mode MODE]    Claude only; otherwise CLI settings apply
 #                 [--cmd "COMMAND"]           custom harness; receives $PROMPT
 #                 [--from REF]                base for a new branch; default origin/HEAD
@@ -20,8 +20,8 @@
 #                                             remote --repo or --dir must be absolute or start
 #                                             with ~/.
 #                 [--no-node-modules] [--dry-run]
-# Fresh defaults: Claude opus/high (fable/high for --model fable), Codex gpt-6-astra/medium,
-# other Codex models high. --dry-run resolves local refs without fetching or writing.
+# Fresh defaults: Claude opus/high (any --model: high), Codex gpt-6-sol/medium (any gpt-6-*:
+# medium), other Codex models high. --dry-run resolves local refs without fetching or writing.
 #
 # --resume restarts the player's conversation in its existing worktree; the session may be
 # a dead pane or gone entirely. The launcher adds a restart note; give --prompt for a new
@@ -207,7 +207,7 @@ fi
 if [ $RESUME = 0 ]; then
   case "$HARNESS" in
     claude) MODEL="${MODEL:-opus}"; EFFORT="${EFFORT:-high}";;
-    codex)  MODEL="${MODEL:-gpt-6-astra}"; EFFORT="${EFFORT:-$(case "$MODEL" in gpt-6-astra) echo medium;; *) echo high;; esac)}";;
+    codex)  MODEL="${MODEL:-gpt-6-sol}"; EFFORT="${EFFORT:-$(case "$MODEL" in gpt-6-*) echo medium;; *) echo high;; esac)}";;
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
