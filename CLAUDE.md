@@ -38,7 +38,8 @@ Each plugin lives in its own top-level directory with its own `.claude-plugin/pl
        "source": "./my-plugin",
        "description": "What it does",
        "version": "1.0.0",
-       "author": { "name": "notaharness" }
+       "author": { "name": "notaharness" },
+       "license": "MIT"
      }
      ```
 

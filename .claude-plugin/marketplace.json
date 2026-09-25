@@ -13,7 +13,8 @@
       "version": "1.6.0",
       "author": {
         "name": "notaharness"
-      }
+      },
+      "license": "MIT"
     }
   ]
 }
