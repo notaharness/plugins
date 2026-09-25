@@ -427,6 +427,10 @@ sequenceDiagram
     end
 ```
 
+## Recover after a crash
+
+A power loss, reboot or dead tmux server removes every player session and its tags; Orchestra keeps no other record of its players. Resume the orchestrator's conversation instead: its history holds each spawn command, and the orchestrator skill's "Recovering after a crash" steps bring each player back with `spawn.sh --resume` under the account it was spawned with. Resume restores each conversation to its last saved message and keeps the worktree's files and commits; in-flight steps, background subagents and scheduled check-ins are lost. A Claude dir player cannot be resumed, because its conversation id lived in `@orchestra-claude-session`; spawn it fresh.
+
 ## Environment and limitations
 
 A pane starts with the tmux server's environment, which is the orchestrator's only if the orchestrator started that server. A local player is therefore given the orchestrator's `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly (the last two unset when the orchestrator has them unset), so it runs on the same Claude and Codex accounts. Other configuration and authentication variables, such as `ANTHROPIC_API_KEY`, come from the tmux server's environment. Known parent-session markers are removed so the new CLI has its own session identity.
