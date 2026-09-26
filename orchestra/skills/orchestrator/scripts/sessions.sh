@@ -6,8 +6,8 @@
 #   dead   the pane's command has exited
 #
 # A player is a session tagged @orchestra-spawner (any value), @orchestra-repo and
-# @orchestra-session-type worktree or dir, whoever created it; sessions missing any of these and
-# Kirby's shell/agent tabs are never listed. A dir player's @orchestra-repo is its directory and
+# @orchestra-session-type dir, or worktree with @orchestra-worktree-path, whoever created it;
+# sessions missing any of these and Kirby's shell/agent tabs are never listed. A dir player's @orchestra-repo is its directory and
 # its BRANCH is empty, so it is in a repo's scope only when that directory is the main checkout.
 # Scope: players whose @orchestra-repo is this repo (--repo <path>, else the cwd's repo) when
 # the cwd is inside a git repo; every player on the machine (--all) otherwise. --all adds a
@@ -50,9 +50,9 @@ require_valid_repo_for_machine || exit 0
 
 in_repo || ALL=1
 scope=""; [ $ALL = 1 ] || scope="$(repo_root)"
-# A row is in scope when its tags say player (spawner, repo, session-type worktree or dir) and,
-# unless --all, its repo tag equals this repo.
-in_scope() { [ -n "$1" ] && { [ "$2" = "$SESSION_TYPE_WORKTREE" ] || [ "$2" = "$SESSION_TYPE_DIR" ]; } && [ -n "$3" ] && { [ $ALL = 1 ] || [ "$3" = "$scope" ]; }; }
+# A row is in scope when its tags say player (spawner, repo, session-type dir or worktree with a
+# checkout) and, unless --all, its repo tag equals this repo.
+in_scope() { [ -n "$1" ] && { { [ "$2" = "$SESSION_TYPE_WORKTREE" ] && [ -n "$4" ]; } || [ "$2" = "$SESSION_TYPE_DIR" ]; } && [ -n "$3" ] && { [ $ALL = 1 ] || [ "$3" = "$scope" ]; }; }
 
 # Machines to list: an explicit --machine names exactly one, shown exactly as given. --all with
 # no --machine adds every registered peer to "local", cheaply (one `beam peers --json` call, then
@@ -121,7 +121,7 @@ for machine_iter in "${MACHINES[@]}"; do
     split_tabs "$line"; set -- "${F[@]}"
     name="${1:-}"; dead="${2:-}"; cmd="${3:-}"; activity="${4:-}"; agent="${5:-}"; orch="${6:-}"; last="${7:-}"; tag_repo="${8:-}"; branch="${9:-}"; spawner="${10:-}"; type="${11:-}"; worktree="${12:-}"
     title="$(IFS="$TAB"; printf '%s' "${*:13}")"      # the last field may itself contain tabs
-    in_scope "$spawner" "$type" "$tag_repo" || continue
+    in_scope "$spawner" "$type" "$tag_repo" "$worktree" || continue
     rows=$((rows+1))
     quiet=$(( now - ${activity:-$now} )); [ $quiet -lt 0 ] && quiet=0
     if [ "${dead:-1}" = 1 ]; then state=dead

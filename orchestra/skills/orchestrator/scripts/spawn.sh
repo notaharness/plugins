@@ -173,11 +173,12 @@ dir_exists() {
 # whichever branch the checkout is on now. The checkout is its canonical path once it exists.
 # What already exists: a dead pane (resumable), a live placeholder from a failed launch
 # (reusable), a running player (refuse), or nothing (a name is chosen at creation).
-checkout=""
-if [ -z "$DIR" ]; then
-  checkout="$workdir"
-  if dir_exists; then checkout="$(r --cwd "$workdir" pwd -P)" && [ -n "$checkout" ] || { echo "spawn.sh: could not resolve the worktree $workdir on $(machine_label)" >&2; exit 1; }; fi
-fi
+resolve_checkout() {
+  checkout="$(r --cwd "$workdir" pwd -P)" && [ -n "$checkout" ] || { echo "spawn.sh: could not resolve the worktree $workdir on $(machine_label)" >&2; exit 1; }
+  RESOLVED=1
+}
+checkout=""; RESOLVED=0
+if [ -z "$DIR" ]; then checkout="$workdir"; ! dir_exists || resolve_checkout; fi
 EXISTING=none
 if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
@@ -185,9 +186,16 @@ if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is
   elif [ "$(tag_get "$ORCH_SOCK" "$name" "$TAG_LAUNCHING")" = 1 ]; then EXISTING=placeholder
   else EXISTING=running; fi
 fi
+# The session owns the checkout whichever branch it is on; say so when that is not --branch, or a
+# refusal reads like a match on a stale branch.
+moved=""
+if [ "$EXISTING" != none ] && [ -z "$DIR" ]; then
+  now_on="$(r --cwd "$workdir" git branch --show-current 2>/dev/null </dev/null)" || now_on=""
+  [ -z "$now_on" ] || [ "$now_on" = "$BRANCH" ] || moved="; it owns $checkout, which is now on $now_on"
+fi
 case "$EXISTING" in
-  running) echo "spawn.sh: session already exists and is running: $name (kill.sh it first, or adopt.sh it)" >&2; exit 1;;
-  dead) [ $RESUME = 1 ] || { echo "spawn.sh: $name has a dead player; use --resume, or kill.sh it for a fresh start" >&2; exit 1; };;
+  running) echo "spawn.sh: session already exists and is running: $name$moved (kill.sh it first, or adopt.sh it)" >&2; exit 1;;
+  dead) [ $RESUME = 1 ] || { echo "spawn.sh: $name has a dead player$moved; use --resume, or kill.sh it for a fresh start" >&2; exit 1; };;
 esac
 if [ $RESUME = 1 ] && [ -z "$DIR" ]; then
   dir_exists || { echo "spawn.sh: nothing to resume: worktree $root/$dir does not exist on $(machine_label)" >&2; exit 1; }
@@ -263,13 +271,15 @@ esac
 # run here. Local behaviour is unchanged (still a plain `cd` and bare commands against this
 # machine's filesystem); a remote machine has no shell of its own to `cd` for, so `g` and `r`
 # carry an explicit --cwd/-C instead (see _lib.sh; D12 — no "$(id -u)", no "~" left for a shell).
-# A dir player has nothing to create: its directory is used as it is.
+# A dir player has nothing to create: its directory is used as it is. An existing worktree must be
+# on --branch unless a session was found for it: that session owns the checkout, whatever branch
+# the checkout has switched to since.
 if [ -n "$DIR" ]; then :
 elif is_local_machine; then
   cd "$root" || exit 1
   if dir_exists; then
     [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] &&
-    [ "$(git -C "$dir" branch --show-current)" = "$BRANCH" ] || {
+    { [ "$EXISTING" != none ] || [ "$(git -C "$dir" branch --show-current)" = "$BRANCH" ]; } || {
       echo 'spawn.sh: existing worktree does not match requested branch' >&2; exit 1;
     }
   else
@@ -279,7 +289,7 @@ elif is_local_machine; then
 else
   if dir_exists; then
     [ "$(r --cwd "$root/$dir" git rev-parse --show-toplevel)" = "$root/$dir" ] &&
-    [ "$(r --cwd "$root/$dir" git branch --show-current)" = "$BRANCH" ] || {
+    { [ "$EXISTING" != none ] || [ "$(r --cwd "$root/$dir" git branch --show-current)" = "$BRANCH" ]; } || {
       echo "spawn.sh: existing worktree does not match requested branch on $ORCH_MACHINE" >&2; exit 1;
     }
   else
@@ -301,9 +311,8 @@ done < <(find . -maxdepth 4 -type d -name node_modules -not -path "./node_module
   r --cwd "$root" bash -c "$nm_script" bash "$dir" || echo "spawn.sh: could not copy node_modules on $(machine_label)" >&2
 fi
 # The checkout's canonical path, resolved where it lives: the worktree session's identity tag.
-if [ -z "$DIR" ]; then
-  checkout="$(r --cwd "$workdir" pwd -P)" && [ -n "$checkout" ] || { echo "spawn.sh: could not resolve the worktree $workdir on $(machine_label)" >&2; exit 1; }
-fi
+# Resolved above when the worktree already existed; a new one is resolved now.
+[ -n "$DIR" ] || [ $RESOLVED = 1 ] || resolve_checkout
 r mkdir -p "$AGENT_TMUX_TMPDIR" || { echo "spawn.sh: could not create $AGENT_TMUX_TMPDIR on $(machine_label)" >&2; exit 1; }
 
 unset TMUX TMUX_PANE

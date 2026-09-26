@@ -743,7 +743,10 @@ class PortTests(unittest.TestCase):
         self.assertEqual([(r['session'], r['branch'], r['worktree']) for r in rows], [(self.session, 'feature/test', str(self.wt.resolve()))])
         self.clear_log(); self.orch('send.sh', 'feature/renamed', '--repo', str(self.repo), 'hi'); self.assertIn('"=%s:"' % self.session, self.tmux_log())
         x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)   # no checkout is on it now
-        self.assertIn('running', self.spawn(ok=False).stderr)                  # spawn finds it by its checkout, not by its branch tag
+        x = self.spawn(ok=False)                                               # spawn finds it by its checkout, not by its branch tag
+        self.assertIn('running', x.stderr); self.assertIn('which is now on feature/renamed', x.stderr)
+        self.kill_pane(); self.spawn('--resume', '--agent', 'claude', prompt=False)   # and resumes it in the switched checkout
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session); self.assertEqual(sorted(self.state()), [self.session])
         # another worktree on the original branch never claims the session
         self.run_cmd(['git', 'worktree', 'add', '-q', str(self.base/'elsewhere'), 'feature/test'], cwd=self.repo)
         x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)
@@ -765,8 +768,10 @@ class PortTests(unittest.TestCase):
         half = dict(self.player_tags(spawner='orchestra')); del half['@orchestra-session-type']; self.foreign('half-tagged', half)
         self.foreign('repo-shell', {'@orchestra-spawner': 'kirby', '@orchestra-repo': str(self.repo.resolve()), '@orchestra-session-type': 'shell'})   # fully tagged, not a player
         norepo = self.player_tags(spawner='orchestra'); del norepo['@orchestra-repo']; self.foreign('no-repo-tag', norepo)
+        nopath = self.player_tags(spawner='orchestra'); del nopath['@orchestra-worktree-path']; self.foreign('no-checkout-tag', nopath)
+        self.assertEqual(self.sessions('--all'), [])
         before = self.state()
-        for name in (self.session, 'half-tagged', 'repo-shell', 'no-repo-tag'):
+        for name in (self.session, 'half-tagged', 'repo-shell', 'no-repo-tag', 'no-checkout-tag'):
             self.assertNotEqual(self.orch('kill.sh', name, ok=False).returncode, 0)
             self.assertNotEqual(self.orch('adopt.sh', name, '--orchestrator', 'tmux:p', ok=False).returncode, 0)
         self.assertNotIn('kill-session', self.tmux_log()); self.assertNotIn('send-keys', self.tmux_log()); self.assertEqual(self.state(), before)

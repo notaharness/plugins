@@ -152,26 +152,27 @@ TAB=$'\t'
 list_sessions_tagged() {
   tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_WORKTREE_PATH}" 2>/dev/null || true
 }
-# Player sessions = spawner set, repo set AND session-type worktree or dir, whoever created them
-# (Kirby's worktree sessions included). Same tab-separated fields as above. This is the one
-# definition of "ours" for listing, resolving, killing and adopting: a session whose name we would
-# have chosen but that lacks any of these tags is foreign, never attached, killed, adopted or listed.
+# Player sessions = spawner set, repo set AND session-type dir, or worktree with the checkout set,
+# whoever created them (Kirby's worktree sessions included). Same tab-separated fields as above.
+# This is the one definition of "ours" for listing, resolving, killing and adopting: a session whose
+# name we would have chosen but that lacks any of these tags is foreign, never attached, killed,
+# adopted or listed.
 player_sessions() {
-  list_sessions_tagged | awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" '$4 != "" && $5 != "" && ($6 == wt || $6 == dir)'
+  list_sessions_tagged | awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" '$4 != "" && $5 != "" && (($6 == wt && $8 != "") || $6 == dir)'
 }
 all_player_sessions() { player_sessions | cut -f1; }
 is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
-# find_player_session <repo> [checkout]: the worktree session whose tags equal (repo, checkout),
-# the checkout canonical as spawn.sh tags it; with no checkout, the dir player of <repo> (its
+# find_player_session <repo> <checkout>: the worktree session whose tags equal (repo, checkout),
+# the checkout canonical as spawn.sh tags it; with an empty checkout, the dir player of <repo> (its
 # directory). @orchestra-branch is never consulted: the checkout may have switched branch since.
 # With several (should not happen) the one created first, the others named on stderr and left alone.
 find_player_session() {
   local matches
-  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="$2" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
+  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="${2:-}" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
     '$5 == repo && (path == "" ? $6 == dir : $6 == wt && $8 == path)' | sort -t "$TAB" -k2,2n)"
   [ -n "$matches" ] || return 1
   if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
-    echo "warning: several sessions carry repo $1${2:+ checkout $2}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
+    echo "warning: several sessions carry repo $1${2:+ checkout ${2:-}}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
   fi
   printf '%s\n' "$matches" | head -n1 | cut -f1
 }
@@ -182,7 +183,7 @@ players_on_branch() {
   while IFS="$TAB" read -r name repo path; do
     [ "$(r --cwd "$path" git branch --show-current 2>/dev/null </dev/null)" = "$1" ] && printf '%s\t%s\n' "$name" "$repo"
   done < <(player_sessions | sort -t "$TAB" -k2,2n |
-    awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v repo="${2:-}" '$6 == wt && $8 != "" && (repo == "" || $5 == repo) { print $1 FS $5 FS $8 }')
+    awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v repo="${2:-}" '$6 == wt && (repo == "" || $5 == repo) { print $1 FS $5 FS $8 }')
   return 0
 }
 # resolve_session <arg>: an exact tmux name whose tags say it is a player (the only way to name a

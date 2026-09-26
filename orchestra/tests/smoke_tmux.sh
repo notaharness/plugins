@@ -219,7 +219,7 @@ check "adopt set the orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\
 # A plain shell at its prompt inside a player worktree, tagged as a player. /bin/sh has no startup
 # files, so the pane is settled before adopt.sh inspects it.
 (unset TMUX TMUX_PANE; tm new-session -d -s repo-shellonly -c "$W1" -x 80 -y 20 -- /bin/sh)
-for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch shellonly"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
+for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch shellonly" "@orchestra-worktree-path $W1"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
 check "adopt refuses shell pane" "! bash '$O/adopt.sh' repo-shellonly --repo '$T/repo' --orchestrator tmux:other 2>/dev/null"
 check "refused adopt left the tag alone" "[ -z \"\$(tag repo-shellonly @orchestra-orchestrator)\" ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
 tm kill-session -t "=repo-shellonly"
