@@ -165,7 +165,8 @@ repository and `--machine NAME` to act on another machine.
 - `--dry-run` shows what a spawn would do without fetching or writing.
 - `--no-node-modules` skips copying `node_modules` into the worktree.
 
-`SESSION` is the player's branch or its tmux session name, as shown by `sessions.sh`. A dir
+`SESSION` is the branch the player's worktree has checked out, or its tmux session name, as
+shown by `sessions.sh`. A player stays tied to its worktree when it switches branch. A dir
 player has no branch, so use its session name (`<directory>-dir`). A repository's
 `sessions.sh` lists a dir player only when its directory is that repository's main checkout;
 use `--all` to see the rest.
@@ -178,7 +179,8 @@ spawn.sh --repo PATH --branch feature/search --resume --prompt "Next, add keyboa
 ```
 
 The player continues its previous conversation in the same worktree, with a note that it was
-restarted. `--prompt` or `--prompt-file` gives it a new message; the original task is not sent
+restarted. `--branch` is the branch the player was spawned for (the `BRANCH` column of
+`sessions.sh`), not the one its checkout has now. `--prompt` or `--prompt-file` gives it a new message; the original task is not sent
 again. It uses the CLI the player last ran unless you pass `--agent`. When that is unknown
 because the session is gone, it tries Claude, and a Codex conversation only when Claude has
 none to continue; a dir player needs `--agent codex` to resume a Codex conversation. If

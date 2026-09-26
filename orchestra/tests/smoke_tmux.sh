@@ -77,13 +77,16 @@ check "config/auth preserved" "grep -q 'CLAUDE_CONFIG_DIR=$T/claude-config' '$T/
 check "tmux isolated" "grep -q 'TMUX= TMUX_TMPDIR=/tmp/orchestra-agent-tmux' '$T/last-claude'"
 check "ORCHESTRA_* environment injected" "grep -qx 'env ORCHESTRA_SESSION=$S1' '$T/last-claude' && grep -qx 'env ORCHESTRA_SOCKET=$SOCK' '$T/last-claude' && grep -qx 'env ORCHESTRA_MODE=fresh' '$T/last-claude'"
 check "no PLAYER_/ORCHESTRATOR_/ORCHESTRA_PLAYER environment" "! grep -qE '^env (PLAYER_|ORCHESTRATOR_|ORCHESTRA_PLAYER)' '$T/last-claude'"
-check "identity tags" "[ \"\$(tag $S1 @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $S1 @orchestra-repo)\" = '$REPO' ] && [ \"\$(tag $S1 @orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @orchestra-branch)\" = feature/x ]"
+check "identity tags" "[ \"\$(tag $S1 @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $S1 @orchestra-repo)\" = '$REPO' ] && [ \"\$(tag $S1 @orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @orchestra-branch)\" = feature/x ] && [ \"\$(tag $S1 @orchestra-worktree-path)\" = \"\$(cd '$W1' && pwd -P)\" ]"
 check "orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
 check "harness tag" "[ \"\$(tag $S1 @orchestra-agent)\" = claude ]"
 check "launching flag cleared" "[ -z \"\$(tag $S1 @orchestra-launching)\" ]"
 check "prompt buffer consumed" "! tm list-buffers -F '#{buffer_name}' | grep -q '^orchestra-prompt-'"
 check "no state files in the worktree git dir" "[ -z \"\$(ls \"\$(GITDIR1)\" | grep -E '^player-')\" ]"
 check "spawn refuses running session" "! bash '$O/spawn.sh' --repo '$T/repo' --branch feature/x --prompt x --no-node-modules 2>/dev/null"
+git -C "$W1" switch -q -c feature/x-moved
+check "a switched worktree keeps its player" "bash '$O/sessions.sh' --repo '$T/repo' --json | grep -q '\"session\":\"$S1\"' && bash '$O/screen.sh' feature/x-moved --repo '$T/repo' >/dev/null && ! bash '$O/spawn.sh' --repo '$T/repo' --branch feature/x --prompt x --no-node-modules 2>/dev/null"
+git -C "$W1" switch -q feature/x
 
 echo "# report.sh from the player to tmux:parent"
 (cd "$W1" && player PROGRESS "hello from smoke") >"$T/report.out" 2>&1
@@ -216,8 +219,8 @@ check "adopt set the orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\
 # A plain shell at its prompt inside a player worktree, tagged as a player. /bin/sh has no startup
 # files, so the pane is settled before adopt.sh inspects it.
 (unset TMUX TMUX_PANE; tm new-session -d -s repo-shellonly -c "$W1" -x 80 -y 20 -- /bin/sh)
-for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch shellonly"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
-check "adopt refuses shell pane" "! bash '$O/adopt.sh' shellonly --repo '$T/repo' --orchestrator tmux:other 2>/dev/null"
+for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch shellonly" "@orchestra-worktree-path $W1"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
+check "adopt refuses shell pane" "! bash '$O/adopt.sh' repo-shellonly --repo '$T/repo' --orchestrator tmux:other 2>/dev/null"
 check "refused adopt left the tag alone" "[ -z \"\$(tag repo-shellonly @orchestra-orchestrator)\" ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
 tm kill-session -t "=repo-shellonly"
 # An agent-like pane (awk, not a shell) that nobody tagged: not ours, whatever its name says.
@@ -230,9 +233,9 @@ echo "# adopt a pane Kirby created; report.sh inside it resolves the session fro
 # Kirby tags its worktree sessions with spawner/repo/session-type/branch under its own label. The
 # pane leader is awk (not a shell), so adopt.sh treats it as an agent; a REPORT line makes it run
 # report.sh from inside the pane, where only TMUX/TMUX_PANE identify the session.
-SA="repo-adopted"
-(unset TMUX TMUX_PANE; tm new-session -d -s "$SA" -c "$W1" -x 100 -y 20 -- awk -v P="$P" -v T="$T" '/REPORT/ { system("bash \"" P "/report.sh\" DONE \"from inside\" > \"" T "/inside.out\" 2>&1"); next } { print >> (T "/received-inside") }')
-for kv in "@orchestra-spawner kirby" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch adopted"; do tm set-option -t "=$SA:" $kv; done
+SA="repo-adopted"; WA="$REPO/.claude/worktrees/adopted"; git -C "$REPO" worktree add -q -b adopted "$WA"
+(unset TMUX TMUX_PANE; tm new-session -d -s "$SA" -c "$WA" -x 100 -y 20 -- awk -v P="$P" -v T="$T" '/REPORT/ { system("bash \"" P "/report.sh\" DONE \"from inside\" > \"" T "/inside.out\" 2>&1"); next } { print >> (T "/received-inside") }')
+for kv in "@orchestra-spawner kirby" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch adopted" "@orchestra-worktree-path $WA"; do tm set-option -t "=$SA:" $kv; done
 sleep 0.5
 bash "$O/adopt.sh" adopted --repo "$T/repo" --orchestrator tmux:parent >/dev/null 2>&1; check "adopt of a Kirby pane by branch" "[ $? = 0 ] && [ \"\$(tag $SA @orchestra-orchestrator)\" = tmux:parent ]"
 bash "$O/send.sh" adopted --repo "$T/repo" --raw "REPORT" >/dev/null 2>&1; sleep 1.5
