@@ -145,9 +145,11 @@ before offering optional improvements.
 
 ### Checkpoints and recovery state
 
-Ordinary replies stay focused. A status request or players being spawned, finishing or being
-killed calls for a checkpoint; coalesce simultaneous events. Show open items as states, not a
-questionnaire. A checkpoint may retain a pending decision without another appeal for an answer.
+Ordinary replies stay focused. A status request or an actual player lifecycle change (spawn,
+finish or kill) calls for a checkpoint; coalesce simultaneous events. Duplicate reports are not
+new lifecycle changes. When a report adds no decision-relevant information, record it internally
+without a user-facing response: narrating the duplication still interrupts. Show open items as
+states, not a questionnaire. A checkpoint may retain a pending decision without another appeal.
 
 Include a compact recovery roster at each checkpoint, even when all players are done: exact
 session, repo, branch or dir, agent and account (config directory, or default). This preserves
