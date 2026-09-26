@@ -6,7 +6,7 @@ Players run on the orchestrator's machine by default. With [beam](#machines) ins
 
 Orchestra provides two skills backed by Bash scripts. The skills tell the agents how to coordinate; the scripts perform the Git and tmux operations. Use Claude Code in tmux or a Codex desktop/CLI conversation as the orchestrator. You can attach to any player's session to inspect its work or talk to it directly.
 
-[Install](#install) · [Start a task](#start-a-task) · [Architecture](#architecture) · [Machines](#machines) · [Scripts](#scripts) · [Reporting](#reporting) · [Resume and handoff](#resume-or-hand-off-a-player) · [Requirements](#requirements)
+[Install](#install) · [Start a task](#start-a-task) · [Communication](#communication-and-attention) · [Architecture](#architecture) · [Machines](#machines) · [Scripts](#scripts) · [Reporting](#reporting) · [Resume and handoff](#resume-or-hand-off-a-player) · [Requirements](#requirements)
 
 ## Install
 
@@ -90,8 +90,6 @@ For a Claude orchestrator, open Claude Code inside tmux. A Codex orchestrator ca
 
 In Codex, use `$orchestrator` with the same task text. The orchestrator chooses a branch and starts a player, then receives its reports in the conversation. Each assignment should fit one branch and PR; the orchestrator can coordinate assignments across multiple repositories.
 
-The orchestrator keeps its replies focused on what you last answered and asks one decision at a time. It tracks what you have not yet acknowledged and brings it back at a natural moment. Ask for status to see every open item and a roster of the players.
-
 The spawn command prints the worktree (or directory) and tmux session name. To inspect a player yourself:
 
 ```bash
@@ -99,6 +97,19 @@ tmux attach -t '=SESSION_NAME'
 ```
 
 Detach with **Ctrl+B, then D**. Ctrl+C interrupts the running agent.
+
+## Communication and attention
+
+The orchestrator is instructed to track what you've acknowledged, ask one decision at a time, and keep the relevant state and recommendation beside each decision so you can answer without rereading the thread. Ask for status to see open items and a roster of the players.
+
+The guidance draws on the research below. A small live benchmark and targeted follow-up are described in [PR #8](https://github.com/notaharness/plugins/pull/8) and [PR #9](https://github.com/notaharness/plugins/pull/9); they do not establish a proven effect on attention or developer outcomes.
+
+- **Working memory:** [Cowan (2001)](https://pubmed.ncbi.nlm.nih.gov/11515286/) on storage capacity; [Alderson et al. (2013)](https://pubmed.ncbi.nlm.nih.gov/23421528/) on working-memory load in adults with ADHD.
+- **Planning and remembering:** [Fuermaier et al. (2013)](https://doi.org/10.1371/journal.pone.0058338) on distinct components of prospective memory in adults with ADHD.
+- **Interruption costs:** [Mark, Gudith and Klocke (2008)](https://doi.org/10.1145/1357054.1357072), *The Cost of Interrupted Work: More Speed and Stress*.
+- **Notification timing:** [Iqbal and Bailey (2008)](https://doi.org/10.1145/1357054.1357070), *Effects of Intelligent Notification Management on Users and Their Tasks*.
+- **Returning to a task:** [Altmann and Trafton (2007)](https://pubmed.ncbi.nlm.nih.gov/18229478/) on recovery after interruptions.
+- **External reminders:** [Gilbert (2015)](https://doi.org/10.1080/17470218.2014.972963) on offloading delayed intentions.
 
 ## Architecture
 
