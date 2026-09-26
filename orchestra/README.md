@@ -91,6 +91,53 @@ with `git worktree remove` once the PR is merged.
 
 Keep a dir player out of a directory another player is changing.
 
+## Communication and attention
+
+The orchestrator is instructed to track what you've acknowledged, ask one decision at a
+time, and keep the relevant state and recommendation beside each decision so you can answer
+without rereading the thread. Ask for status to see open items and a roster of the players.
+
+The proposed terminal style puts the answer or decision first, uses short paragraphs and
+selective lists, and keeps recovery details after the decision context. [Read the
+output-style research and controlled comparisons](docs/terminal-style.md) for sources,
+examples and limitations; no local output-style installation is required.
+
+The guidance draws on the research below. A small live benchmark and targeted follow-up are
+described in [PR #8](https://github.com/notaharness/plugins/pull/8) and
+[PR #9](https://github.com/notaharness/plugins/pull/9); they do not establish a proven effect
+on attention or developer outcomes.
+
+- **Working memory:** [Cowan (2001)](https://pubmed.ncbi.nlm.nih.gov/11515286/) on storage
+  capacity; [Alderson et al. (2013)](https://pubmed.ncbi.nlm.nih.gov/23421528/) on
+  working-memory load in adults with ADHD.
+- **Planning and remembering:** [Fuermaier et al.
+  (2013)](https://doi.org/10.1371/journal.pone.0058338) on distinct components of
+  prospective memory in adults with ADHD.
+- **Interruption costs:** [Mark, Gudith and Klocke
+  (2008)](https://doi.org/10.1145/1357054.1357072), *The Cost of Interrupted Work: More
+  Speed and Stress*.
+- **Notification timing:** [Iqbal and Bailey
+  (2008)](https://doi.org/10.1145/1357054.1357070), *Effects of Intelligent Notification
+  Management on Users and Their Tasks*.
+- **Returning to a task:** [Altmann and Trafton
+  (2007)](https://pubmed.ncbi.nlm.nih.gov/18229478/) on recovery after interruptions.
+- **External reminders:** [Gilbert (2015)](https://doi.org/10.1080/17470218.2014.972963) on
+  offloading delayed intentions.
+- **Shared initiative:** [Horvitz (1999)](https://www.erichorvitz.com/chi99horvitz.pdf) on
+  uncertainty, timing and human control; [Amershi et al.
+  (2019)](https://www.microsoft.com/en-us/research/articles/guidelines-for-human-ai-interaction-eighteen-best-practices-for-human-centered-ai-design/)
+  on context-sensitive human–AI interaction.
+- **Appropriate reliance:** [Buçinca et al. (2021)](https://arxiv.org/abs/2102.09692) on
+  reducing over-reliance and the costs of added decision friction.
+
+The skill targets capable frontier orchestrators: concise goals and reasons, with exact
+constraints for authorization, routing and recovery. Its instruction structure draws on
+[OpenAI’s GPT-6 skill
+guidance](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra)
+and [Anthropic’s Fable/Mythos
+guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5);
+their recommendations still need checking on the model and workload in use.
+
 ## Commands
 
 The orchestrator runs these scripts from `skills/orchestrator/scripts/`; you can run them

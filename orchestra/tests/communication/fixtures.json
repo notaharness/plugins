@@ -1,0 +1,63 @@
+{
+  "provenance": "Controlled rewrites of PR #9 frontier rounds 1 and 2, not new coding runs. The late answer uses round 2; the merge uses round 1's 17-test state. Session names and paths are normalized fixtures. No state is shared between cases.",
+  "common": "Write the next orchestrator message to an experienced programmer who may not have read earlier updates. Preserve the supplied behavior, verification, uncertainty and authorization facts. Ask at most one independent decision, with a recommendation and consequence. Ordinary replies need no full roster. At a lifecycle checkpoint retain exact session, absolute repo, branch, agent and account; shared fields can appear once. A duplicate with no new information needs no user-facing response. Use an empty string for that case. Return only a JSON object mapping the three case IDs to Markdown strings. Do not evaluate your own outputs or invent actions.",
+  "styles": {
+    "prose": "Use compact connected prose. Prefer paragraphs, with no headings, bullets, tables or bold. Include all required facts; do not use telegraphic shorthand to save words.",
+    "dashboard": "Use a structured dashboard: descriptive headings, bold labels, bullets and tables where they fit. Make both the action and status easy to find. Include all required facts.",
+    "selective": "Start with the answer or decision that matters, with its essential context beside it. Use short connected paragraphs, each with one purpose; bullets for parallel items, a heading only when it helps navigation, and sparse bold for the choice or result. Prefer labeled lines to a table when paths or sentences would wrap. Put recovery metadata after the decision, sharing repeated fields once. Include all required facts; cut repetition, not context. Adapt length to the decision rather than a word quota. Give unchanged duplicate reports no visible response."
+  },
+  "cases": {
+    "late_answer": {
+      "trigger": "After several minutes away, user replies 'yes ellipsis' to an older truncate question; the latest question concerned merge approval. There is no new lifecycle event.",
+      "facts": "The truncate branch already uses the single character …, counted within n: truncate('hello world', 5) returns 'hell…'. This answer settles only ellipsis, not a merge. Nothing is merged. Next decision is whether slugify defaults to ASCII or keeps Unicode letters. Current branch default is ASCII. Recommend ASCII for ASCII-only URL requirements; this is a project choice, not a claim that Unicode URLs are invalid. 'Crème Brûlée' becomes 'creme-brulee'; Greek-only 'Ελληνικά' becomes the empty string. ascii_only=False keeps Greek letters as 'ελληνικά'. Ask this single design choice, not merge approval."
+    },
+    "merge_checkpoint": {
+      "trigger": "All three players have finished; both design choices were answered earlier. Human may have missed the completion posts. This is a coalesced completion checkpoint and the first request to merge all three.",
+      "facts": "Nothing is merged into main. Orchestrator independently applied the three branches to a temporary copy of main: all 17 tests passed together and no conflicts. feature/truncate, caf26ff: … counts within n. feature/slugify, 0012e0e: ASCII only; Café Déjà gives cafe-deja and 日本語 gives empty string. fix/parse-duration, 0d3603f: resets the digit accumulator between units, so 1h30m gives 5400 seconds. Recommend merging all three locally, one merge commit per task, then rerunning tests on main. Ask permission for that single combined action. No remote exists. Sessions/worktrees remain until cleanup authorized. Recovery data: repo /tmp/textkit; all agents Claude Sonnet low effort; verified account/config directory /home/hermann/.claude-work. Exact session-to-branch mapping: textkit-feature-truncate -> feature/truncate; textkit-feature-slugify -> feature/slugify; textkit-fix-parse-duration -> fix/parse-duration."
+    },
+    "unchanged_duplicate": {
+      "trigger": "While merge approval is pending, duration player repeats its identical DONE for commit 0d3603f. No facts, urgency, lifecycle state or user request changed.",
+      "facts": "Keep the pending merge and duplicate receipt internally. No user-facing notification or repeated ask."
+    }
+  },
+  "rubric_before_generation": [
+    "Integrity: preserves behavior, test provenance, scoped approval, no invented actions; at checkpoint preserves every recovery field and exact mapping.",
+    "Decision completeness: recommendation, current state, consequence and actionable choice in the same message; no reference to unread history needed.",
+    "Findability: answer or decision introduced in the first two sentences or first content block; record the question's 80-column line rather than hiding ordering differences in a score.",
+    "Restraint: at most one independent decision, no repeated recap in ordinary replies, empty duplicate response.",
+    "Layout: inspect raw Markdown at 80 and 120 columns, largest prose block, table width and recovery/detail separation. Counts describe layout, not human reading speed or ADHD benefit."
+  ],
+  "candidate_sections": {
+    "candidate_initial": "Make replies easy to pick up after an interruption. Put the answer, result or needed choice\nnear the start, with enough context to understand it. Keep the reason, relevant check and\nmain consequence nearby; put supporting detail afterwards. Prefer short connected paragraphs\nwith one purpose each. Choose length by what the user needs to act, not a word quota.\n\nUse familiar, direct language while preserving precise technical terms the user knows. Cut\nrepetition and ceremony before cutting context; compressed fragments, invented abbreviations\nand strings of arrows make the reader reconstruct the meaning.\n\nUse formatting where it makes information easier to find:\n\n- Bullets for parallel items; numbers for steps. Keep lists shallow.\n- Descriptive headings for longer replies with distinct parts; a brief answer needs none.\n- Sparse bold for the decision or result, inline code for exact identifiers and examples.\n- Tables for short comparisons that fit the terminal. Prefer labeled lines when paths or\n  sentences would wrap; don't rely on color or icons to carry status.\n\nAt checkpoints, lead with the outcome and distinguish verified, player-reported and pending\nwork. Keep the complete recovery roster after the decision-relevant content, sharing common\nfields once. Adapt these defaults to the user's stated preferences.",
+    "candidate_final": "Make replies easy to pick up after an interruption. Lead with the answer, result or actionable\nchoice, with its essential context. Keep the reason, relevant check and main consequence beside\nthe choice; put supporting detail afterwards. Prefer short connected paragraphs with one\npurpose each. Choose length by what the user needs to act, not a word quota.\n\nUse familiar, direct language while preserving precise technical terms the user knows. Cut\nrepetition and ceremony before cutting context; compressed fragments, invented abbreviations\nand strings of arrows make the reader reconstruct the meaning.\n\nUse formatting where it makes information easier to find:\n\n- Bullets for parallel items; numbers for steps. Keep lists shallow.\n- Descriptive headings for longer replies with distinct parts; a brief answer needs none.\n- Sparse bold for the decision or result, inline code for exact identifiers and examples.\n- Tables for short comparisons that fit the terminal. Prefer labeled lines when paths or\n  sentences would wrap; don't rely on color or icons to carry status.\n\nPut checkpoint recovery details after the decision context, sharing common fields once.\nAdapt these defaults to the user's stated preferences."
+  },
+  "run_configuration": {
+    "date": "2026-09-26",
+    "harness": "Claude Code 2.1.283",
+    "requested_model": "opus",
+    "observed_model": "claude-opus-5-5",
+    "effort": "medium",
+    "flags": [
+      "--print",
+      "--safe-mode",
+      "--strict-mcp-config",
+      "--tools",
+      "",
+      "--no-session-persistence",
+      "--output-format",
+      "json"
+    ],
+    "system_prompt": "You are rewriting fixed orchestrator replies for a controlled output-style comparison. Treat supplied case facts as the complete state. No tools or external actions are required.",
+    "user_prompt_template": "Shared orchestration guidance:\n{attention_section}\n\nTask:\n{common}\n\nStyle for this independent trial:\n{style_instruction}\n\nCases:\n{cases_json}",
+    "attention_section": "Text between ## The user's attention and ## Runtime limitations in SKILL.md at 276ce33. For candidate trials insert the recorded candidate section under ### Output style before ### Checkpoints and recovery state.",
+    "candidate_style_instruction": "Use the supplied skill guidance; no additional style overlay.",
+    "order": [
+      "prose",
+      "dashboard",
+      "selective",
+      "candidate_initial",
+      "candidate_final"
+    ],
+    "notes": "One request per entry, each with the same three independent cases. Candidate initial and final were follow-up checks; the first three formats and rubric were frozen before generation. Raw replies are unedited. No temperature or seed was set. Private auth/config copies were removed after each batch."
+  }
+}
