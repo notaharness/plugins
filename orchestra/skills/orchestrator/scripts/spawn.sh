@@ -169,11 +169,17 @@ dir_exists() {
   esac
 }
 
-# Resolve first: the session for (repo, branch) is whatever carries those tags, under any name.
+# Resolve first: the session for (repo, checkout) is whatever carries those tags, under any name,
+# whichever branch the checkout is on now. The checkout is its canonical path once it exists.
 # What already exists: a dead pane (resumable), a live placeholder from a failed launch
 # (reusable), a running player (refuse), or nothing (a name is chosen at creation).
+checkout=""
+if [ -z "$DIR" ]; then
+  checkout="$workdir"
+  if dir_exists; then checkout="$(r --cwd "$workdir" pwd -P)" && [ -n "$checkout" ] || { echo "spawn.sh: could not resolve the worktree $workdir on $(machine_label)" >&2; exit 1; }; fi
+fi
 EXISTING=none
-if name="$(find_player_session "$root" "$BRANCH")"; then      # before TMUX is unset: the same server ORCH_SOCK names
+if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
   if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
   elif [ "$(tag_get "$ORCH_SOCK" "$name" "$TAG_LAUNCHING")" = 1 ]; then EXISTING=placeholder
@@ -294,6 +300,10 @@ while IFS= read -r nm; do
 done < <(find . -maxdepth 4 -type d -name node_modules -not -path "./node_modules/*" -not -path "./.claude/*" -not -path "*/node_modules/*/node_modules" | sed "s#^\./##")'
   r --cwd "$root" bash -c "$nm_script" bash "$dir" || echo "spawn.sh: could not copy node_modules on $(machine_label)" >&2
 fi
+# The checkout's canonical path, resolved where it lives: the worktree session's identity tag.
+if [ -z "$DIR" ]; then
+  checkout="$(r --cwd "$workdir" pwd -P)" && [ -n "$checkout" ] || { echo "spawn.sh: could not resolve the worktree $workdir on $(machine_label)" >&2; exit 1; }
+fi
 r mkdir -p "$AGENT_TMUX_TMPDIR" || { echo "spawn.sh: could not create $AGENT_TMUX_TMPDIR on $(machine_label)" >&2; exit 1; }
 
 unset TMUX TMUX_PANE
@@ -323,7 +333,7 @@ if [ "$EXISTING" = none ]; then
   done
   CREATED=1
   tt="$(tmux_target "$name")"
-  tag "$TAG_SPAWNER" orchestra && tag "$TAG_REPO" "$root" && tag "$TAG_SESSION_TYPE" "$TYPE" && { [ -z "$BRANCH" ] || tag "$TAG_BRANCH" "$BRANCH"; } ||
+  tag "$TAG_SPAWNER" orchestra && tag "$TAG_REPO" "$root" && tag "$TAG_SESSION_TYPE" "$TYPE" && { [ -n "$DIR" ] || { tag "$TAG_BRANCH" "$BRANCH" && tag "$TAG_WORKTREE_PATH" "$checkout"; }; } ||
     { t kill-session -t "=$name" 2>/dev/null; echo "spawn.sh: could not tag session $name; removed" >&2; exit 1; }
 fi
 buf="$(prompt_buffer_name "$name")"

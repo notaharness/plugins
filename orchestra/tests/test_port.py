@@ -29,7 +29,7 @@ UUID = '0199a000-1111-7000-8000-000000000042'
 PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
-TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-orchestrator',
+TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path', '@orchestra-orchestrator',
         '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config',
         '@orchestra-claude-session']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
@@ -438,7 +438,9 @@ class PortTests(unittest.TestCase):
         self.run_cmd(['tmux', *pre, 'new-session', '-d', '-s', name])
         for k, v in (tags or {}).items(): self.run_cmd(['tmux', *pre, 'set-option', '-t', '='+name+':', k, v])
     def player_tags(self, repo=None, branch='feature/test', spawner='kirby'):
-        return {'@orchestra-spawner': spawner, '@orchestra-repo': str((repo or self.repo).resolve()), '@orchestra-session-type': 'worktree', '@orchestra-branch': branch}
+        root = (repo or self.repo).resolve()
+        return {'@orchestra-spawner': spawner, '@orchestra-repo': str(root), '@orchestra-session-type': 'worktree', '@orchestra-branch': branch,
+                '@orchestra-worktree-path': str(root/'.claude/worktrees'/branch.replace('/', '-'))}
     def sessions(self, *args): return json.loads(self.orch('sessions.sh', '--json', *args).stdout)
     # Environment of a process inside the player's pane: what spawn.sh injects through respawn-pane -e.
     def player_env(self, **extra):
@@ -470,7 +472,8 @@ class PortTests(unittest.TestCase):
         self.assertEqual(c['env']['TMUX_TMPDIR'], '/tmp/orchestra-agent-tmux'); self.assertIsNone(c['env']['TMUX'])
         self.assertEqual(self.state()[self.session]['options'], {
             'status': 'off', 'remain-on-exit': 'on', '@orchestra-agent': 'codex', '@orchestra-spawner': 'orchestra', '@orchestra-session-type': 'worktree',
-            '@orchestra-repo': str(self.repo.resolve()), '@orchestra-branch': 'feature/test', '@orchestra-orchestrator': 'codex:'+ID})
+            '@orchestra-repo': str(self.repo.resolve()), '@orchestra-branch': 'feature/test', '@orchestra-worktree-path': str(self.wt.resolve()),
+            '@orchestra-orchestrator': 'codex:'+ID})
         self.assertEqual(self.buffers(), {})            # the prompt buffer was consumed by the launcher
         self.assertIn('"orchestra-prompt-%s"' % self.session, self.tmux_log())
         self.assert_no_state_files()
@@ -605,7 +608,7 @@ class PortTests(unittest.TestCase):
         self.env['TEST_PANE_ALIVE'] = '1'
         self.spawn('--agent', 'codex')                                    # a worktree player, and a reviewer in its worktree
         self.dir_spawn(self.wt, '--agent', 'codex'); rev = 'feature-test-dir'
-        self.assertEqual(self.tag('@orchestra-session-type', rev), 'dir'); self.assertIsNone(self.tag('@orchestra-branch', rev))
+        self.assertEqual(self.tag('@orchestra-session-type', rev), 'dir'); self.assertIsNone(self.tag('@orchestra-branch', rev)); self.assertIsNone(self.tag('@orchestra-worktree-path', rev))
         self.dir_spawn(self.repo, '--agent', 'codex', prompt='review')     # one at the repo root
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], 'repo-dir')
         rows = {r['session']: r for r in self.sessions('--all')}
@@ -710,7 +713,7 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex'); calls = self.tmux_calls()
         i = next(i for i, c in enumerate(calls) if 'new-session' in c and self.session in c)
         self.assertIn('-d', calls[i])
-        required = {'@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch'}; seen = set()
+        required = {'@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path'}; seen = set()
         for c in calls[i+1:]:
             if not any(t in c for t in ('=%s' % self.session, '=%s:' % self.session)): continue
             if 'set-option' in c and c[-2].startswith('@orchestra-'): seen.add(c[-2]); continue
@@ -733,6 +736,17 @@ class PortTests(unittest.TestCase):
         s = self.state(); s['twin']['created'] = 0; self.set_state(s); self.clear_log()
         self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assertIn('"=twin:"', self.tmux_log())
         self.assertEqual(sorted(self.state()), [self.session, 'some-label', 'twin'])
+    def test_worktree_player_follows_its_checkout_across_a_branch_switch(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.run_cmd(['git', 'switch', '-q', '-c', 'feature/renamed'], cwd=self.wt)
+        rows = self.sessions('--repo', str(self.repo))
+        self.assertEqual([(r['session'], r['branch'], r['worktree']) for r in rows], [(self.session, 'feature/test', str(self.wt.resolve()))])
+        self.clear_log(); self.orch('send.sh', 'feature/renamed', '--repo', str(self.repo), 'hi'); self.assertIn('"=%s:"' % self.session, self.tmux_log())
+        x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)   # no checkout is on it now
+        self.assertIn('running', self.spawn(ok=False).stderr)                  # spawn finds it by its checkout, not by its branch tag
+        # another worktree on the original branch never claims the session
+        self.run_cmd(['git', 'worktree', 'add', '-q', str(self.base/'elsewhere'), 'feature/test'], cwd=self.repo)
+        x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)
     def test_resolve_by_branch_across_repos(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         repo2 = self.base/'other/repo'; self.git_init(repo2); self.spawn('--agent', 'codex', repo=repo2)
@@ -1566,6 +1580,7 @@ class PortTests(unittest.TestCase):
         rstate = self.remote_state()
         self.assertEqual(sorted(rstate), [rname], rstate)
         self.assertEqual(rstate[rname]['options']['@orchestra-branch'], 'feature/remote')
+        self.assertEqual(rstate[rname]['options']['@orchestra-worktree-path'], str((remote_repo/'.claude/worktrees/feature-remote').resolve()))
         self.assertEqual(rstate[rname]['options']['@orchestra-repo'], str(remote_repo.resolve()))
         self.assertTrue((remote_repo/'.claude/worktrees/feature-remote').is_dir())
         self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')

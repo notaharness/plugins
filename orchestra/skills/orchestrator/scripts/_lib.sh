@@ -145,12 +145,12 @@ free_session_name() {
 
 # --- Resolver: identity is the tags ------------------------------------------------------------
 # One list-sessions call gives every session with the fields the resolver needs, tab-separated:
-# name, session_created, session_path, spawner, repo, session-type, branch (tags expand to ""
+# name, session_created, session_path, spawner, repo, session-type, branch, worktree path (tags expand to ""
 # when unset; values never contain tabs). No tmux-side (-f) filter: matching is done here so the
 # same rules work on every tmux Kirby supports.
 TAB=$'\t'
 list_sessions_tagged() {
-  tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}" 2>/dev/null || true
+  tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_WORKTREE_PATH}" 2>/dev/null || true
 }
 # Player sessions = spawner set, repo set AND session-type worktree or dir, whoever created them
 # (Kirby's worktree sessions included). Same tab-separated fields as above. This is the one
@@ -161,34 +161,50 @@ player_sessions() {
 }
 all_player_sessions() { player_sessions | cut -f1; }
 is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
-# find_player_session <repo> <branch>: the session whose tags equal (repo, branch); a dir player,
-# the only kind without a branch, is (its directory, ""). With several (should not happen) the one
-# created first, the others named on stderr and left alone.
+# find_player_session <repo> [checkout]: the worktree session whose tags equal (repo, checkout),
+# the checkout canonical as spawn.sh tags it; with no checkout, the dir player of <repo> (its
+# directory). @orchestra-branch is never consulted: the checkout may have switched branch since.
+# With several (should not happen) the one created first, the others named on stderr and left alone.
 find_player_session() {
   local matches
-  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v branch="$2" '$5 == repo && $7 == branch' | sort -t "$TAB" -k2,2n)"
+  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="$2" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
+    '$5 == repo && (path == "" ? $6 == dir : $6 == wt && $8 == path)' | sort -t "$TAB" -k2,2n)"
   [ -n "$matches" ] || return 1
   if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
-    echo "warning: several sessions carry repo $1${2:+ branch $2}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
+    echo "warning: several sessions carry repo $1${2:+ checkout $2}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
   fi
   printf '%s\n' "$matches" | head -n1 | cut -f1
 }
+# players_on_branch <branch> [repo]: "name<TAB>repo", oldest first, of each worktree player (of
+# <repo> when given) whose checkout has <branch> checked out now, asked of git on ORCH_MACHINE.
+players_on_branch() {
+  local name repo path
+  while IFS="$TAB" read -r name repo path; do
+    [ "$(r --cwd "$path" git branch --show-current 2>/dev/null </dev/null)" = "$1" ] && printf '%s\t%s\n' "$name" "$repo"
+  done < <(player_sessions | sort -t "$TAB" -k2,2n |
+    awk -F "$TAB" -v wt="$SESSION_TYPE_WORKTREE" -v repo="${2:-}" '$6 == wt && $8 != "" && (repo == "" || $5 == repo) { print $1 FS $5 FS $8 }')
+  return 0
+}
 # resolve_session <arg>: an exact tmux name whose tags say it is a player (the only way to name a
-# dir player, which has no branch), else <arg> is a worktree player's branch:
-# in a repo (--repo or cwd) the player of (that repo, branch); outside one the unique player of
-# that branch across all repos, ambiguity listing the candidates. Never a foreign session.
+# dir player, which has no branch), else <arg> is the branch a worktree player's checkout is on:
+# in a repo (--repo or cwd) that repo's player (the oldest, if several claim it); outside one the
+# unique such player across all repos, ambiguity listing the candidates. Never a foreign session.
 resolve_session() {
   local arg="$1" root cand
   if is_player_session "$arg"; then printf %s "$arg"; return; fi
   if in_repo; then
     root="$(repo_root)"
-    find_player_session "$root" "$arg" && return
-    echo "resolve_session: no player session named $arg, and no player for branch $arg in $root on $(machine_label) (sessions.sh --all lists every repo's and, with more than one machine registered, every machine's; pass --repo, --machine, or the exact session name)" >&2; exit 1
+    cand="$(players_on_branch "$arg" "$root" | cut -f1)"
+    if [ -n "$cand" ]; then
+      [ "$(printf '%s\n' "$cand" | grep -c .)" -gt 1 ] && echo "warning: several sessions are on branch $arg in $root; using the oldest: $(printf '%s\n' "$cand" | tr '\n' ' ')" >&2
+      printf '%s\n' "$cand" | head -n1; return
+    fi
+    echo "resolve_session: no player session named $arg, and no player on branch $arg in $root on $(machine_label) (sessions.sh --all lists every repo's and, with more than one machine registered, every machine's; pass --repo, --machine, or the exact session name)" >&2; exit 1
   fi
-  cand="$(player_sessions | awk -F "$TAB" -v branch="$arg" '$7 == branch { print $1 "  (repo " $5 ")" }')"
+  cand="$(players_on_branch "$arg" | awk -F "$TAB" '{ print $1 "  (repo " $2 ")" }')"
   case "$(printf '%s\n' "$cand" | grep -c .)" in
     1) printf %s "${cand%%  (repo *}";;
-    0) echo "resolve_session: no player session named $arg and no player for branch $arg on $(machine_label)" >&2; exit 1;;
+    0) echo "resolve_session: no player session named $arg and no player on branch $arg on $(machine_label)" >&2; exit 1;;
     *) echo "resolve_session: branch $arg is ambiguous on $(machine_label); pass --repo or the exact session name. Session names are only unique per machine, so once several machines are in play also pass --machine:" >&2; printf '  %s\n' "$cand" >&2; exit 1;;
   esac
 }

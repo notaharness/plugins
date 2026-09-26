@@ -13,10 +13,11 @@
 # the cwd is inside a git repo; every player on the machine (--all) otherwise. --all adds a
 # REPO column (the @orchestra-repo tag value, cut to 40 characters like SESSION; --json has
 # both whole). SESSION is the tmux session name (a label, which every other script accepts);
-# BRANCH, AGENT, ORCHESTRATOR and LAST-REPORT come from the @orchestra-branch, -agent,
-# -orchestrator and -last-report tags (empty when unset). --json gives "session" and "name"
-# (both the tmux name), "repo", "branch", "state", "cmd", "quiet_s", "agent", "orchestrator",
-# "last_report" and "title". Everything comes from one tmux list-panes call.
+# BRANCH, AGENT, ORCHESTRATOR and LAST-REPORT come from the @orchestra-branch (the branch it was
+# spawned for), -agent, -orchestrator and -last-report tags (empty when unset). --json gives
+# "session" and "name" (both the tmux name), "repo", "branch", "worktree" (@orchestra-worktree-path,
+# the checkout that identifies a worktree player), "state", "cmd", "quiet_s", "agent",
+# "orchestrator", "last_report" and "title". Everything comes from one tmux list-panes call.
 #
 # QUIET is seconds since the pane last produced output (tmux window_activity), so one
 # tmux call covers every session. It cannot say *why* a session is idle — use screen.sh
@@ -42,7 +43,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --all) ALL=1;; --repo) ORCH_REPO="$2"; shift;;
   --machine) ORCH_MACHINE="$2"; EXPLICIT_MACHINE=1; shift;;
   --quiet) QUIET="$2"; shift;; --sample) SAMPLE="$2"; shift;; --json) JSON=1;;
-  -h|--help) sed -n '2,34p' "$0"; exit 0;;
+  -h|--help) sed -n '2,35p' "$0"; exit 0;;
   *) echo "sessions.sh: unknown argument $1" >&2; exit 0;; esac; shift; done
 command -v tmux >/dev/null || { echo "tmux is not installed"; exit 0; }
 require_valid_repo_for_machine || exit 0
@@ -100,7 +101,7 @@ fi
 
 # Fields are tab-separated (tag values never contain a tab; the title comes last so it may). A
 # whitespace IFS makes `read` collapse the empty fields of unset tags, so lines are split by hand.
-FORMAT="#{session_name}${TAB}#{pane_dead}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{$TAG_AGENT}${TAB}#{$TAG_ORCHESTRATOR}${TAB}#{$TAG_LAST_REPORT}${TAB}#{$TAG_REPO}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{pane_title}"
+FORMAT="#{session_name}${TAB}#{pane_dead}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{$TAG_AGENT}${TAB}#{$TAG_ORCHESTRATOR}${TAB}#{$TAG_LAST_REPORT}${TAB}#{$TAG_REPO}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_WORKTREE_PATH}${TAB}#{pane_title}"
 split_tabs() {
   local line="$1"; F=()
   while case "$line" in *"$TAB"*) true;; *) false;; esac; do F+=("${line%%"$TAB"*}"); line="${line#*"$TAB"}"; done
@@ -118,8 +119,8 @@ for machine_iter in "${MACHINES[@]}"; do
   machine_disp="${MACHINE_LABEL[$machine_iter]:-$machine_iter}"
   while IFS= read -r line; do
     split_tabs "$line"; set -- "${F[@]}"
-    name="${1:-}"; dead="${2:-}"; cmd="${3:-}"; activity="${4:-}"; agent="${5:-}"; orch="${6:-}"; last="${7:-}"; tag_repo="${8:-}"; branch="${9:-}"; spawner="${10:-}"; type="${11:-}"
-    title="$(IFS="$TAB"; printf '%s' "${*:12}")"      # the last field may itself contain tabs
+    name="${1:-}"; dead="${2:-}"; cmd="${3:-}"; activity="${4:-}"; agent="${5:-}"; orch="${6:-}"; last="${7:-}"; tag_repo="${8:-}"; branch="${9:-}"; spawner="${10:-}"; type="${11:-}"; worktree="${12:-}"
+    title="$(IFS="$TAB"; printf '%s' "${*:13}")"      # the last field may itself contain tabs
     in_scope "$spawner" "$type" "$tag_repo" || continue
     rows=$((rows+1))
     quiet=$(( now - ${activity:-$now} )); [ $quiet -lt 0 ] && quiet=0
@@ -132,11 +133,11 @@ for machine_iter in "${MACHINES[@]}"; do
     if [ $JSON = 1 ]; then
       [ $first = 1 ] || printf ','; first=0
       if [ $MULTI_MACHINE = 1 ]; then
-        printf '{"session":%s,"name":%s,"machine":%s,"repo":%s,"branch":%s,"state":%s,"cmd":%s,"quiet_s":%s,"agent":%s,"orchestrator":%s,"last_report":%s,"title":%s}' \
-          "$(json_str "$name")" "$(json_str "$name")" "$(json_str "$machine_disp")" "$(json_str "$repo")" "$(json_str "$branch")" "$(json_str "$state")" "$(json_str "$cmd")" "$quiet" "$(json_str "$agent")" "$(json_str "$orch")" "$(json_str "$last")" "$(json_str "$title")"
+        printf '{"session":%s,"name":%s,"machine":%s,"repo":%s,"branch":%s,"worktree":%s,"state":%s,"cmd":%s,"quiet_s":%s,"agent":%s,"orchestrator":%s,"last_report":%s,"title":%s}' \
+          "$(json_str "$name")" "$(json_str "$name")" "$(json_str "$machine_disp")" "$(json_str "$repo")" "$(json_str "$branch")" "$(json_str "$worktree")" "$(json_str "$state")" "$(json_str "$cmd")" "$quiet" "$(json_str "$agent")" "$(json_str "$orch")" "$(json_str "$last")" "$(json_str "$title")"
       else
-        printf '{"session":%s,"name":%s,"repo":%s,"branch":%s,"state":%s,"cmd":%s,"quiet_s":%s,"agent":%s,"orchestrator":%s,"last_report":%s,"title":%s}' \
-          "$(json_str "$name")" "$(json_str "$name")" "$(json_str "$repo")" "$(json_str "$branch")" "$(json_str "$state")" "$(json_str "$cmd")" "$quiet" "$(json_str "$agent")" "$(json_str "$orch")" "$(json_str "$last")" "$(json_str "$title")"
+        printf '{"session":%s,"name":%s,"repo":%s,"branch":%s,"worktree":%s,"state":%s,"cmd":%s,"quiet_s":%s,"agent":%s,"orchestrator":%s,"last_report":%s,"title":%s}' \
+          "$(json_str "$name")" "$(json_str "$name")" "$(json_str "$repo")" "$(json_str "$branch")" "$(json_str "$worktree")" "$(json_str "$state")" "$(json_str "$cmd")" "$quiet" "$(json_str "$agent")" "$(json_str "$orch")" "$(json_str "$last")" "$(json_str "$title")"
       fi
     elif [ $MULTI_MACHINE = 1 ]; then
       [ $rows = 1 ] && printf '%-5s %6s  %-16s %-40s %-40s %-32s %-8s %-42s %-26s %s\n' STATE QUIET MACHINE REPO SESSION BRANCH AGENT ORCHESTRATOR LAST-REPORT TITLE

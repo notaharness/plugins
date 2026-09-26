@@ -28,8 +28,9 @@ than recreating their routing and session logic.
 - Group related work into one branch/PR per worktree player; avoid overlapping edits.
   `spawn.sh --dir PATH` instead uses an existing directory without creating a branch or worktree.
   Keep such players out of directories another player is changing.
-- `--repo PATH` selects the repo when outside it. Address players by branch within that repo,
-  or by the exact SESSION from `sessions.sh`; dir players have only a session name.
+- `--repo PATH` selects the repo when outside it. Address players by the branch their worktree
+  has checked out within that repo, or by the exact SESSION from `sessions.sh`; dir players have
+  only a session name.
   Names are labels, unique only per machine. Tags identify the player; preserve
   `.claude/worktrees/` locations and never act on untagged sessions.
 - Use `--machine NAME` to disambiguate machines. Its default is `$ORCHESTRA_MACHINE`, else local.
