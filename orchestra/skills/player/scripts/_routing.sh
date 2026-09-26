@@ -11,7 +11,8 @@
 TAG_SPAWNER=@orchestra-spawner            # kirby | orchestra: whichever program created the session
 TAG_REPO=@orchestra-repo                  # main checkout, absolute and symlink-resolved; a dir player's directory
 TAG_SESSION_TYPE=@orchestra-session-type  # worktree | dir (players) | shell | agent (Kirby's terminal tabs)
-TAG_BRANCH=@orchestra-branch              # worktree sessions only: the branch, unsanitized (feature/x)
+TAG_BRANCH=@orchestra-branch              # worktree sessions only: the branch spawned for, unsanitized (feature/x)
+TAG_WORKTREE_PATH=@orchestra-worktree-path  # worktree sessions only: the checkout, symlink-resolved; the identity
 TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: claude:<uuid> | codex:<uuid> | tmux:<session>
 TAG_ORCH_CONFIG=@orchestra-orchestrator-config    # claude:<uuid> targets only: the orchestrator's Claude config dir
 TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | opencode | custom

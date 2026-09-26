@@ -73,6 +73,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-repo` | absolute, symlink-resolved path of the main checkout; for a dir player, of its directory, which need not be a repo |
 | `@orchestra-session-type` | `worktree` or `dir` for a player; `shell`/`agent` are Kirby terminal tabs, never players |
 | `@orchestra-branch` | worktree players only: the branch the session was spawned under, unsanitized (`feature/x`) |
+| `@orchestra-worktree-path` | worktree players only: the checkout's canonical (symlink-resolved) path. A worktree player is found by this path, not by its branch, so it stays the same player after a `git switch` |
 | `@orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
 | `@orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
@@ -80,7 +81,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 
-The first four tags (three for a dir player, which has no branch) are a session's identity,
+The first five tags (three for a dir player, which has no branch or worktree) are a session's identity,
 written once when it is created; the name is only a label. The pane environment carries
 `ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET` (the tmux server socket that holds the
 session; the player's own tmux environment is redirected to a scratch server), `ORCHESTRA_MODE`,
