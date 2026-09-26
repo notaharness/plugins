@@ -171,6 +171,11 @@ player has no branch, so use its session name (`<directory>-dir`). A repository'
 `sessions.sh` lists a dir player only when its directory is that repository's main checkout;
 use `--all` to see the rest.
 
+`send.sh` submits Codex messages through the TUI with a bracketed paste and Enter.
+An idle prompt starts a turn; a busy Codex receives the input with its normal steering behavior.
+Inspect the pane first and leave its composer empty so the message cannot append to a draft.
+Claude inbox delivery and thread-addressed reports still use their respective queues.
+
 ### Resume a player
 
 ```bash

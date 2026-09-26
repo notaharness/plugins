@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Send a player a message — answer a question, add a follow-up, nudge. Text is prefixed
-# "[orchestrator] " so the player knows it is not the user speaking. It is queued, never typed
-# over the player's prompt, where the player's agent has a queue: a Claude Code player's inbox
-# socket, or `codex queue` for a Codex player whose thread is discoverable; any other player, or
-# one on another machine, gets it pasted and submitted (deliver_to_pane in _routing.sh has the
-# rules). --raw sends text verbatim as a paste (a menu choice like "1" or "y"), --key a keypress
-# and --type literal keystrokes, always into the pane: a menu or a slash command is for the TUI.
+# "[orchestrator] " so the player knows it is not the user speaking. Claude Code uses its inbox
+# socket when available. Codex receives a bracketed paste and Enter through its TUI, so an idle
+# prompt starts a turn without relying on an external queue draining. While busy, Codex applies
+# its normal Enter/steering behavior. Inspect the pane first: text is appended to any draft.
+# Other players use the shared delivery routes. --raw sends text verbatim as a paste (a menu
+# choice like "1" or "y"), --key a keypress and --type literal keystrokes, always into the pane.
 #
 # Usage: send.sh <session> [--repo <path>] [--machine NAME] <text…>
 #        send.sh <session> [--repo <path>] [--machine NAME] --raw <text…>
@@ -42,5 +42,11 @@ fi
 # Which agent is at the terminal decides the route; a shell there still gets the paste, as a
 # nudge to a pane whose agent has exited always has.
 pane_owned_by_agent "" "$target" || :
+if [ "$PANE_AGENT" = codex ]; then
+  # End at a blank line so a trailing $skill or @path does not leave a completion
+  # popup consuming Enter. Codex trims this trailing newline when submitting.
+  paste_into "$target" "[orchestrator] $*"$'\n' || { echo "send.sh: $DELIVER_REASON" >&2; exit 1; }
+  echo "sent to $target (paste)"; exit
+fi
 deliver_to_pane "" "$target" "[orchestrator] $*" || { echo "send.sh: $DELIVER_REASON" >&2; exit 1; }
 echo "sent to $target ($DELIVER_ROUTE)"

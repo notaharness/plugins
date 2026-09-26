@@ -1249,19 +1249,34 @@ class PortTests(unittest.TestCase):
             time.sleep(0.02)
         self.env.update(TEST_PANE_COMMAND='codex', TEST_PANE_PID=str(proc.pid))
         return home
-    def test_send_and_adopt_queue_to_a_codex_player_by_its_thread(self):
+    def test_send_submits_to_codex_tui_and_adopt_uses_its_queue(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         home = self.fake_codex(); self.clear_log(); n = len(self.calls())
-        x = self.orch('send.sh', self.session, 'try the other flag')
-        self.assertEqual(x.stdout, 'sent to %s (queue)\n' % self.session)
-        c = self.calls()[-1]
-        self.assertEqual(c['args'], ['queue', '--thread', self.THREAD, '--message', '[orchestrator] try the other flag'])
-        self.assertEqual(c['env']['CODEX_HOME'], str(home))                 # the TUI's own CODEX_HOME, from the rollout path
+        x = self.orch('send.sh', self.session, 'try the other flag\nthen verify')
+        self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session)
+        self.assertEqual(len(self.calls()), n)  # no external queue, even with a discoverable thread
+        self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] try the other flag\nthen verify\n')
+        self.assertIn('paste-buffer', self.tmux_log())
+        self.assertIn('"Enter"', self.tmux_log())
+        self.clear_log()
         x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:new-parent', 'Next', 'task')
         self.assertTrue(x.stdout.rstrip().endswith('via queue'), x.stdout)
         self.assertEqual(self.calls()[-1]['args'], ['queue', '--thread', self.THREAD, '--message', '$player Next task'])
-        self.assertEqual(len(self.calls()), n+2)
+        self.assertEqual(self.calls()[-1]['env']['CODEX_HOME'], str(home))
+        self.assertEqual(len(self.calls()), n+1)
         for cmd in ('load-buffer', 'paste-buffer', 'send-keys'): self.assertNotIn(cmd, self.tmux_log())
+    def test_codex_tui_delivery_failure_never_falls_back_to_queue(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.fake_codex(); n = len(self.calls())
+        for failure, reason in (('TEST_PASTE_FAIL', 'could not paste'), ('TEST_SEND_KEYS_FAIL', 'paste succeeded, inspect before retrying')):
+            self.env[failure] = '1'
+            x = self.orch('send.sh', self.session, 'once only', ok=False)
+            self.assertNotEqual(x.returncode, 0)
+            self.assertIn(reason, x.stderr)
+            self.assertEqual(len(self.calls()), n)
+            self.assertEqual(self.buffers(), {})
+            self.env.pop(failure)
+
     def test_report_to_a_codex_orchestrator_in_tmux_queues(self):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')
         self.fake_codex(); self.clear_log()
@@ -1276,7 +1291,7 @@ class PortTests(unittest.TestCase):
         x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p')
         self.assertTrue(x.stdout.rstrip().endswith('via keys'), x.stdout); self.assertIn('"-l", "$player"]', self.tmux_log())
         self.fake_codex(); self.env['TEST_CODEX_EXIT'] = '1'; self.clear_log()
-        x = self.orch('send.sh', self.session, 'refused', ok=False)
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p', 'refused', ok=False)
         self.assertEqual(x.returncode, 1); self.assertIn('codex queue refused the message for thread '+self.THREAD, x.stderr)
         self.assertNotIn('paste-buffer', self.tmux_log())
     def test_adopt_types_the_invocation_for_claude_even_with_a_live_inbox(self):

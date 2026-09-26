@@ -71,7 +71,7 @@ checks after adequate evidence unless a new change or unresolved concern warrant
 | --- | --- |
 | `sessions.sh --all [--json]` | Inventory; without `--all`, limit to the current or `--repo` repo. Busy/idle/dead is an activity heuristic; `--sample 4` compares panes, but timers can look busy. |
 | `screen.sh SESSION [--history 200]` | Read the pane, including a dead pane's last output. |
-| `send.sh SESSION TEXT` | Send an orchestrator-prefixed message through inbox/queue where supported, otherwise paste. Inspect the pane first; `--raw` is for menus, `--key Escape` sends a key. Claude skill/slash invocations must be typed, not sent as inbox text. |
+| `send.sh SESSION TEXT` | Send an orchestrator-prefixed message; Claude uses its inbox, Codex uses paste and Enter (steering when busy). Inspect the pane first and leave the composer empty; `--raw` is for menus, `--key Escape` sends a key. Claude skill/slash invocations must be typed, not sent as inbox text. |
 | `adopt.sh SESSION [--orchestrator T] [--agent codex]` | Adopt an idle agent at its prompt; bare shells and dead panes are refused. Types the player invocation (queues for discoverable Codex threads). No task means handoff and a summary/repeated DONE; appended text assigns new work. An absent agent tag defaults to Claude. |
 | `kill.sh SESSION` | Stop an authorized, identified player; branch/worktree cleanup is separate. Sessions otherwise outlive this conversation. |
 
