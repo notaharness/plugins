@@ -143,6 +143,28 @@ acknowledgment. Use **Decision** for a request and **FYI** for a brief notice wh
 help scanning; omit reports that change nothing the user would do. Resolve the current task
 before offering optional improvements.
 
+### Output style
+
+Make replies easy to pick up after an interruption. Lead with the answer, result or actionable
+choice, with its essential context. Keep the reason, relevant check and main consequence beside
+the choice; put supporting detail afterwards. Prefer short connected paragraphs with one
+purpose each. Choose length by what the user needs to act, not a word quota.
+
+Use familiar, direct language while preserving precise technical terms the user knows. Cut
+repetition and ceremony before cutting context; compressed fragments, invented abbreviations
+and strings of arrows make the reader reconstruct the meaning.
+
+Use formatting where it makes information easier to find:
+
+- Bullets for parallel items; numbers for steps. Keep lists shallow.
+- Descriptive headings for longer replies with distinct parts; a brief answer needs none.
+- Sparse bold for the decision or result, inline code for exact identifiers and examples.
+- Tables for short comparisons that fit the terminal. Prefer labeled lines when paths or
+  sentences would wrap; don't rely on color or icons to carry status.
+
+Put checkpoint recovery details after the decision context, sharing common fields once.
+Adapt these defaults to the user's stated preferences.
+
 ### Checkpoints and recovery state
 
 Ordinary replies stay focused. A status request or an actual player lifecycle change (spawn,
