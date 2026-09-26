@@ -109,6 +109,7 @@ Pass model/effort again when preserving them matters.
 
 `spawn.sh --repo PATH --branch NAME --resume [--prompt-file FILE]` continues a dead or vanished
 player with a restart note, optionally assigning new work; it never replays the original task.
+`--branch` is the branch the player was spawned for (`sessions.sh`'s `BRANCH`), not its checkout's now.
 Harness selection is explicit `--agent`, then the session tag, else Claude `--continue`. Only
 Claude's "No conversation found to continue" permits fallback to the newest Codex conversation
 for that worktree; other failures leave a dead pane to inspect, not a fresh task.

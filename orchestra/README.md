@@ -179,7 +179,8 @@ spawn.sh --repo PATH --branch feature/search --resume --prompt "Next, add keyboa
 ```
 
 The player continues its previous conversation in the same worktree, with a note that it was
-restarted. `--prompt` or `--prompt-file` gives it a new message; the original task is not sent
+restarted. `--branch` is the branch the player was spawned for (the `BRANCH` column of
+`sessions.sh`), not the one its checkout has now. `--prompt` or `--prompt-file` gives it a new message; the original task is not sent
 again. It uses the CLI the player last ran unless you pass `--agent`. When that is unknown
 because the session is gone, it tries Claude, and a Codex conversation only when Claude has
 none to continue; a dir player needs `--agent codex` to resume a Codex conversation. If

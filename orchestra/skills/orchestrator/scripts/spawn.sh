@@ -272,15 +272,15 @@ esac
 # machine's filesystem); a remote machine has no shell of its own to `cd` for, so `g` and `r`
 # carry an explicit --cwd/-C instead (see _lib.sh; D12 — no "$(id -u)", no "~" left for a shell).
 # A dir player has nothing to create: its directory is used as it is. An existing worktree must be
-# on --branch unless a session was found for it: that session owns the checkout, whatever branch
-# the checkout has switched to since.
+# on --branch, except on --resume: the directory --branch derives is then the player's checkout,
+# whatever branch it has switched to since.
 if [ -n "$DIR" ]; then :
 elif is_local_machine; then
   cd "$root" || exit 1
   if dir_exists; then
-    [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] &&
-    { [ "$EXISTING" != none ] || [ "$(git -C "$dir" branch --show-current)" = "$BRANCH" ]; } || {
-      echo 'spawn.sh: existing worktree does not match requested branch' >&2; exit 1;
+    on="$(git -C "$dir" branch --show-current)"
+    [ "$(git -C "$dir" rev-parse --show-toplevel)" = "$root/$dir" ] && { [ $RESUME = 1 ] || [ "$on" = "$BRANCH" ]; } || {
+      echo "spawn.sh: existing worktree does not match requested branch${on:+; $root/$dir is on $on}" >&2; exit 1;
     }
   else
     # New branch from FROM; if the branch already exists, check it out instead.
@@ -288,9 +288,9 @@ elif is_local_machine; then
   fi
 else
   if dir_exists; then
-    [ "$(r --cwd "$root/$dir" git rev-parse --show-toplevel)" = "$root/$dir" ] &&
-    { [ "$EXISTING" != none ] || [ "$(r --cwd "$root/$dir" git branch --show-current)" = "$BRANCH" ]; } || {
-      echo "spawn.sh: existing worktree does not match requested branch on $ORCH_MACHINE" >&2; exit 1;
+    on="$(r --cwd "$root/$dir" git branch --show-current)"
+    [ "$(r --cwd "$root/$dir" git rev-parse --show-toplevel)" = "$root/$dir" ] && { [ $RESUME = 1 ] || [ "$on" = "$BRANCH" ]; } || {
+      echo "spawn.sh: existing worktree does not match requested branch on $ORCH_MACHINE${on:+; $root/$dir is on $on}" >&2; exit 1;
     }
   else
     r --cwd "$root" git worktree add -b "$BRANCH" "$dir" "$FROM" 2>/dev/null ||

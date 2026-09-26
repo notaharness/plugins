@@ -747,6 +747,10 @@ class PortTests(unittest.TestCase):
         self.assertIn('running', x.stderr); self.assertIn('which is now on feature/renamed', x.stderr)
         self.kill_pane(); self.spawn('--resume', '--agent', 'claude', prompt=False)   # and resumes it in the switched checkout
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session); self.assertEqual(sorted(self.state()), [self.session])
+        s = self.state(); s[self.session]['options']['@orchestra-launching'] = '1'; self.set_state(s)   # a placeholder never starts a fresh task in a switched checkout
+        x = self.spawn(ok=False); self.assertIn('does not match requested branch', x.stderr); self.assertIn('is on feature/renamed', x.stderr)
+        self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)   # nor does a vanished session block resuming it
+        self.assertEqual(self.tag('@orchestra-worktree-path'), str(self.wt.resolve()))
         # another worktree on the original branch never claims the session
         self.run_cmd(['git', 'worktree', 'add', '-q', str(self.base/'elsewhere'), 'feature/test'], cwd=self.repo)
         x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)
