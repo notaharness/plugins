@@ -460,7 +460,7 @@ class PortTests(unittest.TestCase):
     # --- fresh launches -------------------------------------------------------------
     def test_codex_spawn_prompt_and_isolation(self):
         self.spawn('--agent', 'codex'); c = self.calls()[-1]
-        self.assertEqual(c['args'][:4], ['-m', 'gpt-6-astra', '-c', 'model_reasoning_effort="medium"'])
+        self.assertEqual(c['args'][:4], ['-m', 'gpt-6-sol', '-c', 'model_reasoning_effort="medium"'])
         self.assertTrue(c['args'][-1].startswith('$player Task with $player,'), c['args'][-1])
         self.assertIn('$(touch BAD)', c['args'][-1]); self.assertTrue(c['args'][-1].endswith('\na newline END-OF-TASK')); self.assertFalse((self.wt/'BAD').exists())
         self.assertNotIn('reporting target', c['args'][-1])
@@ -518,6 +518,12 @@ class PortTests(unittest.TestCase):
     def test_codex_launch_leaves_claude_config_alone(self):
         cfg = self.claude_config({}); before = cfg.read_bytes()
         self.spawn('--agent', 'codex'); self.assertEqual(cfg.read_bytes(), before); self.assertNotIn('--strict-mcp-config', self.calls()[-1]['args'])
+    def test_codex_gpt6_models_default_medium_effort(self):
+        self.spawn('--agent', 'codex', '--model', 'gpt-6-astra')
+        self.assertEqual(self.calls()[-1]['args'][:4], ['-m', 'gpt-6-astra', '-c', 'model_reasoning_effort="medium"'])
+    def test_codex_other_models_default_high_effort(self):
+        self.spawn('--agent', 'codex', '--model', 'gpt-5.6-sol')
+        self.assertEqual(self.calls()[-1]['args'][:4], ['-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="high"'])
     def test_sol_override(self):
         self.spawn('--agent', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'xhigh'); self.assertEqual(self.calls()[-1]['args'][3], 'model_reasoning_effort="xhigh"')
     def test_custom_harness_tag(self):

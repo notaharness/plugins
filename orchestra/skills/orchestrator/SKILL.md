@@ -48,7 +48,7 @@ model effort to fit the work, respecting explicit user choices.
 
 ```
 spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent codex
-spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent claude --model fable --effort high
+spawn.sh --repo PATH --branch feature/name --prompt-file FILE --agent claude --model opus --effort high
 spawn.sh --dir PATH --prompt-file FILE --agent claude
 ```
 
@@ -94,13 +94,14 @@ when inspecting identity or launch metadata.
 
 | Harness | Selection | Default effort |
 | --- | --- | --- |
-| Claude Code default | `opus` | `high` |
-| Claude Code advanced/debugging | `fable` | `high` |
-| Codex default | `gpt-6-astra` | `medium` |
-| Codex alternative | `gpt-5.6-sol` | `high` |
+| Claude Code default, for all work | `opus` | `high` |
+| Claude Code alternative | `fable` | `high` |
+| Codex default | `gpt-6-sol` | `medium` |
+| Codex alternative | `gpt-6-astra` | `medium` |
 
-Fresh launches accept `--model` and `--effort` overrides; other Codex model IDs pass through with
-high effort. The CLI governs available effort values (`low`, `medium`, `high`, `xhigh`, `max`).
+Fresh launches accept `--model` and `--effort` overrides; every `gpt-6-*` model gets medium
+effort and other Codex model IDs pass through with high effort. `gpt-6-sol` needs Codex CLI
+0.157 or later. The CLI governs available effort values (`low`, `medium`, `high`, `xhigh`, `max`).
 Do not silently substitute a model. On resume no settings are added unless explicit: Claude
 continues its conversation settings; Codex uses its configured default model and logs a change.
 Pass model/effort again when preserving them matters.
