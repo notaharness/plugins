@@ -779,6 +779,24 @@ class PortTests(unittest.TestCase):
             self.assertNotEqual(self.orch('kill.sh', name, ok=False).returncode, 0)
             self.assertNotEqual(self.orch('adopt.sh', name, '--orchestrator', 'tmux:p', ok=False).returncode, 0)
         self.assertNotIn('kill-session', self.tmux_log()); self.assertNotIn('send-keys', self.tmux_log()); self.assertEqual(self.state(), before)
+    def test_kill_preserves_worktree_files_and_branch_until_explicit_cleanup(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        artifact = self.wt/'dev-server-output.txt'; artifact.write_text('keep this output')
+        head = self.run_cmd(['git', 'rev-parse', 'HEAD'], cwd=self.wt).stdout
+        self.orch('kill.sh', self.session)
+        self.assertNotIn(self.session, self.state())
+        self.assertEqual(artifact.read_text(), 'keep this output')
+        self.assertEqual(self.run_cmd(['git', 'rev-parse', 'feature/test']).stdout, head)
+        self.assertIn(str(self.wt), self.run_cmd(['git', 'worktree', 'list', '--porcelain']).stdout)
+        # Cleanup is separate and Git's normal dirty-worktree protection still applies.
+        refused = self.run_cmd(['git', 'worktree', 'remove', str(self.wt)], ok=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertTrue(artifact.exists())
+        artifact.unlink()
+        self.run_cmd(['git', 'worktree', 'remove', str(self.wt)])
+        self.assertFalse(self.wt.exists())
+        self.run_cmd(['git', 'branch', '-d', 'feature/test'])
+
     def test_kill_reports_a_refused_kill(self):
         self.spawn('--agent', 'codex'); self.env['TEST_KILL_FAIL'] = '1'
         x = self.orch('kill.sh', self.session, ok=False); self.assertNotEqual(x.returncode, 0); self.assertIn('could not kill', x.stderr); self.assertNotIn('killed', x.stdout)

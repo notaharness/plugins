@@ -119,6 +119,23 @@ so it cannot resume after that session/tag is lost; Codex uses the directory's n
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.
 
+## Merge and cleanup
+
+Merging and retiring a player are separate operations. While a player or its dev server is
+still running, merge an authorized PR with `gh pr merge NUMBER --squash --delete-branch=false`
+(or the authorized merge strategy). `--delete-branch` can remove the local worktree as well as
+the branch, taking a running server's working directory away. Keep the worktree until its
+consumers are done.
+
+For authorized cleanup, record the exact session, repo, worktree path and checked-out branch
+before killing the session; killing it discards its tags. Inspect `git worktree list` and
+`git -C WORKTREE status --short`, and account for dir players or other processes using the same
+checkout. Stop its dev servers and stop each player with `kill.sh SESSION`, then run
+`git -C REPO worktree remove WORKTREE` from a surviving checkout. Remove the local branch with
+`git -C REPO branch -d BRANCH` only when it is safe to delete. `kill.sh` itself preserves files
+and branches. A dirty worktree or an unmerged-branch refusal needs inspection; do not turn a
+cleanup refusal into `--force` or `-D` automatically (squash merges may trigger the latter).
+
 ## The user's attention
 
 Carry the remembering, prioritising and context reconstruction so the user can spend attention

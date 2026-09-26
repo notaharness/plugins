@@ -86,8 +86,14 @@ Detach with **Ctrl+B, then D**. Ctrl+C interrupts the player's agent.
 Worktrees live in the repository's `.claude/worktrees/` directory, named after the branch
 with `/` replaced by `-`: branch `feature/search` gets `.claude/worktrees/feature-search`.
 A new worktree gets a copy of the main checkout's `node_modules` (reflinked where the
-filesystem allows). Stopping a player leaves its branch and worktree in place; remove them
-with `git worktree remove` once the PR is merged.
+filesystem allows). Stopping a player leaves its branch and worktree in place.
+
+While a player or its dev server still uses the checkout, merge with
+`gh pr merge NUMBER --squash --delete-branch=false` (or your chosen merge strategy).
+`--delete-branch` can also remove the local worktree, breaking running dev servers.
+Retire players separately: record their paths/branches, stop their servers and tmux sessions, inspect the worktree for
+uncommitted files, then use `git worktree remove` from a surviving checkout and `git branch -d`
+when safe. See [Merge and cleanup](skills/orchestrator/SKILL.md#merge-and-cleanup).
 
 Keep a dir player out of a directory another player is changing.
 
