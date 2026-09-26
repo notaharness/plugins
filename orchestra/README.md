@@ -167,7 +167,8 @@ repository and `--machine NAME` to act on another machine.
 
 `SESSION` is the branch the player's worktree has checked out, or its tmux session name, as
 shown by `sessions.sh`. A player stays tied to its worktree when it switches branch. A dir
-player has no branch, so use its session name (`<directory>-dir`). A repository's
+player has no branch, so use its session name (`<directory>-dir`, then `-2`, `-3`, and so on when taken).
+Several dir players can share a directory; give each its own task. A repository's
 `sessions.sh` lists a dir player only when its directory is that repository's main checkout;
 use `--all` to see the rest.
 
@@ -185,6 +186,9 @@ again. It uses the CLI the player last ran unless you pass `--agent`. When that 
 because the session is gone, it tries Claude, and a Codex conversation only when Claude has
 none to continue; a dir player needs `--agent codex` to resume a Codex conversation. If
 resuming fails, the pane stays open with the error.
+
+For dir players, `--dir PATH --resume` requires a unique session in that directory.
+When several exist, add `--session NAME` to select the exact player.
 
 ### Hand off a running player
 

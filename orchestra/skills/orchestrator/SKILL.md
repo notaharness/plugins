@@ -115,7 +115,8 @@ Claude's "No conversation found to continue" permits fallback to the newest Code
 for that worktree; other failures leave a dead pane to inspect, not a fresh task.
 
 `spawn.sh --dir PATH --resume` uses the exact `@orchestra-claude-session` for a Claude dir player,
-so it cannot resume after that session/tag is lost; Codex uses the directory's newest conversation.
+so it cannot resume after that session/tag is lost. If several dir players share the directory,
+add `--session NAME` to select one; Codex uses the directory's newest conversation.
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.
 

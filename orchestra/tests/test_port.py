@@ -597,13 +597,37 @@ class PortTests(unittest.TestCase):
             '@orchestra-session-type': 'dir', '@orchestra-repo': real, '@orchestra-orchestrator': 'codex:'+ID})
         self.assertEqual(sorted(p.name for p in d.iterdir()), [])      # no worktree, no .claude, nothing written there
         s = self.state(); s['notes-dir']['dead'] = 0; self.set_state(s)
-        self.assertIn('running: notes-dir', self.dir_spawn(d, ok=False).stderr)
+        self.assertIn('running: notes-dir', self.dir_spawn(d, '--resume', ok=False).stderr)
         for extra in (('--branch', 'feature/x'), ('--repo', str(self.repo)), ('--from', 'HEAD')):
             x = self.dir_spawn(d, *extra, ok=False); self.assertEqual(x.returncode, 2, extra); self.assertIn('--dir', x.stderr)
         n = len(self.tmux_calls())
         x = self.dir_spawn(self.base/'missing', ok=False); self.assertEqual(x.returncode, 1); self.assertIn('missing', x.stderr)
         self.assertEqual([c for c in self.tmux_calls()[n:] if 'new-session' in c], [])
         self.assertEqual(self.lib('session_label "$1" dir', '/x/my.dir'), 'my-dir-dir')
+    def test_multiple_dir_players_have_unique_labels_and_explicit_resume(self):
+        d = self.notes_dir()
+        self.dir_spawn(d, '--agent', 'claude')
+        first = self.state()['notes-dir']
+        self.dir_spawn(d, '--agent', 'claude')
+        self.assertEqual(self.state()['notes-dir'], first)
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], 'notes-dir-2')
+        self.assertEqual(self.tag('@orchestra-repo', 'notes-dir-2'), str(d.resolve()))
+        self.assertEqual(self.tag('@orchestra-session-type', 'notes-dir-2'), 'dir')
+        self.assertIsNone(self.tag('@orchestra-branch', 'notes-dir-2'))
+        pin = self.tag('@orchestra-claude-session', 'notes-dir-2')
+        n = len(self.calls())
+        x = self.dir_spawn(d, '--resume', ok=False, prompt=False)
+        self.assertIn('--session', x.stderr)
+        self.assertIn('notes-dir-2', x.stderr)
+        self.assertEqual(len(self.calls()), n)
+        for name in ('missing', self.session):
+            self.dir_spawn(d, '--resume', '--session', name, ok=False, prompt=False)
+        self.dir_spawn(d, '--session', 'notes-dir', ok=False)
+        self.dir_spawn(d, '--resume', '--session', 'notes-dir-2', prompt=False)
+        self.assertEqual(self.calls()[-1]['args'][:2], ['--resume', pin])
+        self.assertEqual(self.state()['notes-dir'], first)
+        self.assertEqual(list(d.iterdir()), [])
+
     def test_dir_player_is_addressed_by_its_session_name(self):
         self.env['TEST_PANE_ALIVE'] = '1'
         self.spawn('--agent', 'codex')                                    # a worktree player, and a reviewer in its worktree
@@ -624,7 +648,7 @@ class PortTests(unittest.TestCase):
         for args in (('send.sh', rev, 'hi'), ('screen.sh', rev), ('adopt.sh', rev, '--orchestrator', 'tmux:new-parent')):
             self.clear_log(); self.orch(*args, cwd=self.base); self.assertIn('"=%s:"' % rev, self.tmux_log(), args)
         self.assertEqual(self.tag('@orchestra-orchestrator', rev), 'tmux:new-parent')
-        self.assertIn('running: %s' % rev, self.dir_spawn(self.wt, ok=False).stderr)                           # found by its tags
+        self.assertIn('running: %s' % rev, self.dir_spawn(self.wt, '--resume', ok=False).stderr)                           # found by its tags
         self.assertIn('running: %s' % self.session, self.spawn(ok=False).stderr)
         self.orch('kill.sh', rev, cwd=self.base); self.assertEqual(sorted(self.state()), sorted([self.session, 'repo-dir']))
     def test_a_slash_free_branch_never_resolves_to_the_reviewer_in_its_worktree(self):

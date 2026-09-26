@@ -327,6 +327,16 @@ check "adopt.sh by session name" "bash '$O/adopt.sh' '$SD' --orchestrator tmux:p
 tm send-keys -t "=$SD:" C-d; sleep 0.8
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; rc=$?; sleep 1
 check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
+# A second live player in the same directory gets its own label and conversation.
+bash "$O/spawn.sh" --dir "$DP" --prompt "review independently" --agent claude --orchestrator tmux:parent >"$T/spawn-dir2.out" 2>&1; rc=$?
+sleep 1
+check "second dir player gets a readable suffix and the same directory tag" "[ $rc = 0 ] && grep -q '^started *$SD-2\$' '$T/spawn-dir2.out' && [ \"\$(tag $SD-2 @orchestra-repo)\" = '$DPR' ]"
+bash "$O/spawn.sh" --dir "$DP" --resume >"$T/ambiguous-dir.out" 2>&1; rc=$?
+check "ambiguous dir resume refuses" "[ $rc = 1 ] && grep -q -- '--session NAME' '$T/ambiguous-dir.out'"
+tm send-keys -t "=$SD-2:" C-d; sleep 0.8
+bash "$O/spawn.sh" --dir "$DP" --resume --session "$SD-2" >/dev/null 2>&1; rc=$?; sleep 1
+check "explicit dir resume selects its own conversation" "[ $rc = 0 ] && grep -qx \"arg=\$(tag $SD-2 @orchestra-claude-session)\" '$T/last-claude' && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_dead}')\" = 0 ]"
+bash "$O/kill.sh" "$SD-2" >/dev/null
 bash "$O/kill.sh" "$SD" >/dev/null
 check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?

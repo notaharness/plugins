@@ -162,16 +162,21 @@ player_sessions() {
 }
 all_player_sessions() { player_sessions | cut -f1; }
 is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
-# find_player_session <repo> <checkout>: the worktree session whose tags equal (repo, checkout),
+# find_player_session <repo> <checkout> [session]: the worktree session whose tags equal (repo, checkout),
 # the checkout canonical as spawn.sh tags it; with an empty checkout, the dir player of <repo> (its
 # directory). @orchestra-branch is never consulted: the checkout may have switched branch since.
-# With several (should not happen) the one created first, the others named on stderr and left alone.
+# Multiple dir players require an exact session selector; worktree duplicates use the oldest.
 find_player_session() {
   local matches
-  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="${2:-}" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
-    '$5 == repo && (path == "" ? $6 == dir : $6 == wt && $8 == path)' | sort -t "$TAB" -k2,2n)"
+  matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="${2:-}" -v name="${3:-}" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
+    '(name == "" || $1 == name) && $5 == repo && (path == "" ? $6 == dir : $6 == wt && $8 == path)' | sort -t "$TAB" -k2,2n)"
   [ -n "$matches" ] || return 1
   if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
+    if [ -z "${2:-}" ]; then
+      echo "spawn.sh: several dir players in $1; use --session NAME with --resume:" >&2
+      printf '%s\n' "$matches" | cut -f1 >&2
+      return 2
+    fi
     echo "warning: several sessions carry repo $1${2:+ checkout ${2:-}}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2
   fi
   printf '%s\n' "$matches" | head -n1 | cut -f1
