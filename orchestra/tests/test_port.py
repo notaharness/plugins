@@ -1474,7 +1474,7 @@ class PortTests(unittest.TestCase):
         # server than the one spawn.sh created the session on.
         self.assertEqual(load, ['exec', 'workbox', '--', 'tmux', '-u', '-S', self.sock, 'load-buffer', '-b', load[-2], '-'])
         self.assertEqual(sum(c[3:5] == ['sh', '-c'] for c in exec_calls), 1, exec_calls)   # asked once, then cached
-        self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] ' + big)     # stdin reached the mock intact
+        self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] ' + big + '\n')  # Codex completion terminator survives remote stdin
     def test_missing_beam_binary_fails_names_both_options_and_runs_nothing_locally(self):
         calls_before = len(self.tmux_calls())
         # Only the stubs and the system directories: a beam installed on the host running the
