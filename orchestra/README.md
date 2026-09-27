@@ -171,6 +171,15 @@ player has no branch, so use its session name (`<directory>-dir`). A repository'
 `sessions.sh` lists a dir player only when its directory is that repository's main checkout;
 use `--all` to see the rest.
 
+`send.sh` submits Codex messages through the TUI with a bracketed paste and Enter.
+An idle prompt starts a turn; a busy Codex receives the input with its normal steering behavior.
+Normal sends require a detached session and a recognized empty composer. Drafts, attached
+clients, copy mode and unrecognized rendering refuse delivery before any text is pasted.
+This guard and the trailing-newline completion handling apply to remote Codex players too.
+Claude inbox delivery, adoption, and reports to both `codex:` and Codex-backed `tmux:`
+orchestrators retain their queues. The reported queue stall has not been reproduced; those
+report paths preserve the orchestrator's composer rather than injecting terminal input.
+
 ### Resume a player
 
 ```bash

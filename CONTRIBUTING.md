@@ -42,6 +42,16 @@ Both use temporary Git repositories and fake agent CLIs, so they make no model c
 The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
 sessions, delivery through `codex queue`, or a spawn on a real second machine.
 
+To verify `send.sh` against an installed real Codex TUI, run:
+
+```bash
+python3 orchestra/tests/smoke_codex.py
+```
+
+This uses a temporary `CODEX_HOME`, a scratch tmux socket with `TMUX` unset, and a local
+fake Responses endpoint. It needs no credentials and makes no model calls. It checks
+repeated idle delivery and preserves multiline text through the real composer.
+
 ## Versions
 
 Plugins use semver. Claude Code caches an installed plugin by version, so a change reaches
