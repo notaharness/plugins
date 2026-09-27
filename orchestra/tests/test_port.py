@@ -788,14 +788,6 @@ class PortTests(unittest.TestCase):
         self.assertEqual(artifact.read_text(), 'keep this output')
         self.assertEqual(self.run_cmd(['git', 'rev-parse', 'feature/test']).stdout, head)
         self.assertIn(str(self.wt), self.run_cmd(['git', 'worktree', 'list', '--porcelain']).stdout)
-        # Cleanup is separate and Git's normal dirty-worktree protection still applies.
-        refused = self.run_cmd(['git', 'worktree', 'remove', str(self.wt)], ok=False)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertTrue(artifact.exists())
-        artifact.unlink()
-        self.run_cmd(['git', 'worktree', 'remove', str(self.wt)])
-        self.assertFalse(self.wt.exists())
-        self.run_cmd(['git', 'branch', '-d', 'feature/test'])
 
     def test_kill_reports_a_refused_kill(self):
         self.spawn('--agent', 'codex'); self.env['TEST_KILL_FAIL'] = '1'

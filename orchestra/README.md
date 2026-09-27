@@ -91,9 +91,8 @@ filesystem allows). Stopping a player leaves its branch and worktree in place.
 While a player or its dev server still uses the checkout, merge with
 `gh pr merge NUMBER --squash --delete-branch=false` (or your chosen merge strategy).
 `--delete-branch` can also remove the local worktree, breaking running dev servers.
-Retire players separately: record their paths/branches, stop their servers and tmux sessions, inspect the worktree for
-uncommitted files, then use `git worktree remove` from a surviving checkout and `git branch -d`
-when safe. See [Merge and cleanup](skills/orchestrator/SKILL.md#merge-and-cleanup).
+Use the [post-merge cleanup sequence](skills/orchestrator/SKILL.md#merge-and-cleanup) once
+the checkout is no longer in use.
 
 Keep a dir player out of a directory another player is changing.
 

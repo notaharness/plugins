@@ -127,14 +127,36 @@ still running, merge an authorized PR with `gh pr merge NUMBER --squash --delete
 the branch, taking a running server's working directory away. Keep the worktree until its
 consumers are done.
 
-For authorized cleanup, record the exact session, repo, worktree path and checked-out branch
-before killing the session; killing it discards its tags. Inspect `git worktree list` and
-`git -C WORKTREE status --short`, and account for dir players or other processes using the same
-checkout. Stop its dev servers and stop each player with `kill.sh SESSION`, then run
-`git -C REPO worktree remove WORKTREE` from a surviving checkout. Remove the local branch with
-`git -C REPO branch -d BRANCH` only when it is safe to delete. `kill.sh` itself preserves files
-and branches. A dirty worktree or an unmerged-branch refusal needs inspection; do not turn a
-cleanup refusal into `--force` or `-D` automatically (squash merges may trigger the latter).
+For authorized post-merge cleanup, use this sequence, stopping on any mismatch or failure:
+
+1. Run `sessions.sh --json` and retain the exact `session`, `repo`, `worktree` and `branch`
+   before `kill.sh` discards the tags. `branch` is launch metadata: confirm the checkout's
+   current branch with `git -C WORKTREE branch --show-current`. Never derive the worktree path
+   from a branch name. Identify the PR's head repository and its matching push remote (`REMOTE`,
+   often `origin`); cleanup must target that repository's branch.
+2. Read `gh pr view NUMBER --repo OWNER/REPO --json state,headRefName,headRefOid`.
+   Require `state` to be `MERGED`, `headRefName` to equal `BRANCH`, and `headRefOid` (`HEAD_SHA`)
+   to equal `git -C REPO rev-parse refs/heads/BRANCH`. Retarget any open stacked child PRs whose
+   base is `BRANCH` before deleting it (`gh pr list --repo OWNER/REPO --state open --base BRANCH`).
+   A changed local tip means there is additional work to preserve, not permission to delete it.
+3. Account for other players/processes using `WORKTREE`, stop its dev servers, and stop each
+   player with `kill.sh SESSION`. Inspect `git -C WORKTREE status --short` and preserve any
+   needed files. `REPO` below must be a surviving checkout, outside `WORKTREE`.
+4. Remove the worktree, delete the remote branch only at the verified head, then delete the
+   local branch. Run these in order, stopping if a command fails:
+
+   ```bash
+   git -C REPO worktree remove WORKTREE
+   git -C REPO push --force-with-lease=refs/heads/BRANCH:HEAD_SHA REMOTE --delete BRANCH
+   git -C REPO branch -D -- BRANCH
+   ```
+
+   If `git -C REPO ls-remote --heads REMOTE refs/heads/BRANCH` confirms the remote branch is
+   already absent, skip that push. A lease refusal means the remote tip changed: inspect it;
+   do not retry without the lease. Recheck the local tip against `HEAD_SHA` immediately before
+   `branch -D`. The verified merged PR and identical tip make local deletion valid after a
+   squash merge even when Git's ancestry-based `branch -d` refuses. Never force-remove a dirty
+   worktree. `kill.sh` itself preserves files and branches; this cleanup owns their removal.
 
 ## The user's attention
 

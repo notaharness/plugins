@@ -332,17 +332,6 @@ check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?
 check "after kill.sh, resume refuses before creating anything" "[ $rc = 1 ] && grep -q 'no Claude conversation is recorded' '$T/resume-gone.err' && ! tm has-session -t '=$SD' 2>/dev/null"
 
-echo "# cleanup keeps worktrees until they are explicitly retired"
-bash "$O/spawn.sh" --repo "$T/repo" --branch cleanup-test --from HEAD --prompt "serve" --agent claude --no-node-modules --orchestrator tmux:parent >/dev/null 2>&1
-CW="$T/repo/.claude/worktrees/cleanup-test"; CS=repo-cleanup-test
-printf 'server output\n' > "$CW/server-output.txt"
-bash "$O/kill.sh" "$CS" >/dev/null
-check "stopping the session preserves the worktree, output and branch" "! tm has-session -t '=$CS' 2>/dev/null && [ -f '$CW/server-output.txt' ] && git -C '$T/repo' show-ref --verify --quiet refs/heads/cleanup-test"
-git -C "$T/repo" worktree remove "$CW" >"$T/cleanup.out" 2>&1; rc=$?
-check "separate cleanup refuses uncommitted server output" "[ $rc != 0 ] && [ -f '$CW/server-output.txt' ]"
-rm "$CW/server-output.txt"
-check "explicit cleanup removes the clean worktree and merged branch" "git -C '$T/repo' worktree remove '$CW' && git -C '$T/repo' branch -d cleanup-test >/dev/null && [ ! -d '$CW' ]"
-
 echo "# machines: a fake beam, real tmux behind it"
 # Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd
 # to --cwd first, if given) so it reaches the real tmux/codex fakes with stdin forwarded intact —
