@@ -699,6 +699,24 @@ class PortTests(unittest.TestCase):
         self.assertIn('no Codex thread is recorded', x.stderr)
         self.assertEqual(len(self.calls()), n)
         self.assertNotIn('notes-dir', self.state())
+    def test_opencode_dir_resume_refuses_without_exact_identity(self):
+        self.stub('opencode', CLI_MOCK)
+        d = self.notes_dir(); self.env['TEST_PANE_ALIVE'] = '1'
+        self.dir_spawn(d, '--agent', 'opencode')
+        self.dir_spawn(d, '--agent', 'opencode')
+        other = self.state()['notes-dir-2']; n = len(self.calls())
+        self.kill_pane('notes-dir')
+        self.dir_spawn(d, '--resume', '--session', 'notes-dir', prompt=False)
+        self.assertEqual(self.state()['notes-dir']['status'], 1)
+        self.assertEqual(len(self.calls()), n)
+        self.assertEqual(self.state()['notes-dir-2'], other)
+        for name in ('notes-dir', 'notes-dir-2'):
+            self.orch('kill.sh', name, cwd=self.base)
+        x = self.dir_spawn(d, '--resume', '--agent', 'opencode', prompt=False, ok=False)
+        self.assertEqual(x.returncode, 1)
+        self.assertIn('exact conversation id', x.stderr)
+        self.assertNotIn('notes-dir', self.state())
+
     def record_codex_thread(self, name, pid=None, ok=True):
         return self.run_cmd(['bash', self.script('_record_codex_session.sh'), self.sock, name,
                              pid or self.env['TEST_PANE_PID']], ok=ok)
@@ -736,6 +754,7 @@ class PortTests(unittest.TestCase):
         x = self.record_codex_thread('notes-dir', ok=False)
         self.assertEqual(x.returncode, 1)
         self.assertIn('cannot be resumed', x.stderr)
+        self.assertEqual(self.tag('@orchestra-codex-record-error', 'notes-dir'), 'could not record exact thread id')
         self.assertIsNone(self.tag('@orchestra-codex-session', 'notes-dir'))
 
     def test_dir_player_warns_when_its_claude_conversation_cannot_be_recorded(self):

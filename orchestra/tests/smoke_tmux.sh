@@ -364,6 +364,29 @@ tm send-keys -t "=$SD:" C-d; sleep 0.8
 bash "$O/spawn.sh" --dir "$DP" --resume --session "$SD" >/dev/null 2>&1; rc=$?; sleep 1
 check "older Codex dir player resumes its exact thread while neighbour stays live" "[ $rc = 0 ] && grep -qx 'arg=resume' '$T/last-codex' && grep -qx 'arg=$first_codex' '$T/last-codex' && ! grep -qx 'arg=$second_codex' '$T/last-codex' && [ \"\$(tm display-message -p -t '=$SD-2:' '#{pane_dead}')\" = 0 ]"
 bash "$O/kill.sh" "$SD" >/dev/null; bash "$O/kill.sh" "$SD-2" >/dev/null
+# Force the recorder's identity write to fail without affecting ordinary tmux operations.
+real_tmux="$(command -v tmux)"
+cat > "$T/bin/tmux" <<FAIL_RECORD
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = '@orchestra-codex-session' ] && [[ " \$* " = *' set-option '* ]]; then exit 1; fi
+done
+exec "$real_tmux" "\$@"
+FAIL_RECORD
+chmod +x "$T/bin/tmux"
+bash "$O/spawn.sh" --dir "$DP" --prompt "record failure" --agent codex --orchestrator tmux:parent >/dev/null 2>&1
+for unused in $(seq 50); do
+  [ -n "$(tag "$SD" @orchestra-codex-record-error)" ] && break
+  sleep 0.1
+done
+sleep 0.2
+check "failed recorder reports a tag without entering pane view mode" \
+  "[ -n \"\$(tag $SD @orchestra-codex-record-error)\" ] && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_in_mode}')\" = 0 ]"
+bash "$O/send.sh" "$SD" --raw "AFTER-RECORDER-FAILURE" >/dev/null 2>&1
+sleep 0.3
+check "first paste after recorder failure reaches the player" "grep -q 'AFTER-RECORDER-FAILURE' '$T/received-codex'"
+rm "$T/bin/tmux"
+bash "$O/kill.sh" "$SD" >/dev/null
 rm "$T/fake-codex-rollout"
 
 echo "# machines: a fake beam, real tmux behind it"

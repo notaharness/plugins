@@ -247,6 +247,7 @@ fi
 if [ -n "$DIR" ] && [ $RESUME = 1 ] && [ "$EXISTING" = none ]; then
   case "$HARNESS" in
     claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
+    opencode) echo "spawn.sh: --resume is not supported for opencode dir players without an exact conversation id; spawn it fresh" >&2; exit 1;;
     codex) echo "spawn.sh: nothing to resume: no Codex thread is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
   esac
 fi
@@ -400,6 +401,6 @@ tag_unset "$ORCH_SOCK" "$name" "$TAG_LAUNCHING"
 if [ "$TYPE" = "$SESSION_TYPE_DIR" ] && [ "$HARNESS" = codex ] && [ $RESUME = 0 ]; then
   pid="$(t display-message -p -t "$tt" '#{pane_pid}')"
   printf -v recorder '%q ' bash "${LAUNCHER%/*}/_record_codex_session.sh" "$ORCH_SOCK" "$name" "$pid"
-  t run-shell -b -t "$tt" "$recorder" || echo "spawn.sh: could not start Codex thread recording for $name; this dir player cannot be resumed" >&2
+  t run-shell -b -t "$tt" "$recorder >/dev/null 2>&1; true" || echo "spawn.sh: could not start Codex thread recording for $name; this dir player cannot be resumed" >&2
 fi
 echo "started   $name"

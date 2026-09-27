@@ -79,6 +79,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
 | `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
+| `@orchestra-codex-record-error` | failure to record the exact thread, also surfaced by resume |
 | `@orchestra-codex-session` | dir players running Codex: exact thread ID discovered from the launched process's open rollout; required for `--resume` |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 

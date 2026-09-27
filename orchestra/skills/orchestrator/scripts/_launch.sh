@@ -141,11 +141,12 @@ codex_session_here() {
 
 # resume_codex [message]: the message replaces the default one when no Codex conversation exists.
 resume_codex() {
-  local prompt id; prompt="$(preamble codex)"
+  local prompt id record_error; prompt="$(preamble codex)"
   if [ "$stype" = "$SESSION_TYPE_DIR" ]; then
     id="$(tag_get "$sock" "$session" "$TAG_CODEX_SESSION")"
+    record_error="$(tag_get "$sock" "$session" "$TAG_CODEX_RECORD_ERROR")"
     [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
-      fail "no exact Codex thread is recorded on this dir player's session; nothing to resume (start a fresh player)"
+      fail "no exact Codex thread is recorded on this dir player's session; nothing to resume (start a fresh player). Recorder: ${record_error:-no record available}"
   else
     id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
   fi
@@ -203,6 +204,7 @@ case "$harness" in
   claude)   resume_claude;;
   codex)    resume_codex;;
   auto)     resume_auto;;
-  opencode) remember opencode; exec opencode --continue --prompt "$(preamble opencode)";;
+  opencode) [ "$stype" != "$SESSION_TYPE_DIR" ] || fail "--resume is not supported for opencode dir players without an exact conversation id; spawn it fresh"
+            remember opencode; exec opencode --continue --prompt "$(preamble opencode)";;
   *)        fail "--resume is not supported for $harness; use a fresh spawn";;
 esac

@@ -191,7 +191,9 @@ resuming fails, the pane stays open with the error.
 For dir players, `--dir PATH --resume` requires a unique session in that directory.
 When several exist, add `--session NAME` to select the exact player. Claude and Codex both
 resume that session's recorded conversation ID. Codex identity is captured from the launched
-process's open rollout during its first 30 seconds; inspect startup before leaving it unattended.
+process's open rollout, waiting through trust dialogs while that process lives. Recorder write
+failures are kept off the pane and exposed through `@orchestra-codex-record-error` and resume errors.
+OpenCode dir-player resume is refused because its exact conversation ID is not recorded.
 A missing record (including after `kill.sh`, a crash, or startup that never creates a rollout)
 refuses resume; it never picks another conversation from the directory.
 

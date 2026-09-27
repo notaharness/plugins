@@ -116,8 +116,10 @@ for that worktree; other failures leave a dead pane to inspect, not a fresh task
 
 `spawn.sh --dir PATH --resume` uses the selected session's exact `@orchestra-claude-session`
 or `@orchestra-codex-session`. If several dir players share the directory, add `--session NAME`.
-Codex's thread is recorded from its process's open rollout during the first 30 seconds after
-launch. Missing tags refuse resume; a lost session cannot be recovered by guessing from cwd.
+Codex's thread is recorded from its process's open rollout, waiting through trust dialogs while
+that process lives. Recorder write failures appear in `@orchestra-codex-record-error` and resume
+errors, without opening pane view mode. OpenCode dir-player resume is refused until exact
+conversation identity is supported. Missing tags refuse resume; a lost session cannot be recovered by guessing from cwd.
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.
 
