@@ -21,6 +21,7 @@ other machines.
 - Linux or macOS with Bash, Git, coreutils (`realpath`, `sha256sum`) and `ps`/`pgrep`.
   Tested on Linux.
 - tmux 3.x (tested with 3.4).
+- `lsof` on systems without `/proc`, for recording Codex dir-player thread IDs.
 - An authenticated `claude` or `codex` CLI for each kind of player you want to run. Codex
   players need Codex CLI 0.157 or later for the default model, `gpt-6-sol`.
 - For a Claude Code orchestrator: Claude Code 2.1.224 or later, and `socat` or OpenBSD `nc`
@@ -167,7 +168,8 @@ repository and `--machine NAME` to act on another machine.
 
 `SESSION` is the branch the player's worktree has checked out, or its tmux session name, as
 shown by `sessions.sh`. A player stays tied to its worktree when it switches branch. A dir
-player has no branch, so use its session name (`<directory>-dir`). A repository's
+player has no branch, so use its session name (`<directory>-dir`, then `-2`, `-3`, and so on when taken).
+Several dir players can share a directory; give each its own task. A repository's
 `sessions.sh` lists a dir player only when its directory is that repository's main checkout;
 use `--all` to see the rest.
 
@@ -183,8 +185,17 @@ restarted. `--branch` is the branch the player was spawned for (the `BRANCH` col
 `sessions.sh`), not the one its checkout has now. `--prompt` or `--prompt-file` gives it a new message; the original task is not sent
 again. It uses the CLI the player last ran unless you pass `--agent`. When that is unknown
 because the session is gone, it tries Claude, and a Codex conversation only when Claude has
-none to continue; a dir player needs `--agent codex` to resume a Codex conversation. If
+none to continue. Dir players resume only the conversation recorded on their selected session. If
 resuming fails, the pane stays open with the error.
+
+For dir players, `--dir PATH --resume` requires a unique session in that directory.
+When several exist, add `--session NAME` to select the exact player. Claude and Codex both
+resume that session's recorded conversation ID. Codex identity is captured from the launched
+process's open rollout, waiting through trust dialogs while that process lives. Recorder write
+failures are kept off the pane and exposed through `@orchestra-codex-record-error` and resume errors.
+OpenCode dir-player resume is refused because its exact conversation ID is not recorded.
+A missing record (including after `kill.sh`, a crash, or startup that never creates a rollout)
+refuses resume; it never picks another conversation from the directory.
 
 ### Hand off a running player
 

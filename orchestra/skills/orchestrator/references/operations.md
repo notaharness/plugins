@@ -79,6 +79,8 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
 | `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
+| `@orchestra-codex-record-error` | failure to record the exact thread, also surfaced by resume |
+| `@orchestra-codex-session` | dir players running Codex: exact thread ID discovered from the launched process's open rollout; required for `--resume` |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
 
 The first five tags (three for a dir player, which has no branch or worktree) are a session's identity,
@@ -160,5 +162,5 @@ else records the players: your own conversation is the record.
 
 Resume restores the conversation up to its last saved message, and the worktree's files and
 commits. It loses whatever was in flight: the step that was running, background subagents and
-waits. A Claude dir player cannot be resumed after its session tag is lost: spawn it fresh with its task and
+waits. A Claude or Codex dir player cannot be resumed after its session tag is lost: spawn it fresh with its task and
 what it had already reported.

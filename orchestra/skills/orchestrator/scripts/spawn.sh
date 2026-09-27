@@ -4,6 +4,7 @@
 # Usage: spawn.sh --branch <name> (--prompt-file <f> | --prompt <text>)      fresh launch
 #        spawn.sh --branch <name> --resume [--prompt <text> | --prompt-file <f>]
 #        spawn.sh --dir <path> …              a dir player: no branch, no worktree (below)
+#                 [--session NAME]            select a dir player for --resume
 #                 [--repo <path>]             the repo to spawn into; defaults to the
 #                                             cwd's repo. Any path inside it will do.
 #                 [--agent claude|codex|gemini|copilot|opencode]  (fresh default claude)
@@ -35,8 +36,9 @@
 # --dir starts a dir player in an existing directory (a reviewer, or work outside any repo) instead
 # of a worktree; it takes no --branch, --repo or --from and creates nothing on disk. It is a player
 # in every other respect, tagged @orchestra-session-type dir with its directory (resolved) in
-# @orchestra-repo and no @orchestra-branch, labelled <basename of the directory>-dir, and addressed
-# by that session name everywhere; --dir <path> --resume finds it again by its directory (see
+# @orchestra-repo and no @orchestra-branch, labelled <basename of the directory>-dir (with -2, -3, … on collision), and addressed
+# by that session name everywhere; --dir <path> --resume finds a unique match by directory.
+# With several players in that directory, add --session NAME to select one (see
 # _launch.sh for which conversation it continues).
 #
 # The task is the new CLI's initial prompt argument (see _launch.sh), never typed and never
@@ -69,14 +71,15 @@
 # tests it runs cannot reach the user's tmux; ORCHESTRA_SOCKET names the real server for
 # the launcher and report.sh.
 . "$(dirname "$(realpath "$0")")/_lib.sh"
-AGENT=""; MODEL=""; EFFORT=""; PERM=""; CMD=""; FROM=""; LINK_NM=1; DRY=0; RESUME=0; BRANCH=""; DIR=""; PROMPT=""; PFILE=""; ORCH=""
+AGENT=""; MODEL=""; EFFORT=""; PERM=""; CMD=""; FROM=""; LINK_NM=1; DRY=0; RESUME=0; BRANCH=""; DIR=""; SESSION=""; PROMPT=""; PFILE=""; ORCH=""
 while [ $# -gt 0 ]; do case "$1" in
-  --branch) BRANCH="$2"; shift;; --dir) DIR="$2"; shift;; --prompt-file) PFILE="$2"; shift;; --prompt) PROMPT="$2"; shift;;
+  --session) SESSION="$2"; shift;; --branch) BRANCH="$2"; shift;; --dir) DIR="$2"; shift;; --prompt-file) PFILE="$2"; shift;; --prompt) PROMPT="$2"; shift;;
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,70p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,72p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
+[ -z "$SESSION" ] || { [ -n "$DIR" ] && [ $RESUME = 1 ]; } || { echo "spawn.sh: --session requires --dir and --resume" >&2; exit 2; }
 if [ -n "$DIR" ]; then
   [ -z "$BRANCH$ORCH_REPO$FROM" ] || { echo "spawn.sh: --dir starts a player without a worktree; it takes no --branch, --repo or --from" >&2; exit 2; }
   is_local_machine || case "$DIR" in /*|"~/"*) ;; *) echo "spawn.sh: --dir must be an absolute path or start with ~/ when --machine is set (got '$DIR')" >&2; exit 2;; esac
@@ -180,7 +183,21 @@ resolve_checkout() {
 checkout=""; RESOLVED=0
 if [ -z "$DIR" ]; then checkout="$workdir"; ! dir_exists || resolve_checkout; fi
 EXISTING=none
-if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
+# Fresh dir players are independent, even when their directories match. Resume must
+# identify one session; never choose the oldest conversation from an ambiguous directory.
+lookup_rc=1
+if [ -z "$DIR" ] || [ $RESUME = 1 ]; then
+  name="$(find_player_session "$root" "$checkout" "$SESSION")"; lookup_rc=$?
+  if [ $lookup_rc = 2 ]; then
+    echo "spawn.sh: several dir players in $root; use --session NAME with --resume:" >&2
+    printf '%s\n' "$name" >&2
+    exit 1
+  fi
+  if [ -n "$SESSION" ] && [ $lookup_rc -ne 0 ]; then
+    echo "spawn.sh: no dir player $SESSION is recorded in $root" >&2; exit 1
+  fi
+fi
+if [ $lookup_rc = 0 ]; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
   if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
   elif [ "$(tag_get "$ORCH_SOCK" "$name" "$TAG_LAUNCHING")" = 1 ]; then EXISTING=placeholder
@@ -225,10 +242,14 @@ if [ $RESUME = 0 ]; then
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
-# A dir player's Claude conversation is known only from its session's tag (see _launch.sh), so once
-# the session is gone there is nothing to resume for Claude, or for auto, which is Claude there.
+# Dir conversations are identified by session tags, never the newest rollout in the directory.
+# A lost session loses that identity for both Claude and Codex.
 if [ -n "$DIR" ] && [ $RESUME = 1 ] && [ "$EXISTING" = none ]; then
-  case "$HARNESS" in claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh, or pass --agent codex for a Codex player" >&2; exit 1;; esac
+  case "$HARNESS" in
+    claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
+    opencode) echo "spawn.sh: --resume is not supported for opencode dir players without an exact conversation id; spawn it fresh" >&2; exit 1;;
+    codex) echo "spawn.sh: nothing to resume: no Codex thread is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
+  esac
 fi
 # The harness has to be on PATH where the player will actually run. On this machine that is
 # checkable now; on another one there is no cheap way to ask without a round trip for a check
@@ -377,4 +398,9 @@ if ! t respawn-pane -k -t "$tt" -c "$workdir" \
   exit 1
 fi
 tag_unset "$ORCH_SOCK" "$name" "$TAG_LAUNCHING"
+if [ "$TYPE" = "$SESSION_TYPE_DIR" ] && [ "$HARNESS" = codex ] && [ $RESUME = 0 ]; then
+  pid="$(t display-message -p -t "$tt" '#{pane_pid}')"
+  printf -v recorder '%q ' bash "${LAUNCHER%/*}/_record_codex_session.sh" "$ORCH_SOCK" "$name" "$pid"
+  t run-shell -b -t "$tt" "$recorder >/dev/null 2>&1; true" || echo "spawn.sh: could not start Codex thread recording for $name; this dir player cannot be resumed" >&2
+fi
 echo "started   $name"
