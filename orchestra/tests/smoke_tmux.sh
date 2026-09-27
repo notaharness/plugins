@@ -34,6 +34,12 @@ T="$T"
 cp "\$T/last-$cli" "\$T/last-call"
 if [ -f "\$T/fake-$cli-noconv" ]; then echo 'No conversation found to continue'; exit 1; fi
 if [ -f "\$T/fake-$cli-exit" ]; then exit "\$(cat "\$T/fake-$cli-exit")"; fi
+if [ "$cli" = codex ] && [ -f "\$T/fake-codex-rollout" ] && [ "\${1:-}" != resume ]; then
+  id="\$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
+  rollout="\$CODEX_HOME/sessions/2026/09/13/rollout-2026-09-13T12-00-00-\$id.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "\$id" "\$PWD" > "\$rollout"
+  exec 3<"\$rollout"
+fi
 exec cat >> "\$T/received-$cli"
 FAKE
 chmod +x "$T/bin/$cli"; done
@@ -341,6 +347,24 @@ bash "$O/kill.sh" "$SD" >/dev/null
 check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?
 check "after kill.sh, resume refuses before creating anything" "[ $rc = 1 ] && grep -q 'no Claude conversation is recorded' '$T/resume-gone.err' && ! tm has-session -t '=$SD' 2>/dev/null"
+
+echo "# Codex dir players record and resume their exact process-owned threads"
+touch "$T/fake-codex-rollout"
+for unused in 1 2; do
+  bash "$O/spawn.sh" --dir "$DP" --prompt "independent task" --agent codex --orchestrator tmux:parent >/dev/null 2>&1
+  sleep 0.5
+done
+for unused in $(seq 50); do
+  [ -n "$(tag "$SD" @orchestra-codex-session)" ] && [ -n "$(tag "$SD-2" @orchestra-codex-session)" ] && break
+  sleep 0.1
+done
+first_codex="$(tag "$SD" @orchestra-codex-session)"; second_codex="$(tag "$SD-2" @orchestra-codex-session)"
+check "two Codex players in one directory have distinct recorded threads" "[ -n '$first_codex' ] && [ -n '$second_codex' ] && [ '$first_codex' != '$second_codex' ]"
+tm send-keys -t "=$SD:" C-d; sleep 0.8
+bash "$O/spawn.sh" --dir "$DP" --resume --session "$SD" >/dev/null 2>&1; rc=$?; sleep 1
+check "older Codex dir player resumes its exact thread while neighbour stays live" "[ $rc = 0 ] && grep -qx 'arg=resume' '$T/last-codex' && grep -qx 'arg=$first_codex' '$T/last-codex' && ! grep -qx 'arg=$second_codex' '$T/last-codex' && [ \"\$(tm display-message -p -t '=$SD-2:' '#{pane_dead}')\" = 0 ]"
+bash "$O/kill.sh" "$SD" >/dev/null; bash "$O/kill.sh" "$SD-2" >/dev/null
+rm "$T/fake-codex-rollout"
 
 echo "# machines: a fake beam, real tmux behind it"
 # Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd

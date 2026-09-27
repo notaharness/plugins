@@ -114,9 +114,10 @@ Harness selection is explicit `--agent`, then the session tag, else Claude `--co
 Claude's "No conversation found to continue" permits fallback to the newest Codex conversation
 for that worktree; other failures leave a dead pane to inspect, not a fresh task.
 
-`spawn.sh --dir PATH --resume` uses the exact `@orchestra-claude-session` for a Claude dir player,
-so it cannot resume after that session/tag is lost. If several dir players share the directory,
-add `--session NAME` to select one; Codex uses the directory's newest conversation.
+`spawn.sh --dir PATH --resume` uses the selected session's exact `@orchestra-claude-session`
+or `@orchestra-codex-session`. If several dir players share the directory, add `--session NAME`.
+Codex's thread is recorded from its process's open rollout during the first 30 seconds after
+launch. Missing tags refuse resume; a lost session cannot be recovered by guessing from cwd.
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.
 

@@ -31,7 +31,7 @@ RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path', '@orchestra-orchestrator',
         '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config',
-        '@orchestra-claude-session']
+        '@orchestra-claude-session', '@orchestra-codex-session']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -620,9 +620,24 @@ class PortTests(unittest.TestCase):
         self.assertIn('--session', x.stderr)
         self.assertIn('notes-dir-2', x.stderr)
         self.assertEqual(len(self.calls()), n)
+        x = self.run_cmd(['bash', '-c', '. "$0"; find_player_session "$1" ""',
+                          self.script('_lib.sh'), str(d.resolve())], ok=False)
+        self.assertEqual(x.returncode, 2)
+        self.assertEqual(x.stdout.splitlines(), ['notes-dir', 'notes-dir-2'])
+        self.assertEqual(x.stderr, '')  # the resolver returns candidates; spawn owns the advice
+        self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'claude')  # a real worktree player is not a dir-player selector
+        n = len(self.calls())
         for name in ('missing', self.session):
-            self.dir_spawn(d, '--resume', '--session', name, ok=False, prompt=False)
-        self.dir_spawn(d, '--session', 'notes-dir', ok=False)
+            x = self.dir_spawn(d, '--resume', '--session', name, ok=False, prompt=False)
+            self.assertEqual(x.returncode, 1)
+            self.assertIn('no dir player %s is recorded' % name, x.stderr)
+            self.assertEqual(len(self.calls()), n)
+        x = self.dir_spawn(d, '--session', 'notes-dir', ok=False)
+        self.assertEqual(x.returncode, 2)
+        self.assertIn('--session requires --dir and --resume', x.stderr)
+        self.assertEqual(len(self.calls()), n)
+        self.env.pop('TEST_PANE_ALIVE')
         self.dir_spawn(d, '--resume', '--session', 'notes-dir-2', prompt=False)
         self.assertEqual(self.calls()[-1]['args'][:2], ['--resume', pin])
         self.assertEqual(self.state()['notes-dir'], first)
@@ -677,10 +692,52 @@ class PortTests(unittest.TestCase):
             x = self.dir_spawn(d, '--resume', *extra, prompt=False, ok=False)
             self.assertEqual(x.returncode, 1, extra); self.assertIn('no Claude conversation is recorded', x.stderr)
         self.assertNotIn('notes-dir', self.state()); self.assertEqual([c for c in self.tmux_calls()[n:] if 'new-session' in c], [])
-        # Codex: the newest conversation recorded for that directory, even once the session is gone
+        # Codex also refuses a lost session even when the directory has a saved conversation.
         self.dir_spawn(d, '--agent', 'codex'); self.orch('kill.sh', 'notes-dir', cwd=self.base); self.rollout(real)
-        self.dir_spawn(d, '--resume', '--agent', 'codex', prompt=False); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
-        self.assertEqual(self.tag('@orchestra-session-type', 'notes-dir'), 'dir')
+        n = len(self.calls())
+        x = self.dir_spawn(d, '--resume', '--agent', 'codex', prompt=False, ok=False)
+        self.assertIn('no Codex thread is recorded', x.stderr)
+        self.assertEqual(len(self.calls()), n)
+        self.assertNotIn('notes-dir', self.state())
+    def record_codex_thread(self, name, pid=None, ok=True):
+        return self.run_cmd(['bash', self.script('_record_codex_session.sh'), self.sock, name,
+                             pid or self.env['TEST_PANE_PID']], ok=ok)
+
+    def test_codex_dir_resume_uses_the_selected_players_recorded_thread(self):
+        d = self.notes_dir(); self.env['TEST_PANE_ALIVE'] = '1'
+        self.dir_spawn(d, '--agent', 'codex')
+        self.fake_codex(cwd=d.resolve()); first_id = self.THREAD
+        self.record_codex_thread('notes-dir')
+        self.assertEqual(self.tag('@orchestra-codex-session', 'notes-dir'), first_id)
+        self.THREAD = '01ffff78-3bf1-7152-9fd0-e460736488f0'
+        self.dir_spawn(d, '--agent', 'codex'); self.fake_codex(cwd=d.resolve())
+        self.record_codex_thread('notes-dir-2')
+        self.assertEqual(self.tag('@orchestra-codex-session', 'notes-dir-2'), self.THREAD)
+        other = self.state()['notes-dir-2']
+        self.kill_pane('notes-dir')
+        self.dir_spawn(d, '--resume', '--session', 'notes-dir', prompt=False)
+        self.assertEqual(self.calls()[-1]['args'][:2], ['resume', first_id])
+        self.assertEqual(self.state()['notes-dir-2'], other)  # still live in the same directory
+        self.assertEqual(self.tag('@orchestra-codex-session', 'notes-dir'), first_id)
+
+    def test_codex_dir_resume_without_identity_never_uses_a_neighbours_rollout(self):
+        d = self.notes_dir(); self.dir_spawn(d, '--agent', 'codex'); self.rollout(str(d.resolve()))
+        n = len(self.calls())
+        self.dir_spawn(d, '--resume', prompt=False)
+        self.assertEqual(len(self.calls()), n)
+        self.assertEqual(self.state()['notes-dir']['status'], 1)
+        self.assertIsNone(self.tag('@orchestra-codex-session', 'notes-dir'))
+
+    def test_codex_recorder_does_not_tag_a_replacement_pane_and_reports_write_failure(self):
+        d = self.notes_dir(); self.dir_spawn(d, '--agent', 'codex'); self.fake_codex(cwd=d.resolve())
+        self.record_codex_thread('notes-dir', pid='99999999')
+        self.assertIsNone(self.tag('@orchestra-codex-session', 'notes-dir'))
+        self.env['TEST_SET_OPTION_FAIL'] = '@orchestra-codex-session'
+        x = self.record_codex_thread('notes-dir', ok=False)
+        self.assertEqual(x.returncode, 1)
+        self.assertIn('cannot be resumed', x.stderr)
+        self.assertIsNone(self.tag('@orchestra-codex-session', 'notes-dir'))
+
     def test_dir_player_warns_when_its_claude_conversation_cannot_be_recorded(self):
         self.env['TEST_SET_OPTION_FAIL'] = '@orchestra-claude-session'
         x = self.dir_spawn(self.notes_dir(), '--agent', 'claude')
@@ -1257,11 +1314,11 @@ class PortTests(unittest.TestCase):
     # A Codex TUI: its thread id is the UUID of the rollout file it holds open; a subagent's
     # rollout (parent_thread_id set) is open too and must not be mistaken for it.
     THREAD = '01a0ce78-3bf1-7152-9fd0-e460736488f0'
-    def fake_codex(self, rollout=True):
+    def fake_codex(self, rollout=True, cwd=None):
         home = self.base/'player-codex-home'; d = home/'sessions/2026/09/23'; d.mkdir(parents=True, exist_ok=True)
         main = d/('rollout-2026-09-23T13-33-01-%s.jsonl' % self.THREAD)
         guardian = d/'rollout-2026-09-23T13-33-01-01a0ce78-4444-7000-8000-000000000001.jsonl'
-        meta = lambda i, extra: json.dumps({'timestamp': 't', 'type': 'session_meta', 'payload': dict({'session_id': self.THREAD, 'id': i, 'cwd': str(self.wt)}, **extra)})
+        meta = lambda i, extra: json.dumps({'timestamp': 't', 'type': 'session_meta', 'payload': dict({'session_id': self.THREAD, 'id': i, 'cwd': str(cwd or self.wt)}, **extra)})
         main.write_text(meta(self.THREAD, {'source': 'cli'})+'\n')
         guardian.write_text(meta('01a0ce78-4444-7000-8000-000000000001', {'parent_thread_id': self.THREAD})+'\n')
         files = [str(guardian), str(main)] if rollout else ['/dev/null', '/dev/null']

@@ -165,7 +165,7 @@ is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
 # find_player_session <repo> <checkout> [session]: the worktree session whose tags equal (repo, checkout),
 # the checkout canonical as spawn.sh tags it; with an empty checkout, the dir player of <repo> (its
 # directory). @orchestra-branch is never consulted: the checkout may have switched branch since.
-# Multiple dir players require an exact session selector; worktree duplicates use the oldest.
+# Multiple dir players return 2 with candidate names on stdout; worktree duplicates use the oldest.
 find_player_session() {
   local matches
   matches="$(player_sessions | awk -F "$TAB" -v repo="$1" -v path="${2:-}" -v name="${3:-}" -v wt="$SESSION_TYPE_WORKTREE" -v dir="$SESSION_TYPE_DIR" \
@@ -173,8 +173,7 @@ find_player_session() {
   [ -n "$matches" ] || return 1
   if [ "$(printf '%s\n' "$matches" | grep -c .)" -gt 1 ]; then
     if [ -z "${2:-}" ]; then
-      echo "spawn.sh: several dir players in $1; use --session NAME with --resume:" >&2
-      printf '%s\n' "$matches" | cut -f1 >&2
+      printf '%s\n' "$matches" | cut -f1
       return 2
     fi
     echo "warning: several sessions carry repo $1${2:+ checkout ${2:-}}; using the oldest: $(printf '%s\n' "$matches" | cut -f1 | tr '\n' ' ')" >&2

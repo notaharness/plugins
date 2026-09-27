@@ -37,7 +37,8 @@
 # fresh Claude launch picks the conversation id itself (--session-id), records it in
 # @orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
 # with the session) a Claude resume refuses rather than guess; so does auto mode, which for a dir
-# player means Claude only.
+# player means Claude only. Codex dir players use @orchestra-codex-session, recorded from
+# the launched process's open rollout by _record_codex_session.sh; a missing tag refuses resume.
 set -u
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
@@ -141,7 +142,13 @@ codex_session_here() {
 # resume_codex [message]: the message replaces the default one when no Codex conversation exists.
 resume_codex() {
   local prompt id; prompt="$(preamble codex)"
-  id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
+  if [ "$stype" = "$SESSION_TYPE_DIR" ]; then
+    id="$(tag_get "$sock" "$session" "$TAG_CODEX_SESSION")"
+    [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
+      fail "no exact Codex thread is recorded on this dir player's session; nothing to resume (start a fresh player)"
+  else
+    id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
+  fi
   remember codex
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }

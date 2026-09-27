@@ -185,15 +185,18 @@ if [ -z "$DIR" ]; then checkout="$workdir"; ! dir_exists || resolve_checkout; fi
 EXISTING=none
 # Fresh dir players are independent, even when their directories match. Resume must
 # identify one session; never choose the oldest conversation from an ambiguous directory.
-lookup=1
-if [ -n "$DIR" ] && [ $RESUME = 0 ]; then lookup=0; fi
-if [ $lookup = 1 ]; then
+lookup_rc=1
+if [ -z "$DIR" ] || [ $RESUME = 1 ]; then
   name="$(find_player_session "$root" "$checkout" "$SESSION")"; lookup_rc=$?
-  [ $lookup_rc -ne 2 ] || exit 1
+  if [ $lookup_rc = 2 ]; then
+    echo "spawn.sh: several dir players in $root; use --session NAME with --resume:" >&2
+    printf '%s\n' "$name" >&2
+    exit 1
+  fi
   if [ -n "$SESSION" ] && [ $lookup_rc -ne 0 ]; then
     echo "spawn.sh: no dir player $SESSION is recorded in $root" >&2; exit 1
   fi
-else lookup_rc=1; fi
+fi
 if [ $lookup_rc = 0 ]; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
   if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
@@ -239,10 +242,13 @@ if [ $RESUME = 0 ]; then
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
-# A dir player's Claude conversation is known only from its session's tag (see _launch.sh), so once
-# the session is gone there is nothing to resume for Claude, or for auto, which is Claude there.
+# Dir conversations are identified by session tags, never the newest rollout in the directory.
+# A lost session loses that identity for both Claude and Codex.
 if [ -n "$DIR" ] && [ $RESUME = 1 ] && [ "$EXISTING" = none ]; then
-  case "$HARNESS" in claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh, or pass --agent codex for a Codex player" >&2; exit 1;; esac
+  case "$HARNESS" in
+    claude|auto) echo "spawn.sh: nothing to resume: no Claude conversation is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
+    codex) echo "spawn.sh: nothing to resume: no Codex thread is recorded for a dir player in $root (kill.sh removes the record with its session); spawn it fresh" >&2; exit 1;;
+  esac
 fi
 # The harness has to be on PATH where the player will actually run. On this machine that is
 # checkable now; on another one there is no cheap way to ask without a round trip for a check
@@ -391,4 +397,9 @@ if ! t respawn-pane -k -t "$tt" -c "$workdir" \
   exit 1
 fi
 tag_unset "$ORCH_SOCK" "$name" "$TAG_LAUNCHING"
+if [ "$TYPE" = "$SESSION_TYPE_DIR" ] && [ "$HARNESS" = codex ] && [ $RESUME = 0 ]; then
+  pid="$(t display-message -p -t "$tt" '#{pane_pid}')"
+  printf -v recorder '%q ' bash "${LAUNCHER%/*}/_record_codex_session.sh" "$ORCH_SOCK" "$name" "$pid"
+  t run-shell -b -t "$tt" "$recorder" || echo "spawn.sh: could not start Codex thread recording for $name; this dir player cannot be resumed" >&2
+fi
 echo "started   $name"
