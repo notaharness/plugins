@@ -25,6 +25,7 @@ def player_invocation():
     return '/orchestra:player'
 INV = player_invocation()
 ID = '11111111-2222-3333-4444-555555555555'
+EMPTY_CODEX_COMPOSER = '\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n'
 UUID = '0199a000-1111-7000-8000-000000000042'
 PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
@@ -121,6 +122,7 @@ if c == 'display-message':
     n = target(a.index('-t')+1) if '-t' in a else None; key = a[-1]; s = state.get(n, {})
     print({'#S': os.environ.get('TEST_TMUX_SESSION', 'parent'), '#{pane_dead}': str(s.get('dead', 1)), '#{pane_current_path}': s.get('path', ''),
            '#{socket_path}': sock, '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
+           '#{cursor_x} #{cursor_y} #{session_attached} #{pane_in_mode}': os.environ.get('TEST_COMPOSER_CURSOR', '2 0 0 0'),
            '#{pane_pid}': os.environ.get('TEST_PANE_PID', str(os.getpid()))}.get(key, '')); sys.exit(0)
 if c == 'show-options':
     # Session user option: `show-options -qv -t =name: @tag`. Without -q an unset option is an error.
@@ -169,6 +171,7 @@ if c == 'paste-buffer':
     if '-d' in a and '-b' in a: buffers.pop(buffer_name(), None); save()
     sys.exit(0)
 if c in ('send-keys', 'capture-pane'):
+    if c == 'capture-pane': print(os.environ.get('TEST_PANE_SCREEN', ''), end='')
     if c == 'send-keys' and os.environ.get('TEST_SEND_KEYS_FAIL'): sys.stderr.write('mock tmux: submission refused\n'); sys.exit(1)
     if '-t' in a: target(a.index('-t')+1)
     sys.exit(0)
@@ -329,7 +332,7 @@ class PortTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='orch-test.')
         self.base = Path(self.tmp.name); self.repo = self.base/'repo'; self.repo.mkdir(); self.bin = self.base/'bin'; self.bin.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CLAUDE', 'CODEX', 'ORCHESTRA', 'TMUX', 'ANTHROPIC', 'PLAYER'))}
-        self.env.update(PATH=str(self.bin)+':'+self.env['PATH'], CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
+        self.env.update(TEST_PANE_SCREEN=EMPTY_CODEX_COMPOSER, PATH=str(self.bin)+':'+self.env['PATH'], CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
                         CODEX_HOME=str(self.base/'codex-home'), CLAUDE_CONFIG_DIR=str(self.base/'claude-config'),
                         ORCH_TEST_DEFAULT_SOCK='/tmp/tmux-%d/default' % os.getuid())
         self.git_init(self.repo)
@@ -1229,7 +1232,7 @@ class PortTests(unittest.TestCase):
                 self.env['TEST_PANE_COMMAND'] = command; self.clear_log()
                 x = self.orch('send.sh', self.session, 'nudge')
                 self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session); self.assertIn('paste-buffer', self.tmux_log())
-                self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] nudge')
+                self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] nudge\n')
     # A Codex TUI: its thread id is the UUID of the rollout file it holds open; a subagent's
     # rollout (parent_thread_id set) is open too and must not be mistaken for it.
     THREAD = '01a0ce78-3bf1-7152-9fd0-e460736488f0'
@@ -1276,6 +1279,41 @@ class PortTests(unittest.TestCase):
             self.assertEqual(len(self.calls()), n)
             self.assertEqual(self.buffers(), {})
             self.env.pop(failure)
+
+    def test_codex_send_refuses_drafts_attached_clients_and_unknown_composers(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.fake_codex(); n = len(self.calls())
+        for screen, cursor in (
+            ('\x1b[1m›\x1b[0m USER_HALF_TYPED_DRAFT\n', '23 0 0 0'),
+            ('\x1b[1m›\x1b[0m USER_HALF_TYPED_DRAFT\n', '2 0 0 0'),  # Home
+            ('\x1b[1m›\x1b[0m Ask Codex to do anything\n', '2 0 0 0'),
+            ('\x1b[1m›\x1b[0m \n  second draft line\n', '2 0 0 0'),
+            (EMPTY_CODEX_COMPOSER, '2 0 1 0'),  # a human can be typing in an attached client
+            (EMPTY_CODEX_COMPOSER, '2 0 0 1'),  # copy mode
+            ('unrecognized screen', '2 0 0 0'),
+        ):
+            with self.subTest(screen=screen, cursor=cursor):
+                self.env.update(TEST_PANE_SCREEN=screen, TEST_COMPOSER_CURSOR=cursor)
+                self.clear_log()
+                x = self.orch('send.sh', self.session, 'ORCH_ONE', ok=False)
+                self.assertEqual(x.returncode, 1)
+                self.assertIn('no text sent', x.stderr)
+                for command in ('load-buffer', 'paste-buffer', 'send-keys'):
+                    self.assertNotIn(command, self.tmux_log())
+                self.assertEqual(len(self.calls()), n)  # no queue or second delivery route either
+
+    def test_remote_codex_tag_gets_composer_guard_and_completion_terminator(self):
+        self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
+        self.stub('beam', BEAM_MOCK)
+        x = self.orch('send.sh', self.session, '--machine', 'workbox', 'hello $literal')
+        self.assertEqual(x.stdout, 'sent to %s (paste)\n' % self.session)
+        self.assertEqual((self.base/'buffer').read_text(), '[orchestrator] hello $literal\n')
+        self.env['TEST_PANE_SCREEN'] = '\x1b[1m›\x1b[0m REMOTE_DRAFT\n'
+        self.clear_log()
+        x = self.orch('send.sh', self.session, '--machine', 'workbox', 'must not send', ok=False)
+        self.assertEqual(x.returncode, 1)
+        self.assertIn('no text sent', x.stderr)
+        self.assertNotIn('load-buffer', self.tmux_log())
 
     def test_report_to_a_codex_orchestrator_in_tmux_queues(self):
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); self.foreign('parent')

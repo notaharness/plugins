@@ -108,6 +108,24 @@ gpt-6-astra = 4
                 tm('set-option', '-t', '=player:', '@orchestra-' + key, value)
             wait_for(lambda: completed() == 1, 'initial turn completion')
             time.sleep(.5)  # allow the TUI to render its idle composer
+            initial_requests = len(requests)  # includes CLI startup/warmup requests
+            # A draft at either its end or Home must remain unsubmitted and unchanged.
+            tm('send-keys', '-t', '=player:', '-l', 'USER_HALF_TYPED_DRAFT')
+            wait_for(lambda: 'USER_HALF_TYPED_DRAFT' in screen(), 'draft rendered')
+            for key in ('End', 'Home'):
+                tm('send-keys', '-t', '=player:', key)
+                time.sleep(.2)
+                sent = run('bash', str(SCRIPTS / 'send.sh'), 'player', 'MUST_NOT_JOIN_DRAFT', check=False)
+                assert sent.returncode == 1 and 'no text sent' in sent.stderr, sent
+                time.sleep(.2)
+                assert 'USER_HALF_TYPED_DRAFT' in screen(), 'draft was changed'
+                assert 'MUST_NOT_JOIN_DRAFT' not in screen(), 'message entered composer'
+                assert completed() == 1, 'draft was submitted'
+                assert len(requests) == initial_requests, 'draft reached Responses endpoint'
+            # Clear only our test-owned draft, then verify ordinary idle delivery still works.
+            tm('send-keys', '-t', '=player:', 'End', 'C-u')
+            wait_for(lambda: 'USER_HALF_TYPED_DRAFT' not in screen(), 'fixture draft cleared')
+            time.sleep(.2)
             messages = ('IDLE_DELIVERY_ONE', 'IDLE_DELIVERY_TWO\nsecond line: "quoted" $literal',
                         'LARGE_DELIVERY\n' + 'x' * 24000 + '\nEND @missing-path')
             for index, message in enumerate(messages, 2):
@@ -120,7 +138,7 @@ gpt-6-astra = 4
                            for part in item.get('content', []) if isinstance(part, dict)), expected
                 time.sleep(.5)
                 assert completed() == index, 'message submitted more than once'
-            print('PASS: three idle Codex turns, multiline and 24 KiB input preserved, no manual Enter or queue', flush=True)
+            print('PASS: drafts refused at End and Home; three idle Codex turns, multiline and 24 KiB input preserved, no manual Enter or queue', flush=True)
         finally:
             # The explicit socket is always ours, never the user server.
             tm('kill-server', check=False)
