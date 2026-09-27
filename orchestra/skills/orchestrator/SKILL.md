@@ -119,6 +119,52 @@ so it cannot resume after that session/tag is lost; Codex uses the directory's n
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.
 
+## Merge and cleanup
+
+Merging and retiring a player are separate operations. While a player or its dev server is
+still running, merge an authorized PR with `gh pr merge NUMBER --squash --delete-branch=false`
+(or the authorized merge strategy). `--delete-branch` can remove the local worktree as well as
+the branch, taking a running server's working directory away. Keep the worktree until its
+consumers are done.
+
+For authorized post-merge cleanup, use this sequence, stopping on any mismatch or failure:
+
+1. Run `sessions.sh --json` and retain the exact `session`, `repo`, `worktree` and `branch`
+   before `kill.sh` discards the tags. `branch` is launch metadata: confirm the checkout's
+   current branch with `git -C WORKTREE branch --show-current`. Never derive the worktree path
+   from a branch name. Identify the PR's head repository and its matching push remote (`REMOTE`,
+   often `origin`); cleanup must target that repository's branch.
+2. Read `gh pr view NUMBER --repo OWNER/REPO --json state,headRefName,headRefOid,baseRefName`.
+   Require `state` to be `MERGED`, `headRefName` to equal `BRANCH`, and `headRefOid` (`HEAD_SHA`)
+   to equal `git -C REPO rev-parse refs/heads/BRANCH`. Retarget any open stacked child PRs whose
+   base is `BRANCH` before deleting it (`gh pr list --repo OWNER/REPO --state open --base BRANCH`):
+   use `gh pr edit CHILD --repo OWNER/REPO --base BASE`, where `BASE` is the merged PR's
+   `baseRefName`. After a squash merge, the child player must also rebase its own commits onto
+   the fetched base tip (`git rebase --onto BASE_TIP HEAD_SHA` from the child branch); retargeting
+   alone leaves the parent's commits in the child diff. Coordinate that rebase with the child
+   player before cleanup; do not rewrite an active child checkout underneath it.
+   A changed local tip means there is additional work to preserve, not permission to delete it.
+3. Account for other players/processes using `WORKTREE`, stop its dev servers, and stop each
+   player with `kill.sh SESSION`. Inspect `git -C WORKTREE status --short --ignored` and preserve
+   any needed files, including ignored local configuration such as `.env`. Confirm no other
+   worktree has `BRANCH` checked out (`git -C REPO worktree list --porcelain`). `REPO` below must be a surviving checkout, outside `WORKTREE`.
+4. Remove the worktree, delete the remote branch only at the verified head, then delete the
+   local branch. Run these in order, stopping if a command fails:
+
+   ```bash
+   git -C REPO worktree remove WORKTREE
+   git -C REPO push --force-with-lease=refs/heads/BRANCH:HEAD_SHA REMOTE --delete BRANCH
+   git -C REPO update-ref -d refs/heads/BRANCH HEAD_SHA
+   ```
+
+   If `git -C REPO ls-remote --heads REMOTE refs/heads/BRANCH` confirms the remote branch is
+   already absent, skip that push. A lease refusal means the remote tip changed: inspect it;
+   do not retry without the lease. `update-ref` atomically checks the local tip against `HEAD_SHA`
+   and refuses deletion if it moved, preserving late commits. This supports squash merges even
+   when Git's ancestry-based `branch -d` refuses. Unlike `branch -d`, `update-ref` does not protect
+   checked-out branches; the worktree checks and removal above are required. Never force-remove a dirty
+   worktree. `kill.sh` itself preserves files and branches; this cleanup owns their removal.
+
 ## The user's attention
 
 Carry the remembering, prioritising and context reconstruction so the user can spend attention
