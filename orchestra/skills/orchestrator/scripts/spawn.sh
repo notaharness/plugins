@@ -250,7 +250,9 @@ strip=(); for v in "${PARENT_SESSION_MARKERS[@]}"; do strip+=(-u "$v"); done
 # when set, and removed here when not, since the tmux server may have started with another value.
 ACCOUNT_VARS=(CLAUDE_CONFIG_DIR CODEX_HOME)
 if is_local_machine; then for v in "${ACCOUNT_VARS[@]}"; do [ -n "${!v:-}" ] || strip+=(-u "$v"); done; fi
-shell_cmd="$(sh_quote env -u TMUX -u TMUX_PANE "${strip[@]}" "TMUX_TMPDIR=$AGENT_TMUX_TMPDIR" bash "$LAUNCHER")"
+# exec: a /bin/sh such as dash forks a -c command where bash would exec it, and a pane whose
+# leader stays sh reads as a bare shell to adopt.sh and report routing.
+shell_cmd="exec $(sh_quote env -u TMUX -u TMUX_PANE "${strip[@]}" "TMUX_TMPDIR=$AGENT_TMUX_TMPDIR" bash "$LAUNCHER")"
 
 desc="$HARNESS"
 case "$HARNESS" in
