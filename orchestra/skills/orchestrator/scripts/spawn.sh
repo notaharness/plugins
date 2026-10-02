@@ -250,8 +250,7 @@ strip=(); for v in "${PARENT_SESSION_MARKERS[@]}"; do strip+=(-u "$v"); done
 # when set, and removed here when not, since the tmux server may have started with another value.
 ACCOUNT_VARS=(CLAUDE_CONFIG_DIR CODEX_HOME)
 if is_local_machine; then for v in "${ACCOUNT_VARS[@]}"; do [ -n "${!v:-}" ] || strip+=(-u "$v"); done; fi
-guard="$(printf '%q ' env -u TMUX -u TMUX_PANE "${strip[@]}" "TMUX_TMPDIR=$AGENT_TMUX_TMPDIR")"
-shell_cmd="${guard}$(printf '%q' bash) $(printf '%q' "$LAUNCHER")"
+shell_cmd="$(sh_quote env -u TMUX -u TMUX_PANE "${strip[@]}" "TMUX_TMPDIR=$AGENT_TMUX_TMPDIR" bash "$LAUNCHER")"
 
 desc="$HARNESS"
 case "$HARNESS" in
@@ -366,7 +365,7 @@ if ! t respawn-pane -k -t "$tt" -c "$workdir" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
   -e "ORCHESTRA_MODE=$MODE" -e "ORCHESTRA_HARNESS=$HARNESS" -e "ORCHESTRA_MODEL=$MODEL" -e "ORCHESTRA_EFFORT=$EFFORT" \
   -e "ORCHESTRA_PERMISSION_MODE=$PERM" -e "ORCHESTRA_COMMAND=$CMD" -e "ORCHESTRA_CLAUDE_SKILL=$CLAUDE_INVOCATION" \
-  -- /bin/bash -c "$shell_cmd"; then
+  -- /bin/sh -c "$shell_cmd"; then
   t delete-buffer -b "$buf" 2>/dev/null
   if [ $CREATED = 1 ]; then
     t kill-session -t "=$name" 2>/dev/null
