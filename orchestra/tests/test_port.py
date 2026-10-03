@@ -1611,6 +1611,7 @@ class PortTests(unittest.TestCase):
         # The pane runs _launch.sh on the target, where this machine's absolute plugin path does
         # not exist: the launcher is the one under the target's own $HOME, at the same path
         # relative to $HOME as here (Claude Code's plugin cache), and nothing here is referenced.
+        # The pane command is a POSIX sh line, since the target may have no /bin/bash (NixOS).
         self.enable_remote_machine()
         self.env['TEST_PANE_ALIVE'] = '1'
         remote_repo = self.remote/'remote-repo'; self.git_init(remote_repo)
@@ -1618,7 +1619,9 @@ class PortTests(unittest.TestCase):
                            '--branch', 'feature/remote', '--from', 'HEAD', '--prompt', 'p', '--no-node-modules', '--agent', 'codex'])
         self.assertEqual(x.returncode, 0, x.stderr)
         launch = next(c for c in self.beam_calls() if c[:2] == ['exec', 'workbox'] and 'respawn-pane' in c)
-        cmd = launch[launch.index('-c', launch.index('/bin/bash')) + 1]
+        # /bin/sh, not /bin/bash: NixOS has only /bin/sh at a fixed path, bash lives on PATH.
+        self.assertNotIn('/bin/bash', launch, launch)
+        cmd = launch[launch.index('-c', launch.index('/bin/sh')) + 1]
         self.assertIn(str(self.remote_home/'skills/orchestrator/scripts/_launch.sh'), cmd, cmd)
         self.assertNotIn(self.script('_launch.sh'), cmd, cmd)
         self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')

@@ -216,6 +216,11 @@ session_exists() { tmux_on "" has-session -t "=$1" 2>/dev/null || { echo "no suc
 # Visible pane text, trailing whitespace trimmed, runs of blank lines collapsed.
 screen_text() { tmux_on "" capture-pane -p -t "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2'; }
 
+# sh_quote <word>...: the words single-quoted for a POSIX sh command line, space-separated. The
+# pane command runs under /bin/sh (the one shell path NixOS guarantees), where printf %q's bash-only
+# $'...' form for control characters would not parse.
+sh_quote() { local w sq="'" esc="'\\''" out=(); for w; do out+=("'${w//$sq/$esc}'"); done; local IFS=' '; printf '%s' "${out[*]}"; }
+
 # Every agent runs with TMUX unset and TMUX_TMPDIR on a scratch dir, so nothing it runs —
 # tests included — can reach the socket that hosts the user's live sessions.
 AGENT_TMUX_TMPDIR=/tmp/orchestra-agent-tmux
