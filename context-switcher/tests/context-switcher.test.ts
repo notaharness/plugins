@@ -10,7 +10,7 @@ type Dollar = Engine
 
 /** Stand in for the engine beneath the mod; collects what the mod asked of it. */
 function engine(on: On) {
-  const seen = { tools: [] as string[], panes: [] as string[] }
+  const seen = { tools: [] as string[], panes: [] as string[], listed: [] as string[] }
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => {
@@ -27,6 +27,8 @@ function engine(on: On) {
   on('tool.describe', ($, e) => ({ description: e.description, isDeferred: true }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('tool.list', () => ({ value: seen.listed.map(name => ({ name, description: '', mcp: true })) }))
+  on('tool.call', () => ({ result: 'ok' }))
   return seen
 }
 
@@ -100,7 +102,9 @@ async function drawn(mounted: Awaited<ReturnType<typeof row>>) {
  */
 const keep = ($: Dollar, row: Record<string, unknown>) => $.session.append(row as any).catch(() => undefined)
 
-/** One turn of the main loop: a prompt, its kept rows, and its end. */
+let nextDuration = 1000
+
+/** One turn of the main loop: a prompt, its kept rows, and its end. Resolves the submitted prompt and the turn's length. */
 async function turn($: Dollar, prompt: string, rows: { uuid: string; toolUseIds?: string[] }[]) {
   const submitted = await $.prompt.submit({ text: prompt, origin: { kind: 'composer' }, wait: false } as any)
   await $.turn.start({ text: prompt, turnId: `turn-${prompt}` })
@@ -124,17 +128,58 @@ async function turn($: Dollar, prompt: string, rows: { uuid: string; toolUseIds?
       origin: { kind: 'model', model: 'claude-test' },
       uuid: one.uuid,
     })
-  await $.turn.complete({ turnId: `turn-${prompt}`, answer: 'Done.', durationMs: 1, isAborted: false, reason: 'answer' } as any)
-  return submitted
+  const durationMs = nextDuration++
+  await $.turn.complete({ turnId: `turn-${prompt}`, answer: 'Done.', durationMs, isAborted: false, reason: 'answer' } as any)
+  return { ...submitted, durationMs }
 }
+
+/** An assistant row of one block, kept as the engine keeps each block of a reply. */
+const say = ($: Dollar, uuid: string, block: Record<string, unknown>, agentId?: string) =>
+  keep($, {
+    message: { type: 'assistant', role: 'assistant', content: [block] },
+    door: 'response',
+    origin: { kind: 'model', model: 'claude-test' },
+    uuid,
+    ...(agentId ? { agentId } : {}),
+  })
+
+const text = (value: string) => ({ type: 'text', text: value })
+
+/** Starts a turn from a prompt the user typed in the view on screen. */
+async function begin($: Dollar, prompt: string) {
+  await $.prompt.submit({ text: prompt, origin: { kind: 'composer' }, wait: false } as any)
+  await $.turn.start({ text: prompt, turnId: `turn-${prompt}` })
+}
+
+const end = ($: Dollar, prompt: string, durationMs = nextDuration++) =>
+  $.turn.complete({ turnId: `turn-${prompt}`, answer: 'Done.', durationMs, isAborted: false, reason: 'answer' } as any)
+
+const userRow = ($: Dollar, requestId: string, value: string) =>
+  row($, 'UserMessage', requestId, { text: value, origin: { kind: 'composer' }, isExpanded: false })
+
+const thinkingRow = ($: Dollar, requestId: string) => row($, 'ToolGroup', requestId, { calls: [], isActive: false, isExpanded: false })
+
+const durationRow = ($: Dollar, requestId: string, durationMs: number) =>
+  row($, 'TurnDuration', requestId, { word: 'Baked', durationMs })
+
+const compose = ($: Dollar) =>
+  $.prompt.compose({ model: 'claude-test', promptModel: 'claude-test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as any)
+
+/** The sidebar's unread count, or undefined with none: used where only one entry can have one. */
+async function badge($: Dollar) {
+  const ui = await pane($)
+  const count = await ui.find({ type: 'Text', text: /^ \d+$/ })
+  await ui.unmount()
+  return count === undefined ? undefined : JSON.stringify(count).match(/ \d+/)?.[0]
+}
+
 
 test('until /contexts runs, the mod offers nothing and filters nothing', async ($, on) => {
   const seen = engine(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
 
   expect(seen.tools).toEqual([])
-  const composed = await $.prompt.compose({ model: 'claude-test', promptModel: 'claude-test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as any)
-  expect(composed.sections.map(section => section.id)).toEqual(['intro'])
+  expect((await compose($)).sections.map(section => section.id)).toEqual(['intro'])
   const submitted = await $.prompt.submit({ text: 'hello', origin: { kind: 'composer' }, wait: false } as any)
   expect(submitted.context).toBeUndefined()
   expect(await drawn(await postRow($, 't1', 'CI flakes', 'Run failed'))).toBe('engine')
@@ -159,9 +204,21 @@ test('/contexts registers the tool up front, opens the sidebar and adds the guid
   expect(seen.panes).toEqual(['contexts'])
   const described = await $.tool.describe({ tool: TOOL, description: 'Post.', isDeferred: true, provider: { plugin: 'context-switcher', tier: 'user' } } as any)
   expect(described.isDeferred).toBe(false)
-  const composed = await $.prompt.compose({ model: 'claude-test', promptModel: 'claude-test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as any)
+  const composed = await compose($)
   expect(composed.sections.map(section => section.id)).toEqual(['intro', 'context-switcher:guide'])
   expect(composed.sections[1]).toMatchObject({ scope: 'session' })
+})
+
+test('a fresh load of the module after /clear stays on while the tool is still registered', async ($, on) => {
+  // /clear reset $.state, so only the registered tool says the session had turned it on
+  const seen = engine(on)
+  seen.listed.push(TOOL)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+
+  expect(seen.tools).toEqual(['post'])
+  expect((await compose($)).sections.map(section => section.id)).toContain('context-switcher:guide')
+  const pointer = await postRow($, 'p1', 'Alpha', 'hello')
+  expect(await pointer.find({ type: 'Text', text: '→ Alpha' })).toBeDefined()
 })
 
 test('a post creates its context and counts unread posts until the user opens it', async ($, on) => {
@@ -211,7 +268,7 @@ test('Main chat draws its own rows and one pointer line per post', async ($, on)
 
   expect(await drawn(await assistantRow($, 'main-reply'))).toBe('engine')
   expect(await drawn(await assistantRow($, 'ci-reply'))).toBe('nothing')
-  expect(await drawn(await row($, 'UserMessage', 'prompt-why is CI red', { text: 'why is CI red', origin: { kind: 'composer' }, isExpanded: false }))).toBe('nothing')
+  expect(await drawn(await userRow($, 'prompt-why is CI red', 'why is CI red'))).toBe('nothing')
 
   const pointer = await postRow($, 'p1', 'CI flakes', '## Run 4812\nfailed on linux', true)
   expect(await pointer.find({ type: 'Text', text: '→ CI flakes' })).toBeDefined()
@@ -234,16 +291,49 @@ test('a context view draws that context in full and nothing else', async ($, on)
   expect(await drawn(await postRow($, 'p2', 'Release notes', 'Draft ready'))).toBe('nothing')
   expect(await drawn(await assistantRow($, 'ci-reply'))).toBe('engine')
   expect(await drawn(await assistantRow($, 'main-reply'))).toBe('nothing')
-  expect(await drawn(await row($, 'UserMessage', 'prompt-why is CI red', { text: 'why is CI red', origin: { kind: 'composer' }, isExpanded: false }))).toBe('engine')
+  expect(await drawn(await userRow($, 'prompt-why is CI red', 'why is CI red'))).toBe('engine')
 
   const toolRow = (id: string) => row($, 'ToolUse', id, { tool_use_id: id, tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false })
   expect(await drawn(await toolRow('toolu_ci'))).toBe('engine')
   expect(await drawn(await toolRow('toolu_main'))).toBe('nothing')
   const group = (requestId: string, ids: string[]) =>
     row($, 'ToolGroup', requestId, { calls: ids.map(id => ({ tool_use_id: id, tool: 'Read', input: {}, isRunning: false, isErrored: false, isInterrupted: false })), isActive: false, isExpanded: false })
-  expect(await drawn(await group('collapsed-ci-reply', ['toolu_ci']))).toBe('engine')
-  expect(await drawn(await group('collapsed-main-reply', ['toolu_main']))).toBe('nothing')
+  expect(await drawn(await group('g1', ['toolu_ci']))).toBe('engine')
+  expect(await drawn(await group('g2', ['toolu_main']))).toBe('nothing')
+  expect(await drawn(await group('g3', ['toolu_ci', 'toolu_main']))).toBe('nothing')
   expect(await drawn(await row($, 'ToolResult', 'p1', { tool_use_id: 'p1', tool: TOOL, output: 'Posted.', isErrored: false }))).toBe('nothing')
+})
+
+test("a folded thinking line follows its assistant row's context", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'CI flakes', 'x')
+  await show($, 'context-1')
+  await begin($, 'think about it')
+  await say($, 'ci-thought', { type: 'thinking', thinking: 'hmm' })
+  await say($, 'ci-answer', text('An answer.'))
+  await end($, 'think about it')
+
+  expect(await drawn(await thinkingRow($, 'collapsed-ci-thought'))).toBe('engine')
+  await show($, 'main')
+  expect(await drawn(await thinkingRow($, 'collapsed-ci-thought'))).toBe('nothing')
+  expect(await drawn(await thinkingRow($, 'collapsed-unknown'))).toBe('engine')
+})
+
+test("a context turn's duration line belongs to that context", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'CI flakes', 'x')
+  await show($, 'context-1')
+  const { durationMs } = await turn($, 'rerun it', [{ uuid: 'ci-reply' }])
+  await show($, 'main')
+  const { durationMs: mainMs } = await turn($, 'what next', [{ uuid: 'main-reply' }])
+
+  expect(await drawn(await durationRow($, 'd1', durationMs))).toBe('nothing')
+  expect(await drawn(await durationRow($, 'd2', mainMs))).toBe('engine')
+  await show($, 'context-1')
+  expect(await drawn(await durationRow($, 'd1', durationMs))).toBe('engine')
+  expect(await drawn(await durationRow($, 'd2', mainMs))).toBe('nothing')
 })
 
 test('a prompt written in a context carries a note naming it; one in Main chat does not', async ($, on) => {
@@ -262,20 +352,61 @@ test('a prompt written in a context carries a note naming it; one in Main chat d
   expect(notified.context).toBeUndefined()
 })
 
+test('the same prompt text in two views keeps each row where it was typed', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Alpha', 'x')
+  await show($, 'context-1')
+  await begin($, 'ok')
+  await keep($, { message: { type: 'user', role: 'user', content: [text('ok')] }, door: 'prompt', origin: { kind: 'composer' }, uuid: 'ok-in-alpha' })
+  await end($, 'ok')
+  await show($, 'main')
+  await begin($, 'ok')
+  await keep($, { message: { type: 'user', role: 'user', content: [text('ok')] }, door: 'prompt', origin: { kind: 'composer' }, uuid: 'ok-in-main' })
+  await end($, 'ok')
+
+  expect(await drawn(await userRow($, 'ok-in-alpha', 'ok'))).toBe('nothing')
+  expect(await drawn(await userRow($, 'ok-in-main', 'ok'))).toBe('engine')
+  await show($, 'context-1')
+  expect(await drawn(await userRow($, 'ok-in-alpha', 'ok'))).toBe('engine')
+})
+
+test('a fresh prompt drawn before its row is kept shows in the view it was typed in', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Alpha', 'x')
+  await show($, 'context-1')
+  await $.prompt.submit({ text: 'look at this', origin: { kind: 'composer' }, wait: false } as any)
+
+  expect(await drawn(await userRow($, 'placeholder', 'look at this'))).toBe('engine')
+  await show($, 'main')
+  expect(await drawn(await userRow($, 'placeholder', 'look at this'))).toBe('nothing')
+})
+
+test('/clear forgets which context a prompt text was typed in', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Alpha', 'x')
+  await show($, 'context-1')
+  await $.prompt.submit({ text: 'look at this', origin: { kind: 'composer' }, wait: false } as any)
+  await $.session.end({ reason: 'clear', sessionId: 's', resume: {} } as any).catch(() => undefined)
+
+  expect(await drawn(await userRow($, 'placeholder', 'look at this'))).toBe('nothing')
+})
+
 test('a task notification belongs to the context of the call that started the task', async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'CI flakes', 'x')
   await show($, 'context-1')
   await turn($, 'watch the run', [{ uuid: 'ci-reply', toolUseIds: ['toolu_watch'] }])
-  await turn($, 'start the build', [{ uuid: 'ci-reply-2', toolUseIds: ['toolu_build'] }])
   await show($, 'main')
   await turn($, 'start the docs build', [{ uuid: 'main-reply', toolUseIds: ['toolu_docs'] }])
 
-  const text = '<task-notification><task-id>b1</task-id><tool-use-id>toolu_watch</tool-use-id><status>completed</status></task-notification>'
-  const notified = await $.prompt.submit({ text, origin: { kind: 'task-notification' }, wait: false } as any)
+  const notice = '<task-notification><task-id>b1</task-id><tool-use-id>toolu_watch</tool-use-id><status>completed</status></task-notification>'
+  const notified = await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, wait: false } as any)
   expect(notified.context?.[0]).toMatch(/about the context "CI flakes"/)
-  const unrelated = await $.prompt.submit({ text: text.replace('toolu_watch', 'toolu_docs'), origin: { kind: 'task-notification' }, wait: false } as any)
+  const unrelated = await $.prompt.submit({ text: notice.replace('toolu_watch', 'toolu_docs'), origin: { kind: 'task-notification' }, wait: false } as any)
   expect(unrelated.context).toBeUndefined()
 
   const notification = (id: string, toolUseId: string) =>
@@ -287,57 +418,111 @@ test('a task notification belongs to the context of the call that started the ta
   expect(await drawn(await notification('n2', 'toolu_docs'))).toBe('nothing')
 
   // The turn the notification starts is that context's too
-  await $.turn.start({ text, turnId: 'turn-notified' })
-  await keep($, { message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'It passed.' }] }, door: 'response', origin: { kind: 'model', model: 'claude-test' }, uuid: 'notified-reply' })
+  await $.turn.start({ text: notice, turnId: 'turn-notified' })
+  await say($, 'notified-reply', text('It passed.'))
   expect(await drawn(await assistantRow($, 'notified-reply'))).toBe('engine')
 })
 
-test('Main chat counts replies that land while the user is in a context', async ($, on) => {
+test("a subagent's turn ending does not end the context turn that started it", async ($, on) => {
   engine(on)
   await turnOn($)
-  await post($, 'CI flakes', 'x')
+  await post($, 'Alpha', 'x')
   await show($, 'context-1')
-  await $.prompt.submit({ text: 'ping', origin: { kind: 'peer' }, wait: false } as any)
-  await $.turn.start({ text: 'ping', turnId: 'peer' })
-  await $.turn.complete({ turnId: 'peer', answer: 'pong', durationMs: 1, isAborted: false, reason: 'answer' } as any)
+  await begin($, 'research it')
+  await $.turn.complete({ turnId: 'sub', agentId: 'agent-1', answer: 'found', durationMs: 5, isAborted: false, reason: 'answer' } as any)
+  await say($, 'after-subagent', text('The subagent found it.'))
 
-  const ui = await pane($)
-  expect(await ui.find({ type: 'Text', text: ' 1' })).toBeDefined()
-  await ui.press({ key: 'main' })
-  await ui.unmount()
-  const after = await pane($)
-  expect(await after.find({ type: 'Text', text: ' 1' })).toBeUndefined()
+  expect(await drawn(await assistantRow($, 'after-subagent'))).toBe('engine')
 })
 
-test("in a context's turn, text after Claude posts there is hidden; text before it stays", async ($, on) => {
+test("Claude's closing recap of a post in its own context is hidden; the rest of the turn stays", async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'CI flakes', 'x')
   await show($, 'context-1')
 
-  const say = (uuid: string, text: string) =>
-    keep($, { message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text }] }, door: 'response', origin: { kind: 'model', model: 'claude-test' }, uuid })
-  await $.prompt.submit({ text: 'rerun it', origin: { kind: 'composer' }, wait: false } as any)
-  await $.turn.start({ text: 'rerun it', turnId: 'rerun' })
-  await say('before', 'Rerunning now.')
+  await begin($, 'rerun it')
+  await say($, 'before', text('Rerunning now.'))
   await post($, 'CI flakes', 'Run 4813 started')
-  await say('after', 'I posted the rerun to CI flakes.')
-  await $.turn.complete({ turnId: 'rerun', answer: 'I posted the rerun to CI flakes.', durationMs: 1, isAborted: false, reason: 'answer' } as any)
+  await say($, 'recap-thought', { type: 'thinking', thinking: 'brief line' })
+  await say($, 'recap', text('I posted the rerun to CI flakes.'))
+  await end($, 'rerun it')
 
   expect(await drawn(await assistantRow($, 'before'))).toBe('engine')
-  expect(await drawn(await assistantRow($, 'after'))).toBe('nothing')
-  const thought = (requestId: string) => row($, 'ToolGroup', requestId, { calls: [], isActive: false, isExpanded: false })
-  expect(await drawn(await thought('collapsed-after'))).toBe('nothing')
-  expect(await drawn(await thought('collapsed-before'))).toBe('engine')
+  expect(await drawn(await assistantRow($, 'recap'))).toBe('nothing')
+  expect(await drawn(await thinkingRow($, 'collapsed-recap-thought'))).toBe('nothing')
   await show($, 'main')
-  expect(await drawn(await assistantRow($, 'after'))).toBe('nothing')
+  expect(await drawn(await assistantRow($, 'recap'))).toBe('nothing')
+})
 
-  // A Main chat turn that posts keeps its own summary
-  await $.prompt.submit({ text: 'post it', origin: { kind: 'composer' }, wait: false } as any)
-  await $.turn.start({ text: 'post it', turnId: 'main' })
-  await post($, 'CI flakes', 'Posted from Main')
-  await say('main-summary', 'Posted to CI flakes.')
-  expect(await drawn(await assistantRow($, 'main-summary'))).toBe('engine')
+test('text after a post and then another tool call is the answer, and stays', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await show($, 'context-1')
+
+  await begin($, 'read the file')
+  await post($, 'Notes', 'starting')
+  await say($, 'between', text('Now reading notes.txt.'))
+  await $.tool.call({ tool: 'Read', file_path: 'notes.txt' } as any)
+  await say($, 'answer', text('FILE SAYS hello'))
+  await end($, 'read the file')
+
+  expect(await drawn(await assistantRow($, 'between'))).toBe('engine')
+  expect(await drawn(await assistantRow($, 'answer'))).toBe('engine')
+})
+
+test("a subagent's post does not make the context turn's answer a recap", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await show($, 'context-1')
+
+  await begin($, 'look into it')
+  await $.tool.call({ tool: TOOL, context: 'Notes', text: 'from the subagent', agentId: 'agent-1' } as any)
+  await say($, 'answer', text('Here is what I found.'))
+  await end($, 'look into it')
+
+  expect(await drawn(await assistantRow($, 'answer'))).toBe('engine')
+})
+
+test("a recap belongs to its own turn: the next turn's text stays", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await show($, 'context-1')
+
+  await begin($, 'one')
+  await post($, 'Notes', 'first')
+  await end($, 'one')
+  await begin($, 'two')
+  await say($, 'second-answer', text('A plain answer.'))
+  await end($, 'two')
+
+  expect(await drawn(await assistantRow($, 'second-answer'))).toBe('engine')
+})
+
+test('Main chat counts its replies that land while the user is in a context, not its post recaps', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'CI flakes', 'x')
+  await show($, 'context-1')
+
+  await $.prompt.submit({ text: 'ping', origin: { kind: 'peer' }, wait: false } as any)
+  await $.turn.start({ text: 'ping', turnId: 'peer' })
+  await post($, 'CI flakes', 'from the peer')
+  await say($, 'peer-recap', text('Posted to CI flakes.'))
+  await end($, 'peer')
+  expect(await badge($)).toBeUndefined()
+
+  await $.prompt.submit({ text: 'ping again', origin: { kind: 'peer' }, wait: false } as any)
+  await $.turn.start({ text: 'ping again', turnId: 'peer-2' })
+  await say($, 'peer-answer', text('pong'))
+  await end($, 'peer-2')
+  expect(await badge($)).toBe(' 1')
+
+  await show($, 'main')
+  expect(await badge($)).toBeUndefined()
 })
 
 test('a pointer line shows the first line of the post without Markdown marks', async ($, on) => {

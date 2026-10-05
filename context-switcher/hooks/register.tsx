@@ -16,6 +16,7 @@ const contexts = atom({ plugin: 'context-switcher', key: 'contexts' } as const, 
 const mainUnread = atom({ plugin: 'context-switcher', key: 'mainUnread' } as const, 0)
 const ROW = { plugin: 'context-switcher', key: 'rowContext' } as const
 const ECHO = { plugin: 'context-switcher', key: 'isEcho' } as const
+const DURATION = { plugin: 'context-switcher', key: 'durationContext' } as const
 
 const GUIDE = `# Context Switcher
 
@@ -34,11 +35,23 @@ const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().t
 
 /** The prompt text to the context it was written in, read when its turn starts and its row is drawn. */
 const promptContext = new Map<string, string>()
-/** The context of the main loop's running turn, whether it has posted there yet, and the context of the turn that just ended (for its duration line). */
+/**
+ * The main loop's running turn: its context; the context of its last tool call when that was a
+ * post (null otherwise); the assistant rows kept since that call; and whether it wrote text that
+ * is not a recap of a post.
+ */
 let turnContext = MAIN
-let hasTurnPosted = false
-let endedContext: string | null = null
+let lastPostContext: string | null = null
+let rowsSinceTool: string[] = []
+let hasOwnText = false
 let isToolRegistered = false
+
+function startTurn(context: string) {
+  turnContext = context
+  lastPostContext = null
+  rowsSinceTool = []
+  hasOwnText = false
+}
 
 function rememberPrompt(text: string, context: string) {
   promptContext.delete(text)
@@ -51,11 +64,16 @@ function withNote<E extends { context?: readonly string[] }>(e: E, note: string)
 }
 
 /**
- * On once /contexts has run, for the rest of the session. The tool cannot be taken back, so a
- * /clear (which resets $.state) leaves it on; the state value carries it over a reload of the mod.
+ * On once /contexts has run, for the rest of the session: the tool cannot be taken back. The
+ * module flag outlives a /clear (which resets $.state), the state value a reload of the module.
  */
 async function isActive($: EngineInterface) {
   return isToolRegistered || (await read($, isOn))
+}
+
+/** After a /clear, write the state value back, so a later reload of the module finds it on. */
+async function keepOn($: EngineInterface) {
+  if (isToolRegistered && !(await read($, isOn))) await update($, isOn, () => true)
 }
 
 async function turnOn($: EngineInterface) {
@@ -102,23 +120,33 @@ async function contextOf($: EngineInterface, e: RenderInput): Promise<string> {
     if (e.props.origin.kind === 'composer') return promptContext.get(e.props.text) ?? MAIN
   }
   if (e.component === 'ToolGroup') {
-    const first = /^collapsed-(.+)$/.exec(e.requestId)?.[1]
-    if (first) {
-      const ofFirst = await read($, { ...ROW, id: first })
-      if (ofFirst !== undefined) return ofFirst
-    }
     const ids = e.props.calls.flatMap(call => (call.tool_use_id ? [call.tool_use_id] : []))
-    const found = await Promise.all(ids.map(async id => (await read($, { ...ROW, id })) ?? MAIN))
-    if (found.length > 0 && found.every(context => context === found[0])) return found[0]!
+    if (ids.length > 0) {
+      const found = await Promise.all(ids.map(async id => (await read($, { ...ROW, id })) ?? MAIN))
+      return found.every(context => context === found[0]) ? found[0]! : MAIN
+    }
+    const row = thinkingRowOf(e.requestId)
+    if (row) return (await read($, { ...ROW, id: row })) ?? MAIN
   }
+  if (e.component === 'TurnDuration')
+    return (await read($, { ...DURATION, id: String(e.props.durationMs) })) ?? MAIN
   return MAIN
 }
 
-/** An assistant row, or the folded thinking line it opens, that only sums up a post of its turn. */
+/**
+ * The assistant row a folded thinking line (a ToolGroup with no calls) belongs to. Not part of
+ * the documented API: observed as the id `collapsed-<uuid of that row>`. Any other id leaves the
+ * line in Main chat and keeps a recap's thinking line in view.
+ */
+function thinkingRowOf(requestId: string) {
+  return /^collapsed-(.+)$/.exec(requestId)?.[1]
+}
+
+/** A recap of a post: an assistant row, or its folded thinking line, that ends a context's turn after it posted there. */
 async function isEcho($: EngineInterface, e: RenderInput) {
   if (e.component === 'AssistantMessage') return (await read($, { ...ECHO, id: e.requestId })) === true
-  const first = e.component === 'ToolGroup' ? /^collapsed-(.+)$/.exec(e.requestId)?.[1] : undefined
-  return first !== undefined && (await read($, { ...ECHO, id: first })) === true
+  const row = e.component === 'ToolGroup' && e.props.calls.length === 0 ? thinkingRowOf(e.requestId) : undefined
+  return row !== undefined && (await read($, { ...ECHO, id: row })) === true
 }
 
 type PostInput = { context?: unknown; text?: unknown; needsUser?: unknown }
@@ -144,16 +172,17 @@ export const register: Register = on => {
       description: 'Turn on Context Switcher and open its sidebar',
       immediate: true,
     })
-    // A reload keeps $.state: put the tool back if the session had turned it on
-    if (await read($, isOn)) await turnOn($)
+    // A fresh load of the module: stay on if the session turned it on (state), or if the
+    // tool is still registered after a /clear reset the state
+    const wasOn = (await read($, isOn)) || (await $.tool.list()).some(tool => tool.name === TOOL)
+    if (wasOn) await turnOn($)
     return next(e)
   })
 
   // /clear starts the conversation over: its rows and contexts go with it
   on('session.end', async ($, e, next) => {
     promptContext.clear()
-    turnContext = MAIN
-    endedContext = null
+    startTurn(MAIN)
     return next(e)
   })
 
@@ -199,14 +228,29 @@ export const register: Register = on => {
       )
     })
     const name = list.find(entry => sameName(entry.name, post.context))?.name ?? post.context
-    if (turnContext !== MAIN && sameName(turnContext, name)) hasTurnPosted = true
+    if (e.agentId === undefined) {
+      lastPostContext = name
+      rowsSinceTool = []
+    }
     return { result: `Posted to "${name}".` }
+  })
+
+  // Any other tool call of the main loop: what Claude writes next is not a recap of a post
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId === undefined && String(e.tool) !== TOOL) {
+      lastPostContext = null
+      rowsSinceTool = []
+    }
+    return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
     if (!(await isActive($))) return next(e)
+    await keepOn($)
     if (e.origin.kind === 'task-notification') {
-      // The notification belongs to the context of the call that started the task
+      // The notification belongs to the context of the call that started the task. Its id is
+      // read from the notification's text, a format the engine writes but does not document;
+      // a notification without it stays in Main chat
       const startedBy = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(e.text)?.[1]
       const context = startedBy ? ((await read($, { ...ROW, id: startedBy })) ?? MAIN) : MAIN
       rememberPrompt(e.text, context)
@@ -229,17 +273,22 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    turnContext = promptContext.get(e.text) ?? MAIN
-    hasTurnPosted = false
+    startTurn(promptContext.get(e.text) ?? MAIN)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) {
-      if (turnContext === MAIN && e.answer.trim() !== '' && (await read($, view)) !== MAIN)
+    if (e.agentId === undefined && (await isActive($))) {
+      if (turnContext !== MAIN) {
+        // Claude sums up a post it ended its turn on; in the context that reads twice
+        if (lastPostContext !== null && sameName(lastPostContext, turnContext))
+          for (const id of rowsSinceTool) await $.state.set({ ...ECHO, id }, true)
+        // The turn's duration line carries the turn's length, the one thing that ties it to the turn
+        await $.state.set({ ...DURATION, id: String(e.durationMs) }, turnContext)
+      } else if (hasOwnText && (await read($, view)) !== MAIN) {
         await update($, mainUnread, n => n + 1)
-      endedContext = turnContext
-      turnContext = MAIN
+      }
+      startTurn(MAIN)
     }
     return next(e)
   })
@@ -247,22 +296,20 @@ export const register: Register = on => {
   // Tie each kept row of a context's turn to that context, by the id its row is drawn under
   on('session.append', async ($, e, next) => {
     if (e.agentId !== undefined || !(await isActive($))) return next(e)
+    await keepOn($)
     const { message } = e
     if (message.type === 'user' && e.door === 'prompt') {
       const first = message.content.find(block => block.type === 'text')?.text
       const context = typeof first === 'string' ? promptContext.get(first) : undefined
       if (context) await $.state.set({ ...ROW, id: e.uuid }, context)
-    } else if (message.type === 'assistant' && turnContext !== MAIN) {
-      await $.state.set({ ...ROW, id: e.uuid }, turnContext)
-      // Claude tends to sum up a post it just made; in the context that reads twice
-      if (hasTurnPosted && !message.content.some(block => block.type === 'tool_use'))
-        await $.state.set({ ...ECHO, id: e.uuid }, true)
-      for (const block of message.content)
-        if (block.type === 'tool_use' && typeof block.id === 'string') await $.state.set({ ...ROW, id: block.id }, turnContext)
-    } else if (message.type === 'system' && e.door === 'notice' && endedContext !== null) {
-      // The turn's duration line is the notice kept right after it ends
-      if (endedContext !== MAIN) await $.state.set({ ...ROW, id: e.uuid }, endedContext)
-      endedContext = null
+    } else if (message.type === 'assistant') {
+      rowsSinceTool.push(e.uuid)
+      if (lastPostContext === null && message.content.some(block => block.type === 'text')) hasOwnText = true
+      if (turnContext !== MAIN) {
+        await $.state.set({ ...ROW, id: e.uuid }, turnContext)
+        for (const block of message.content)
+          if (block.type === 'tool_use' && typeof block.id === 'string') await $.state.set({ ...ROW, id: block.id }, turnContext)
+      }
     }
     return next(e)
   })

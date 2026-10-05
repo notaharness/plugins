@@ -65,8 +65,9 @@ the CI run in its own context") or let it route updates on its own.
   that context. A background task's notification belongs to the context of the call that
   started it; anything that cannot be traced belongs to Main chat.
 - Rows outside the selected view draw as nothing, so they take no lines.
-- Text and thinking Claude writes after it has posted into the context of its own turn, with no
-  further tool calls, is hidden: it restates the post.
+- When a context's turn ends on a post into that context, the text and thinking Claude writes
+  after it are hidden: Claude Code nudges a turn that ends on a tool call into a closing line,
+  which only repeats the post. Text after any later tool call is part of the answer and stays.
 
 ## Limitations
 
@@ -76,7 +77,7 @@ the CI run in its own context") or let it route updates on its own.
   go without it.
 - **No unfiltered view.** Main chat collapses context traffic to pointer lines, and the ctrl+o
   transcript shows the selected view too, except Claude's thinking, which shows there in every
-  view.
+  view. The closing recap of a post (see above) shows in no view.
 - **Some rows show in every view**: slash-command echo lines (`❯ /clear`), notices and other rows
   Claude Code draws without a hook a mod can reach.
 - **The sticky prompt header** at the top of a scrolled transcript can show a prompt from
@@ -85,10 +86,29 @@ the CI run in its own context") or let it route updates on its own.
   chat turn notifies Main chat; Claude then posts the result to a context if it belongs to one.
 - **A prompt typed while Claude is busy** with another context's turn reaches Claude with its
   note, but the rows of the running turn stay where they were.
-- **Contexts last for the session.** `/clear` empties them, and a resumed session starts with
-  none; earlier posts still show as pointer lines in Main chat.
+- **Contexts last for the session.** `/clear` empties them. A resumed session starts with none
+  and draws earlier posts as plain tool calls until you run `/contexts`; then they show as
+  pointer lines in Main chat, and the rest of the earlier traffic stays in Main chat.
 - **Claude routes the traffic.** It may sometimes answer in Main chat what belongs in a context,
   or the other way round.
+
+## Observed behaviour it relies on
+
+Three things the mod relies on are what Claude Code 2.1.289 does, not documented API. If an
+update changes one, that part degrades as described and the rest keeps working:
+
+- **The folded thinking line's id.** A thinking line is drawn as a tool group with no calls,
+  whose id is `collapsed-<id of its assistant row>`. The mod reads its context from that id.
+  If the shape changes, a context's thinking lines show in Main chat instead, and the thinking
+  line of a hidden recap stays in view.
+- **The task id in a notification's text.** When a task notification arrives, the mod reads the
+  id of the call that started the task from the `<tool-use-id>` in its text, to put Claude's
+  reply in that context and to tell Claude which context it is about. If the format changes,
+  Claude's reply to the notification lands in Main chat. The notification row itself uses the
+  documented `task.toolUseId` and keeps its context.
+- **A turn's duration line carries the turn's length.** The mod ties a duration line to its turn
+  by the line's `durationMs` and the turn's `turn.complete` `durationMs`. If the two stop
+  matching, a context turn's duration line shows in Main chat.
 
 ## Tests
 
@@ -99,5 +119,8 @@ claude plugin validate --strict ./context-switcher
 claude plugin test ./context-switcher
 ```
 
-The tests drive the mod's hooks with no model calls: the command and its fullscreen check, the
-tool and the sidebar's counts, the rows each view draws, prompt notes and notification mapping.
+The tests drive the mod's hooks with no model calls: the command and its fullscreen check,
+staying on across a reload, the tool and the sidebar's counts, the rows each view draws
+(prompts, replies, tool rows and groups, thinking and duration lines, notifications), prompt
+notes, recap hiding and Main chat's unread count. Closing the sidebar (which the test kit cannot
+raise) and `/clear` (which it cannot reset) are checked by hand.

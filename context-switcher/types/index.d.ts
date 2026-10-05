@@ -19,8 +19,10 @@ declare module 'claude-code' {
       mainUnread: number
       /** The context a transcript row belongs to, by row id; absent is Main chat. */
       rowContext: StateFamily<string>
-      /** An assistant row (text or thinking) after a post into its own context's turn, with no tool call: it sums up the post. */
+      /** An assistant row (text or thinking) that ends a context's turn after it posted there: it sums up the post. */
       isEcho: StateFamily<boolean>
+      /** The context of a turn's duration line, by the turn's length in milliseconds; absent is Main chat. */
+      durationContext: StateFamily<string>
     }
   }
 }

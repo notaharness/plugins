@@ -47,6 +47,8 @@ bash orchestra/tests/smoke_tmux.sh
 ```
 
 Both use temporary Git repositories and fake agent CLIs, so they make no model calls.
+The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
+sessions, delivery through `codex queue`, or a spawn on a real second machine.
 
 For Context Switcher:
 
@@ -56,8 +58,6 @@ claude plugin test ./context-switcher
 ```
 
 These drive the mod's hooks through Claude Code's test kit, with no session or model calls.
-The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
-sessions, delivery through `codex queue`, or a spawn on a real second machine.
 
 ## Versions
 
