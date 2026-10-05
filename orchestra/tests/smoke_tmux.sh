@@ -34,6 +34,12 @@ T="$T"
 cp "\$T/last-$cli" "\$T/last-call"
 if [ -f "\$T/fake-$cli-noconv" ]; then echo 'No conversation found to continue'; exit 1; fi
 if [ -f "\$T/fake-$cli-exit" ]; then exit "\$(cat "\$T/fake-$cli-exit")"; fi
+if [ "$cli" = codex ] && [ -f "\$T/fake-codex-rollout" ] && [ "\${1:-}" != resume ]; then
+  id="\$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)"
+  rollout="\$CODEX_HOME/sessions/2026/09/13/rollout-2026-09-13T12-00-00-\$id.jsonl"
+  printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "\$id" "\$PWD" > "\$rollout"
+  exec 3<"\$rollout"
+fi
 exec cat >> "\$T/received-$cli"
 FAKE
 chmod +x "$T/bin/$cli"; done
@@ -327,10 +333,61 @@ check "adopt.sh by session name" "bash '$O/adopt.sh' '$SD' --orchestrator tmux:p
 tm send-keys -t "=$SD:" C-d; sleep 0.8
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; rc=$?; sleep 1
 check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
+# A second live player in the same directory gets its own label and conversation.
+bash "$O/spawn.sh" --dir "$DP" --prompt "review independently" --agent claude --orchestrator tmux:parent >"$T/spawn-dir2.out" 2>&1; rc=$?
+sleep 1
+check "second dir player gets a readable suffix and the same directory tag" "[ $rc = 0 ] && grep -q '^started *$SD-2\$' '$T/spawn-dir2.out' && [ \"\$(tag $SD-2 @orchestra-repo)\" = '$DPR' ]"
+bash "$O/spawn.sh" --dir "$DP" --resume >"$T/ambiguous-dir.out" 2>&1; rc=$?
+check "ambiguous dir resume refuses" "[ $rc = 1 ] && grep -q -- '--session NAME' '$T/ambiguous-dir.out'"
+tm send-keys -t "=$SD-2:" C-d; sleep 0.8
+bash "$O/spawn.sh" --dir "$DP" --resume --session "$SD-2" >/dev/null 2>&1; rc=$?; sleep 1
+check "explicit dir resume selects its own conversation" "[ $rc = 0 ] && grep -qx \"arg=\$(tag $SD-2 @orchestra-claude-session)\" '$T/last-claude' && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_dead}')\" = 0 ]"
+bash "$O/kill.sh" "$SD-2" >/dev/null
 bash "$O/kill.sh" "$SD" >/dev/null
 check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?
 check "after kill.sh, resume refuses before creating anything" "[ $rc = 1 ] && grep -q 'no Claude conversation is recorded' '$T/resume-gone.err' && ! tm has-session -t '=$SD' 2>/dev/null"
+
+echo "# Codex dir players record and resume their exact process-owned threads"
+touch "$T/fake-codex-rollout"
+for unused in 1 2; do
+  bash "$O/spawn.sh" --dir "$DP" --prompt "independent task" --agent codex --orchestrator tmux:parent >/dev/null 2>&1
+  sleep 0.5
+done
+for unused in $(seq 50); do
+  [ -n "$(tag "$SD" @orchestra-codex-session)" ] && [ -n "$(tag "$SD-2" @orchestra-codex-session)" ] && break
+  sleep 0.1
+done
+first_codex="$(tag "$SD" @orchestra-codex-session)"; second_codex="$(tag "$SD-2" @orchestra-codex-session)"
+check "two Codex players in one directory have distinct recorded threads" "[ -n '$first_codex' ] && [ -n '$second_codex' ] && [ '$first_codex' != '$second_codex' ]"
+tm send-keys -t "=$SD:" C-d; sleep 0.8
+bash "$O/spawn.sh" --dir "$DP" --resume --session "$SD" >/dev/null 2>&1; rc=$?; sleep 1
+check "older Codex dir player resumes its exact thread while neighbour stays live" "[ $rc = 0 ] && grep -qx 'arg=resume' '$T/last-codex' && grep -qx 'arg=$first_codex' '$T/last-codex' && ! grep -qx 'arg=$second_codex' '$T/last-codex' && [ \"\$(tm display-message -p -t '=$SD-2:' '#{pane_dead}')\" = 0 ]"
+bash "$O/kill.sh" "$SD" >/dev/null; bash "$O/kill.sh" "$SD-2" >/dev/null
+# Force the recorder's identity write to fail without affecting ordinary tmux operations.
+real_tmux="$(command -v tmux)"
+cat > "$T/bin/tmux" <<FAIL_RECORD
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = '@orchestra-codex-session' ] && [[ " \$* " = *' set-option '* ]]; then exit 1; fi
+done
+exec "$real_tmux" "\$@"
+FAIL_RECORD
+chmod +x "$T/bin/tmux"
+bash "$O/spawn.sh" --dir "$DP" --prompt "record failure" --agent codex --orchestrator tmux:parent >/dev/null 2>&1
+for unused in $(seq 50); do
+  [ -n "$(tag "$SD" @orchestra-codex-record-error)" ] && break
+  sleep 0.1
+done
+sleep 0.2
+check "failed recorder reports a tag without entering pane view mode" \
+  "[ -n \"\$(tag $SD @orchestra-codex-record-error)\" ] && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_in_mode}')\" = 0 ]"
+bash "$O/send.sh" "$SD" --raw "AFTER-RECORDER-FAILURE" >/dev/null 2>&1
+sleep 0.3
+check "first paste after recorder failure reaches the player" "grep -q 'AFTER-RECORDER-FAILURE' '$T/received-codex'"
+rm "$T/bin/tmux"
+bash "$O/kill.sh" "$SD" >/dev/null
+rm "$T/fake-codex-rollout"
 
 echo "# machines: a fake beam, real tmux behind it"
 # Records every call (one line per call to $T/beam-log); `exec` actually runs the given argv (cd

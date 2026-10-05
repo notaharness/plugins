@@ -37,7 +37,8 @@
 # fresh Claude launch picks the conversation id itself (--session-id), records it in
 # @orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
 # with the session) a Claude resume refuses rather than guess; so does auto mode, which for a dir
-# player means Claude only.
+# player means Claude only. Codex dir players use @orchestra-codex-session, recorded from
+# the launched process's open rollout by _record_codex_session.sh; a missing tag refuses resume.
 set -u
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
@@ -140,8 +141,15 @@ codex_session_here() {
 
 # resume_codex [message]: the message replaces the default one when no Codex conversation exists.
 resume_codex() {
-  local prompt id; prompt="$(preamble codex)"
-  id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
+  local prompt id record_error; prompt="$(preamble codex)"
+  if [ "$stype" = "$SESSION_TYPE_DIR" ]; then
+    id="$(tag_get "$sock" "$session" "$TAG_CODEX_SESSION")"
+    record_error="$(tag_get "$sock" "$session" "$TAG_CODEX_RECORD_ERROR")"
+    [[ "$id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] ||
+      fail "no exact Codex thread is recorded on this dir player's session; nothing to resume (start a fresh player). Recorder: ${record_error:-no record available}"
+  else
+    id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
+  fi
   remember codex
   exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
@@ -196,6 +204,7 @@ case "$harness" in
   claude)   resume_claude;;
   codex)    resume_codex;;
   auto)     resume_auto;;
-  opencode) remember opencode; exec opencode --continue --prompt "$(preamble opencode)";;
+  opencode) [ "$stype" != "$SESSION_TYPE_DIR" ] || fail "--resume is not supported for opencode dir players without an exact conversation id; spawn it fresh"
+            remember opencode; exec opencode --continue --prompt "$(preamble opencode)";;
   *)        fail "--resume is not supported for $harness; use a fresh spawn";;
 esac
