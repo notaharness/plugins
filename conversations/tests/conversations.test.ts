@@ -446,6 +446,13 @@ test('a task notification belongs to the conversation of the call that started t
   expect(await drawn(await notification('n1', 'toolu_watch'))).toBe('engine')
   expect(await drawn(await notification('n2', 'toolu_docs'))).toBe('nothing')
 
+  // One delivered into a running turn draws as its text alone, with no task on the row
+  const delivered = row($, 'UserMessage', 'n3', { text: notice, origin: { kind: 'task-notification' }, isExpanded: false })
+  expect(await drawn(await delivered)).toBe('engine')
+  await show($, 'main')
+  expect(await drawn(await row($, 'UserMessage', 'n3', { text: notice, origin: { kind: 'task-notification' }, isExpanded: false }))).toBe('nothing')
+  await show($, 'conversation-1')
+
   // The turn the notification starts is that conversation's too
   await $.turn.start({ text: notice, turnId: 'turn-notified' })
   await say($, 'notified-reply', text('It passed.'))

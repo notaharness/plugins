@@ -141,8 +141,9 @@ async function conversationOf($: EngineInterface, e: RenderInput): Promise<strin
   if (e.component === 'UserMessage') {
     const { task } = e.props
     if (task) return taskConversation($, task.toolUseId, task.id)
-    // A fresh prompt is drawn before its row is kept, under a placeholder id
-    if (e.props.origin.kind === 'composer') return promptConversation.get(e.props.text) ?? MAIN
+    // A fresh prompt is drawn before its row is kept, under a placeholder id; a notification that
+    // reached a running turn is drawn as its text, which its submit tied to a conversation
+    return promptConversation.get(e.props.text) ?? MAIN
   }
   if (e.component === 'ToolGroup') {
     const ids = e.props.calls.flatMap(call => (call.tool_use_id ? [call.tool_use_id] : []))
