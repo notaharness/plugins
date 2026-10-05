@@ -263,13 +263,14 @@ export const register: Register = on => {
     if (!post.context || !post.text.trim()) return { deny: 'A post needs a context name and some text.' }
     const viewing = await read($, view)
     const unseen = !sameName(viewing, post.context)
-    // A done context waits on nothing: marking it done clears its counts, a later post reopens it
-    const after = (entry: ContextEntry): ContextEntry =>
-      post.isDone
-        ? { ...entry, unread: 0, needsUser: false, isDone: true }
-        : unseen
-          ? { ...entry, unread: entry.unread + 1, needsUser: entry.needsUser || post.needsUser, isDone: false }
-          : { ...entry, isDone: false }
+    // A done context needs nothing of the user, but keeps the posts they have not read; a later
+    // post without done reopens it
+    const after = (entry: ContextEntry): ContextEntry => ({
+      ...entry,
+      unread: entry.unread + (unseen ? 1 : 0),
+      needsUser: !post.isDone && (entry.needsUser || (unseen && post.needsUser)),
+      isDone: post.isDone,
+    })
     const list = await update($, contexts, entries => {
       const known = entries.find(entry => sameName(entry.name, post.context))
       if (!known) return [...entries, after({ name: post.context, unread: 0, needsUser: false, isDone: false })]
@@ -459,6 +460,7 @@ export const register: Register = on => {
       return entry(one.name, one.name, one.key, i < 9 ? String(i + 1) : undefined, one.unread, one.needsUser)
     }
     const isViewingDone = done.some(one => sameName(one.name, viewing))
+    const doneUnread = done.reduce((sum, one) => sum + one.unread, 0)
 
     return (
       <Box flexDirection="column">
@@ -475,6 +477,7 @@ export const register: Register = on => {
               dimColor
               onPress={() => update($, isDoneShown, isShown => !isShown)}
             />
+            {!isDoneOpen && doneUnread > 0 && <Text color="suggestion"> {String(doneUnread)}</Text>}
           </Box>
         )}
         {isDoneOpen && done.map(numbered)}

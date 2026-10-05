@@ -280,11 +280,12 @@ test('a post creates its context and counts unread posts until the user opens it
   expect(await ui.find({ type: 'Text', text: ' 1' })).toBeDefined()
 
   // A post to the context on screen is read as it lands
-  await post($, 'CI flakes', 'Fixed')
+  await post($, 'CI flakes', 'Fixed. Shall I merge?', true)
   await ui.unmount()
   ui = await pane($)
   expect(await ui.find({ type: 'Text', text: ' 1' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: ' 2' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ' needs you' })).toBeUndefined()
 })
 
 test('a post without a context or text is refused', async ($, on) => {
@@ -730,23 +731,25 @@ test('a post of a subagent started by a subagent draws with the first call, also
   await ui.unmount()
 })
 
-test('a context Claude marks done moves to a collapsed Done group, stays selectable and reopens on a new post', async ($, on) => {
+test('a context Claude marks done moves to a collapsed Done group, keeps its unread posts, stays selectable and reopens on a new post', async ($, on) => {
   const seen = engine(on)
   await turnOn($)
   expect((await compose($)).sections[1]?.text).toMatch(/set done on your last post/)
   await post($, 'CI flakes', 'Run 4812 failed', true)
+  await post($, 'CI flakes', 'Retrying')
   await post($, 'Release notes', 'Draft ready')
   await post($, 'CI flakes', 'Fixed and merged.', false, true)
 
-  // Done waits on nothing: no count, no mark, no status line
+  // Done needs nothing of the user, but its posts the user has not seen stay counted
   let ui = await pane($)
   expect(await ui.find({ key: 'context-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '1' } })
   expect(await ui.find({ key: 'context-1' })).toBeUndefined()
   expect(await ui.find({ key: 'done' })).toMatchObject({ props: { label: '▸ Done (1)' } })
+  expect(await ui.find({ type: 'Text', text: ' 3' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: ' needs you' })).toBeUndefined()
   seen.open.delete('contexts')
   await post($, 'Release notes', 'Approve?', true)
-  expect(seen.status).toBe('1 context needs you, 2 unread posts (/contexts to open the sidebar)')
+  expect(seen.status).toBe('1 context needs you, 5 unread posts (/contexts to open the sidebar)')
 
   // Expanded, it is listed after the open ones and selects like any other
   await ui.press({ key: 'done' })
@@ -754,6 +757,7 @@ test('a context Claude marks done moves to a collapsed Done group, stays selecta
   ui = await pane($)
   expect(await ui.find({ key: 'done' })).toMatchObject({ props: { label: '▾ Done (1)' } })
   expect(await ui.find({ key: 'context-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '2' } })
+  expect(await ui.find({ type: 'Text', text: ' 3' })).toBeDefined()
   await ui.press({ key: 'context-1' })
   await ui.unmount()
   expect(await drawn(await postRow($, 'p-done', 'CI flakes', 'Fixed and merged.', false))).toBe('mod')

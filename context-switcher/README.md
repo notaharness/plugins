@@ -44,15 +44,17 @@ instructions. Once it is on, it stays on for the rest of the session.
   it. `Esc` returns the keys to the prompt.
 - **Done contexts** sit in a collapsed `Done` group at the bottom of the sidebar. Claude marks a
   context done when its conversation wraps up (resolved, merged, answered, abandoned), which
-  clears its count. Click the group to expand it; a done context still opens like any other,
-  and a new post to it makes it active again. You never manage contexts yourself.
+  clears its `needs you` mark. Posts you haven't read stay counted, on the group and on the
+  entry. Click the group to expand it; a done context still opens like any other, and a new post
+  to it makes it active again. You never manage contexts yourself.
 - **Main chat** is your focus conversation. Traffic for a context shows there as one dim line per
   post, such as `→ CI flakes: Run 4812 failed on linux`.
 - **A context** turns the transcript into that thread: Claude's posts read as its messages, along
   with your prompts there and the tool calls and notifications that belong to it. Everything
   else is hidden.
 - **Write in a context** by selecting it and typing as usual. Claude answers into that context.
-- **Close the sidebar** with its close mark or `ctrl+x x`. The transcript returns to Main chat.
+- **Close the sidebar** with its close mark, or with `ctrl+x x` while the sidebar has the keys
+  (after `ctrl+x tab`). The transcript returns to Main chat.
   While it is closed and a context has unread posts, a status line under the prompt says so,
   such as `1 context needs you, 3 unread posts (/contexts to open the sidebar)`. Run
   `/contexts` to bring the sidebar back.
