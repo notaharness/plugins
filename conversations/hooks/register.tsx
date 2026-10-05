@@ -698,7 +698,7 @@ export const register: Register = on => {
     const entry = (name: string, label: string, key: string, hotkey: string | undefined, unread: number, needsUser: boolean) => {
       const isViewed = sameName(name, viewing)
       const counts = (unread > 0 ? ` ${unread}` : '') + (needsUser ? ' needs you' : '')
-      const room = e.props.bodyColumns - 2 - (hotkey ? `${hotkey}: `.length : 0) - counts.length
+      const room = e.props.bodyColumns - 1 - 2 - (hotkey ? `${hotkey}: `.length : 0) - counts.length
       const fitted = label.length > room ? `${label.slice(0, Math.max(1, room - 3))}...` : label
       return (
         <Box flexDirection="row">
@@ -722,8 +722,10 @@ export const register: Register = on => {
     const archivedUnread = archived.reduce((sum, one) => sum + one.unread, 0)
 
     return (
-      <Box flexDirection="column">
-        <Text bold>Conversations</Text>
+      <Box flexDirection="column" paddingLeft={1}>
+        <Box marginBottom={1}>
+          <Text bold>Conversations</Text>
+        </Box>
         {entry(MAIN, 'Main', 'main', '0', mainCount, false)}
         {active.map(numbered)}
         {archived.length > 0 && (
@@ -741,8 +743,9 @@ export const register: Register = on => {
         )}
         {isArchiveOpen && archived.map(numbered)}
         {list.length === 0 && <Text dimColor>No conversations yet: Claude adds one when it posts about a topic.</Text>}
-        <Box marginTop={1}>
-          <Text dimColor>Click one, or press ctrl+x tab then its number. esc returns to the prompt.</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text dimColor>Click a conversation, or press ctrl+x tab then its number.</Text>
+          <Text dimColor>esc returns you to the input prompt.</Text>
         </Box>
       </Box>
     )

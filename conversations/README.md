@@ -174,7 +174,8 @@ staying on across a reload, the tool and the sidebar's counts, the rows each vie
 (prompts, replies, tool rows and groups, thinking and duration lines, notifications, subagent
 posts, nested ones included), that every row draws in full in exactly one view, prompt notes,
 Main's unread count, saving a session's record and putting it back in a fresh process (or
-rebuilding from the transcript without one), the sidebar's marker column and cut names, moving
+rebuilding from the transcript without one), the sidebar's layout (a one-column gap from its border, a blank line under the heading, a
+marker column and cut names), moving
 the view into a conversation started from a Main prompt (and not
 otherwise), the Archived section (opening and folding with the focus ring, selecting,
 and bringing a conversation back by typing or a new post) and the status line. Closing the

@@ -286,7 +286,8 @@ test('a post creates its conversation and counts unread posts until the user ope
 
   let ui = await pane($)
   expect(await ui.find({ type: 'Text', text: 'Conversations' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /ctrl\+x tab then its number\. esc returns to the prompt/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Click a conversation, or press ctrl+x tab then its number.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'esc returns you to the input prompt.' })).toBeDefined()
   expect(await ui.find({ key: 'main' })).toMatchObject({ props: { label: 'Main', hotkey: '0' } })
   expect(await ui.find({ key: 'conversation-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '1' } })
   expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '2' } })
@@ -952,10 +953,22 @@ test('the sidebar keeps a fixed marker column and cuts a long name to fit', asyn
 
   const ui = await pane($)
   const long = (await ui.find({ key: 'conversation-1' })) as any
-  // 28 body columns: the marker's 2, "1: " and the unread count's " 1" leave 21
-  expect(long.props.label).toBe('A very long conver...')
+  // 28 body columns: the 1-column gap, the marker's 2, "1: " and the unread count's " 1" leave 20
+  expect(long.props.label).toBe('A very long conve...')
   expect(await ui.find({ type: 'Text', text: '❯' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /▶/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the sidebar content sits one column in from the border, with a blank line under the heading', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  const ui = await pane($)
+  const root = (await ui.find({ type: 'Box', props: { paddingLeft: 1 } })) as any
+  expect(root).toBeDefined()
+  const heading = (await ui.find({ type: 'Box', props: { marginBottom: 1 } })) as any
+  expect(JSON.stringify(heading)).toContain('Conversations')
   await ui.unmount()
 })
 
