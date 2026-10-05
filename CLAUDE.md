@@ -16,6 +16,12 @@ orchestra/               # Plugin: Orchestra (orchestrator + player skills)
     orchestrator/        # Shared SKILL.md, scripts/, agents/openai.yaml
     player/               # Shared SKILL.md, scripts/, agents/openai.yaml
   tests/                  # Mock-tmux unit tests and a real-tmux smoke test
+conversations/           # Plugin: Conversations (a Claude Code mod)
+  .claude-plugin/
+    plugin.json          # Plugin metadata, and the $.state contract under "types"
+  hooks/register.tsx     # The hooks module
+  types/index.d.ts       # $.state contract
+  tests/                  # claude plugin test suite
 ```
 
 Each plugin lives in its own top-level directory with its own `.claude-plugin/plugin.json`.
@@ -77,4 +83,16 @@ install would use:
   ```bash
   python3 orchestra/tests/test_port.py
   bash orchestra/tests/smoke_tmux.sh
+  ```
+
+## Conversations-specific conventions
+
+- A mod: one hooks module of function hooks against the mod API. Use only documented API
+  (code.claude.com/docs/en/plugins/mods and the types Claude Code lays in
+  `.claude-plugin/types/`, which stay untracked).
+- Standalone: no reference to Orchestra or any workflow.
+- Checks (no model calls):
+  ```bash
+  claude plugin validate --strict ./conversations
+  claude plugin test ./conversations
   ```

@@ -9,6 +9,11 @@ orchestra/                        # The Orchestra plugin
   skills/orchestrator/            # SKILL.md, scripts/, agents/openai.yaml (Codex metadata)
   skills/player/                  # SKILL.md, scripts/, agents/openai.yaml
   tests/                          # Unit tests (mock tmux) and a real-tmux smoke test
+conversations/                    # The Conversations plugin (a Claude Code mod)
+  .claude-plugin/plugin.json      # Plugin manifest, naming the $.state contract
+  hooks/register.tsx              # The hooks module
+  types/index.d.ts                # $.state contract
+  tests/                          # claude plugin test suite
 ```
 
 Each plugin lives in its own top-level directory and installs on its own. Conventions for
@@ -20,7 +25,10 @@ Load the plugin from your checkout in Claude Code:
 
 ```bash
 claude --plugin-dir ./orchestra
+CLAUDE_CODE_NO_FLICKER=1 claude --plugin-dir ./conversations
 ```
+
+A `--plugin-dir` session reloads a mod when you save its files.
 
 For Codex, install the skills from the checkout, then start a new session. Rerun after
 each edit, since the installer copies the files:
@@ -41,6 +49,15 @@ bash orchestra/tests/smoke_tmux.sh
 Both use temporary Git repositories and fake agent CLIs, so they make no model calls.
 The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
 sessions, delivery through `codex queue`, or a spawn on a real second machine.
+
+For Conversations:
+
+```bash
+claude plugin validate --strict ./conversations
+claude plugin test ./conversations
+```
+
+These drive the mod's hooks through Claude Code's test kit, with no session or model calls.
 
 ## Versions
 

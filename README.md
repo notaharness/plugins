@@ -6,6 +6,7 @@ Codex and other coding agents.
 | Plugin | What it does |
 | --- | --- |
 | [Orchestra](orchestra/) | One agent hands tasks to other coding agents, each working on its own branch in its own tmux session and git worktree, and receives their progress, questions and results. |
+| [Conversations](conversations/) | A Claude Code mod that splits one busy session into named conversations: a sidebar lists them, and the transcript shows one at a time. |
 
 ## Install
 
@@ -17,6 +18,13 @@ Orchestra needs tmux, Git and an authenticated `claude` or `codex` CLI; see the
 ```text
 /plugin marketplace add notaharness/plugins
 /plugin install orchestra@notaharness
+```
+
+Conversations is a Claude Code mod for the terminal and needs fullscreen rendering; see its
+[README](conversations/README.md):
+
+```text
+/plugin install conversations@notaharness
 ```
 
 ### Codex and other agents

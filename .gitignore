@@ -6,3 +6,6 @@ TEST*.md
 
 # Python bytecode
 __pycache__/
+
+# Types Claude Code writes beside a mod it loads from a folder
+*/.claude-plugin/types/
