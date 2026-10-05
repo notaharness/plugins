@@ -26,6 +26,8 @@ const GUIDE = `# Conversations
 The user turned on Conversations. This session now holds several conversations: named threads the user reads one at a time from a sidebar, next to Main, their focus conversation. You still see everything; the user sees only the conversation they selected, and Main shows a one-line pointer for each post to another conversation.
 
 - Give each separate topic its own conversation, named with a short topic name of two or three words (for example "CI flakes"). Use the same name for the same topic.
+- A conversation split does not need to be bound to a single issue, or pull request, or task, sometimes conversations span more than one and sometimes conversations happen without any work being performed, it can sometimes be useful to have a conversation outside the noise and incoming events of the main conversation. Evaluate when to start a new conversation on a topic and how the user wants their attention focused, think of the user's attention like a resource to be managed, humans are better at engaging with one topic at a time.
+- When you start a new conversation while answering a prompt the user wrote in Main, the user's view moves into it.
 - Post news about a topic with ${TOOL} instead of writing it in Main. This matters most for results that arrive on their own: task notifications, background commands, subagents, messages from other sessions.
 - A prompt the user writes from inside a conversation says so in a note. Answer it with ${TOOL} into that conversation: the post is your reply, so put everything the user should read in it, and don't repeat it as text afterwards.
 - Set needsUser on a post that asks the user for a decision or for input.
@@ -39,27 +41,41 @@ const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().t
 
 /** The prompt text to the conversation it was written in, read when its turn starts and its row is drawn. */
 const promptConversation = new Map<string, string>()
+/** The prompt texts the user typed in Main, as against those that arrived on their own. */
+const typedInMain = new Set<string>()
 /**
- * The main loop's running turn: its conversation; whether the last tool to answer was a post (so
- * text now is about that post); and whether the turn wrote text of its own, for Main's
- * unread count. Then the conversation of the turn that just ended, for its duration line.
+ * The main loop's running turn: its conversation; whether the user started it by typing in Main,
+ * and whether it moved their view into a conversation it started; whether the last tool to
+ * answer was a post (so text now is about that post); and whether the turn wrote text of its
+ * own, for Main's unread count. Then the conversation of the turn that just ended, for its
+ * duration line.
  */
 let turnConversation = MAIN
+let isTypedInMain = false
+let hasMovedView = false
 let isAfterPost = false
 let hasOwnText = false
 let endedConversation: string | null = null
 let isToolRegistered = false
 
-function startTurn(conversation: string) {
+function startTurn(conversation: string, isTyped = false) {
   turnConversation = conversation
+  isTypedInMain = isTyped && conversation === MAIN
+  hasMovedView = false
   isAfterPost = false
   hasOwnText = false
 }
 
-function rememberPrompt(text: string, conversation: string) {
+function rememberPrompt(text: string, conversation: string, isTyped = false) {
   promptConversation.delete(text)
   promptConversation.set(text, conversation)
-  if (promptConversation.size > 100) promptConversation.delete(promptConversation.keys().next().value!)
+  if (isTyped) typedInMain.add(text)
+  else typedInMain.delete(text)
+  if (promptConversation.size > 100) {
+    const oldest = promptConversation.keys().next().value!
+    promptConversation.delete(oldest)
+    typedInMain.delete(oldest)
+  }
 }
 
 function withNote<E extends { context?: readonly string[] }>(e: E, note: string): E {
@@ -229,6 +245,7 @@ export const register: Register = on => {
   // /clear starts the conversation over: its rows and conversations go with it
   on('session.end', async ($, e, next) => {
     promptConversation.clear()
+    typedInMain.clear()
     startTurn(MAIN)
     $.ui.status(undefined)
     return next(e)
@@ -275,14 +292,21 @@ export const register: Register = on => {
       needsUser: !post.isArchived && (entry.needsUser || (unseen && post.needsUser)),
       isArchived: post.isArchived,
     })
+    let isNew = false
     const list = await update($, conversations, entries => {
       const known = entries.find(entry => sameName(entry.name, post.conversation))
+      isNew = !known
       if (!known) return [...entries, after({ name: post.conversation, unread: 0, needsUser: false, isArchived: false })]
       return entries.map(entry => (entry === known ? after(entry) : entry))
     })
     const name = list.find(entry => sameName(entry.name, post.conversation))?.name ?? post.conversation
     if (e.agentId === undefined) {
       isAfterPost = true
+      // The first conversation a turn the user started from Main starts takes their view with it
+      if (isNew && isTypedInMain && !hasMovedView && viewing === MAIN) {
+        hasMovedView = true
+        await select($, name)
+      }
     } else {
       // A subagent's rows live in its own transcript: keep its posts for the main loop's call that started it
       const agent = await topAgentOf($, e.agentId)
@@ -328,7 +352,7 @@ export const register: Register = on => {
       return next(e)
     }
     const conversation = await read($, view)
-    rememberPrompt(e.text, conversation)
+    rememberPrompt(e.text, conversation, true)
     if (conversation === MAIN) return next(e)
     // A prompt written in an archived conversation brings it back to the active ones
     await update($, conversations, list =>
@@ -343,7 +367,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
-    startTurn(promptConversation.get(e.text) ?? MAIN)
+    startTurn(promptConversation.get(e.text) ?? MAIN, typedInMain.has(e.text))
     return next(e)
   })
 

@@ -64,13 +64,18 @@ extra instructions. Once it is on, it stays on for the rest of the session.
 
 Claude names conversations itself, after the topic. Ask it to move something into its own
 conversation ("track the CI run in its own conversation") or let it route updates on its own.
+When Claude starts a new conversation while answering a prompt you typed in Main, your view
+moves into it (the first one, if the turn starts several). It does not move when you are
+reading another conversation, or for conversations started by turns you didn't type: task
+notifications, background agents, messages from other sessions. Those show as unread.
 
 ## How it works
 
 - `/conversations` registers one tool, `mcp__conversations__post` (`conversation`, `text`,
   `needsUser`, `archive`), listed up front rather than behind tool search, and adds a short
-  section to the system prompt that explains conversations to Claude and asks it to archive
-  each one as soon as it wraps up. Both stay out of the session until you run the command.
+  section to the system prompt that explains conversations to Claude, asks it to treat your
+  attention as a resource (one topic at a time, a conversation need not be tied to one task),
+  and asks it to archive each one as soon as it wraps up. Both stay out of the session until you run the command.
 - A prompt you type in a conversation carries a note, hidden from the transcript, that tells
   Claude which conversation it came from.
 - Rows of a conversation's turn (Claude's text, its tool calls, the turn's duration line) belong
@@ -150,7 +155,8 @@ The tests drive the mod's hooks with no model calls: the command and its fullscr
 staying on across a reload, the tool and the sidebar's counts, the rows each view draws
 (prompts, replies, tool rows and groups, thinking and duration lines, notifications, subagent
 posts, nested ones included), that every row draws in full in exactly one view, prompt notes,
-Main's unread count, the Archived section (opening and folding with the focus ring, selecting,
+Main's unread count, moving the view into a conversation started from a Main prompt (and not
+otherwise), the Archived section (opening and folding with the focus ring, selecting,
 and bringing a conversation back by typing or a new post) and the status line. Closing the
 sidebar (which the test kit cannot raise) and `/clear` (which it cannot reset) are checked by
 hand.

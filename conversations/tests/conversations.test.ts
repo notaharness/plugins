@@ -742,6 +742,7 @@ test('a conversation Claude archives moves to a collapsed Archived section, keep
   const seen = engine(on)
   await turnOn($)
   expect((await compose($)).sections[1]?.text).toMatch(/set archive on your last post/)
+  expect((await compose($)).sections[1]?.text).toMatch(/think of the user's attention like a resource to be managed, humans are better at engaging with one topic at a time\./)
   await post($, 'CI flakes', 'Run 4812 failed', true)
   await post($, 'CI flakes', 'Retrying')
   await post($, 'Release notes', 'Draft ready')
@@ -840,4 +841,83 @@ test('typing in an archived conversation, or a new post to it, brings it back to
   expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '2' } })
   expect(await ui.find({ type: 'Text', text: ' 2' })).toBeDefined()
   await ui.unmount()
+})
+
+/** Whether the transcript shows that conversation: its posts draw there as messages. */
+async function isViewing($: Dollar, conversation: string) {
+  const ui = await postRow($, `probe-${conversation}`, conversation, 'probe')
+  const isMessage = (await ui.find({ type: 'Markdown' })) !== undefined
+  await ui.unmount()
+  return isMessage
+}
+
+test('a conversation started in a turn the user began from Main takes their view with it, once a turn', async ($, on) => {
+  const seen = engine(on)
+  await turnOn($)
+  await post($, 'CI flakes', 'x')
+
+  await begin($, 'split these out')
+  await post($, 'CI flakes', 'Already here')
+  expect(await isViewing($, 'CI flakes')).toBe(false)
+  await post($, 'Research', 'Started on it')
+  expect(await isViewing($, 'Research')).toBe(true)
+  await post($, 'Release notes', 'And this one')
+  expect(await isViewing($, 'Research')).toBe(true)
+  // Back in Main mid-turn, a later new conversation leaves the view alone
+  await show($, 'main')
+  await post($, 'Deps', 'Bumped')
+  expect(await isViewing($, 'Deps')).toBe(false)
+  await end($, 'split these out')
+
+  // Read as it lands: no count on the conversation the view moved into (CI flakes 3, Release notes 1, Deps 1)
+  seen.open.delete('conversations')
+  await post($, 'CI flakes', 'One more')
+  expect(seen.status).toBe('5 unread posts (/conversations to open the sidebar)')
+})
+
+test('a new conversation leaves the view alone when the user did not start the turn from Main', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+
+  // Typed in another conversation, also when the user goes to Main before the new one starts
+  await show($, 'conversation-1')
+  await begin($, 'split this out')
+  await post($, 'Research', 'Started on it')
+  expect(await isViewing($, 'Notes')).toBe(true)
+  await show($, 'main')
+  await post($, 'Research 2', 'Started on it')
+  expect(await isViewing($, 'Research 2')).toBe(false)
+  await end($, 'split this out')
+
+  // Typed in Main, but the user moved to another conversation before the new one started
+  await begin($, 'and this')
+  await show($, 'conversation-1')
+  await post($, 'Research 3', 'Started on it')
+  expect(await isViewing($, 'Notes')).toBe(true)
+  await end($, 'and this')
+  await show($, 'main')
+
+  // Turns the user did not type: a notification, another session's message
+  await show($, 'main')
+  for (const [text, kind] of [
+    ['<task-notification><task-id>b1</task-id></task-notification>', 'task-notification'],
+    ['ping from another session', 'peer'],
+  ] as const) {
+    await $.prompt.submit({ text, origin: { kind }, wait: false } as any)
+    await $.turn.start({ text, turnId: `turn-${kind}` })
+    await post($, `From ${kind}`, 'News')
+    await end($, kind)
+    expect(await isViewing($, `From ${kind}`)).toBe(false)
+  }
+
+  // A background agent's post, while a Main turn the user typed runs
+  await begin($, 'what is new')
+  await $.tool.call({ tool: TOOL, conversation: 'Agent news', text: 'Found it', agentId: 'agent-1' } as any)
+  expect(await isViewing($, 'Agent news')).toBe(false)
+  await end($, 'what is new')
+
+  // A new post after that turn ended
+  await post($, 'Later', 'News')
+  expect(await isViewing($, 'Later')).toBe(false)
 })
