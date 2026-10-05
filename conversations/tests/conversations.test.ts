@@ -9,7 +9,20 @@ type On = Parameters<TestBody>[1]
 type Dollar = Engine
 
 /** Stand in for the engine beneath the mod; collects what the mod asked of it. */
-function engine(on: On) {
+function engine(on: On, world: { store?: Record<string, unknown>; transcript?: unknown[] } = {}) {
+  const store: Record<string, unknown> = { ...world.store }
+  on('store.get', ($, e) => ({ value: structuredClone(store[e.key]) }))
+  on('store.set', ($, e) => {
+    store[e.key] = structuredClone(e.value)
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    delete store[e.key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(store) }))
+  on('session.id', () => ({ value: 'session-1' }))
+  on('session.messages', () => ({ value: (world.transcript ?? []) as any }))
   const seen = {
     tools: [] as string[],
     panes: [] as string[],
@@ -18,6 +31,7 @@ function engine(on: On) {
     status: undefined as string | undefined,
     commands: [] as string[],
     isFocusRefused: false,
+    store,
   }
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', ($, e) => {
@@ -759,7 +773,7 @@ test('a conversation Claude archives moves to a collapsed Archived section, keep
   let ui = await pane($)
   expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '1' } })
   expect(await ui.find({ key: 'conversation-1' })).toBeUndefined()
-  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '▸ Archived (1)' } })
+  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '+ Archived (1)' } })
   expect(await ui.find({ type: 'Text', text: ' 3' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: ' needs you' })).toBeUndefined()
   seen.open.delete('conversations')
@@ -770,7 +784,7 @@ test('a conversation Claude archives moves to a collapsed Archived section, keep
   await ui.press({ key: 'archived' })
   await ui.unmount()
   ui = await pane($)
-  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '▾ Archived (1)' } })
+  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '- Archived (1)' } })
   expect(await ui.find({ key: 'conversation-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '2' } })
   expect(await ui.find({ type: 'Text', text: ' 3' })).toBeDefined()
   await ui.press({ key: 'conversation-1' })
@@ -791,7 +805,7 @@ const isArchiveOpen = async ($: Dollar) => {
   const ui = await pane($)
   const header = await ui.find({ key: 'archived' })
   await ui.unmount()
-  return JSON.stringify(header).includes('▾')
+  return JSON.stringify(header).includes('- Archived')
 }
 
 test('the focus ring opens the Archived section as it moves down into it and folds it as it moves back up', async ($, on) => {
@@ -837,7 +851,7 @@ test('typing in an archived conversation, or a new post to it, brings it back to
   expect(submitted.context?.[0]).toMatch(/conversation "CI flakes"/)
   ui = await pane($)
   expect(await ui.find({ key: 'conversation-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '1' } })
-  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '▾ Archived (1)' } })
+  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '- Archived (1)' } })
   await ui.unmount()
 
   // A new post, here out of view: active again with its count
@@ -927,4 +941,135 @@ test('a new conversation leaves the view alone when the user did not start the t
   // A new post after that turn ended
   await post($, 'Later', 'News')
   expect(await isViewing($, 'Later')).toBe(false)
+})
+
+test('the sidebar keeps a fixed marker column and cuts a long name to fit with an ellipsis', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'A very long conversation name that does not fit', 'x')
+  await post($, 'Short', 'y')
+  await show($, 'conversation-2')
+
+  const ui = await pane($)
+  const long = (await ui.find({ key: 'conversation-1' })) as any
+  // 28 body columns: the marker's 2, "1: " and the unread count's " 1" leave 21
+  expect(long.props.label).toBe('A very long conversa…')
+  expect(await ui.find({ type: 'Text', text: '❯' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /▶/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+const record = {
+  isPaneOpen: true,
+  view: 'Notes',
+  conversations: [
+    { name: 'Notes', unread: 0, needsUser: false, isArchived: false },
+    { name: 'CI flakes', unread: 2, needsUser: true, isArchived: false },
+  ],
+  mainUnread: 1,
+  rows: { 'notes-reply': 'Notes', 'toolu_read': 'Notes' },
+  agentPosts: { 'agent-1': [{ conversation: 'CI flakes', text: 'from the subagent', needsUser: false }] },
+  agentOfCall: { toolu_agent: 'agent-1' },
+  parentOfAgent: {},
+}
+
+/** The session's record, under whichever key it is kept. */
+const recordIn = (store: Record<string, unknown>) =>
+  (Object.entries(store).find(([key]) => key.startsWith('post:'))?.[1] ?? store['session:session-1']) as typeof record
+
+test("a session's conversations, rows and view are saved in the store", async ($, on) => {
+  const seen = engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await show($, 'conversation-1')
+  await turn($, 'look into it', [{ uuid: 'notes-reply', toolUseIds: ['toolu_read'] }])
+  // Kept as the turn ends, before anything else happens
+  expect(recordIn(seen.store).rows).toMatchObject({ 'notes-reply': 'Notes' })
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'toolu_agent', prompt: 'p', description: 'd' } as any)
+  await $.tool.call({ tool: TOOL, conversation: 'CI flakes', text: 'from the subagent', agentId: 'agent-1' } as any)
+
+  const kept = recordIn(seen.store)
+  expect(kept).toMatchObject({ isPaneOpen: true, view: 'Notes', mainUnread: 0, agentOfCall: { toolu_agent: 'agent-1' } })
+  expect(kept.conversations.map(one => one.name)).toEqual(['Notes', 'CI flakes'])
+  expect(kept.rows).toMatchObject({ 'prompt-look into it': 'Notes', 'notes-reply': 'Notes', toolu_read: 'Notes' })
+  expect(kept.agentPosts['agent-1']?.[0]?.text).toBe('from the subagent')
+})
+
+test('a fresh process starting a saved session puts its conversations, rows, view and sidebar back', async ($, on) => {
+  const seen = engine(on, { store: { 'session:session-1': record } })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+
+  expect(seen.tools).toEqual(['post'])
+  expect(seen.panes).toEqual(['conversations'])
+  expect(await isViewing($, 'Notes')).toBe(true)
+  expect(await drawn(await assistantRow($, 'notes-reply'))).toBe('engine')
+  let ui = await pane($)
+  expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'CI flakes' } })
+  expect(await ui.find({ type: 'Text', text: ' needs you' })).toBeDefined()
+  await ui.press({ key: 'main' })
+  await ui.unmount()
+  expect(await drawn(await assistantRow($, 'notes-reply'))).toBe('nothing')
+  ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Text', text: '→ CI flakes' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('without a record, a session whose transcript has posts is rebuilt from them', async ($, on) => {
+  const use = (tool_use_id: string, tool: string, input: Record<string, unknown>, extra = {}) => ({ tool_use_id, tool, input, ...extra })
+  const transcript = [
+    { role: 'user', text: 'split these out', toolUses: [] },
+    {
+      role: 'assistant',
+      text: '',
+      toolUses: [
+        use('p1', TOOL, { conversation: 'CI flakes', text: 'Run failed' }),
+        use('p2', TOOL, { conversation: 'Release notes', text: 'Draft ready' }),
+        use('a1', 'Agent', { prompt: 'p', description: 'd' }, { agentId: 'agent-1' }),
+      ],
+    },
+    { role: 'assistant', text: '', toolUses: [use('p3', TOOL, { conversation: 'ci flakes', text: 'Merged.', archive: true })] },
+  ]
+  const seen = engine(on, { transcript })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+
+  expect(seen.tools).toEqual(['post'])
+  expect(seen.panes).toEqual([])
+  const ui = await pane($)
+  expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '1' } })
+  expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '+ Archived (1)' } })
+  expect(await ui.find({ type: 'Text', text: /^ \d+$/ })).toBeUndefined()
+  await ui.unmount()
+  // A subagent of a rebuilt Agent call posts with that call
+  await $.tool.call({ tool: TOOL, conversation: 'Release notes', text: 'from the subagent', agentId: 'agent-1' } as any)
+  const call = await agentCallRow($, 'a1')
+  expect(await call.find({ type: 'Text', text: '→ Release notes' })).toBeDefined()
+  await call.unmount()
+})
+
+test('a session that never turned Conversations on stays off in a fresh process', async ($, on) => {
+  const seen = engine(on, { transcript: [{ role: 'user', text: 'hello', toolUses: [] }] })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  expect(seen.tools).toEqual([])
+  expect(seen.store).toEqual({})
+})
+
+test('the record follows the session under the id of its first post, so it is found after the session continues under another id', async ($, on) => {
+  const seen = engine(on)
+  await turnOn($)
+  await $.tool.call({ tool: TOOL, tool_use_id: 'toolu_first', conversation: 'Notes', text: 'x' } as any)
+  await post($, 'CI flakes', 'y')
+  expect(Object.keys(seen.store)).toContain('post:toolu_first')
+  expect((seen.store['post:toolu_first'] as typeof record).conversations.map(one => one.name)).toEqual(['Notes', 'CI flakes'])
+})
+
+test('a session continued under another id finds its record by its first post', async ($, on) => {
+  const transcript = [
+    { role: 'user', text: 'start', toolUses: [] },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'toolu_first', tool: TOOL, input: { conversation: 'Notes', text: 'x' } }] },
+  ]
+  const seen = engine(on, { store: { 'post:toolu_first': record }, transcript })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  expect(seen.panes).toEqual(['conversations'])
+  expect(await isViewing($, 'Notes')).toBe(true)
+  expect(await drawn(await assistantRow($, 'notes-reply'))).toBe('engine')
 })

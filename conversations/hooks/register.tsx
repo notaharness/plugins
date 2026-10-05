@@ -1,11 +1,13 @@
 // Conversations: one session, many conversations. Claude posts to named conversations
 // with a tool; a sidebar lists them, and the transcript shows one at a time.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderInput } from 'claude-code'
+import type { EngineInterface, Register, RenderInput, SessionMessage } from 'claude-code'
 
 import type { AgentPost, ConversationEntry } from '../types'
 
 const PANE = 'conversations'
+/** The sidebar's width, as the dock opens it; a width the user set wins. */
+const PANE_COLUMNS = 34
 const TOOL = 'mcp__conversations__post'
 /** The view and row conversation of Main. */
 const MAIN = ''
@@ -129,6 +131,119 @@ async function select($: EngineInterface, name: string) {
   )
   // Choosing Main or an active conversation folds the Archived section away again
   if (!list.some(entry => entry.isArchived && sameName(entry.name, name))) await update($, isArchiveShown, () => false)
+  await save($)
+}
+
+/**
+ * What outlives the session's process (a restart, a resume, backgrounding the session and coming
+ * back): kept in $.store, written at the end of each turn and as the user moves around, and put
+ * back in $.state when a fresh process starts the session.
+ */
+type Saved = {
+  isPaneOpen: boolean
+  view: string
+  conversations: ConversationEntry[]
+  mainUnread: number
+  rows: Record<string, string>
+  agentPosts: Record<string, AgentPost[]>
+  agentOfCall: Record<string, string>
+  parentOfAgent: Record<string, string>
+}
+
+const emptySaved = (): Saved => ({
+  isPaneOpen: false,
+  view: MAIN,
+  conversations: [],
+  mainUnread: 0,
+  rows: {},
+  agentPosts: {},
+  agentOfCall: {},
+  parentOfAgent: {},
+})
+
+let saved = emptySaved()
+/**
+ * The record's key: the session's first post, by its call's id, which its transcript keeps when
+ * the session continues under another id (coming back from the background does); before any
+ * post, the session's id.
+ */
+let firstPostId: string | undefined
+/** At most this many rows and sessions are kept, the oldest dropped first. */
+const SAVED_ROWS = 5000
+const SAVED_SESSIONS = 20
+
+const recordKey = async ($: EngineInterface) => (firstPostId ? `post:${firstPostId}` : `session:${await $.session.id()}`)
+
+async function save($: EngineInterface) {
+  try {
+    saved.view = await read($, view)
+    saved.conversations = await read($, conversations)
+    saved.mainUnread = await read($, mainUnread)
+    const key = await recordKey($)
+    await $.store.set(key, saved)
+    const keys = await $.store.keys()
+    for (const old of keys.filter(one => one !== key).slice(0, Math.max(0, keys.length - SAVED_SESSIONS))) await $.store.delete(old)
+  } catch (error) {
+    $.ui.log(`conversations: could not save this session's conversations (${String(error)})`, { to: 'debug' })
+  }
+}
+
+async function tieRow($: EngineInterface, id: string, conversation: string) {
+  await $.state.set({ ...ROW, id }, conversation)
+  saved.rows[id] = conversation
+  const ids = Object.keys(saved.rows)
+  if (ids.length > SAVED_ROWS) delete saved.rows[ids[0]!]
+}
+
+async function keepAgentPost($: EngineInterface, agentId: string, post: AgentPost) {
+  saved.agentPosts[agentId] = await update($, { ...AGENT_POSTS, id: agentId }, posts => [...(posts ?? []), post])
+}
+
+async function tieAgentCall($: EngineInterface, toolUseId: string, agentId: string) {
+  await $.state.set({ ...AGENT_OF_CALL, id: toolUseId }, agentId)
+  await $.state.set({ ...CALL_OF_AGENT, id: agentId }, toolUseId)
+  saved.agentOfCall[toolUseId] = agentId
+}
+
+async function tieParent($: EngineInterface, agentId: string, parentId: string) {
+  await $.state.set({ ...PARENT_OF_AGENT, id: agentId }, parentId)
+  saved.parentOfAgent[agentId] = parentId
+}
+
+/**
+ * A fresh process starting a session that had Conversations on: what its record kept, else what
+ * the transcript's posts say (each conversation, archived as its last post left it, all read).
+ * The Agent calls the transcript names link their subagents either way.
+ */
+async function restore($: EngineInterface, record: Saved | undefined, transcript: readonly SessionMessage[]) {
+  const uses = transcript.flatMap(message => message.toolUses)
+  if (record) {
+    for (const [id, conversation] of Object.entries(record.rows)) await tieRow($, id, conversation)
+    for (const [id, posts] of Object.entries(record.agentPosts)) {
+      await $.state.set({ ...AGENT_POSTS, id }, posts)
+      saved.agentPosts[id] = posts
+    }
+    for (const [id, parent] of Object.entries(record.parentOfAgent)) await tieParent($, id, parent)
+    for (const [call, agent] of Object.entries(record.agentOfCall)) await tieAgentCall($, call, agent)
+    await update($, conversations, () => record.conversations)
+    await update($, mainUnread, () => record.mainUnread)
+  } else {
+    const rebuilt: ConversationEntry[] = []
+    for (const use of uses.filter(one => one.tool === TOOL && !one.isError)) {
+      const post = postOf(use.input)
+      const known = rebuilt.find(entry => sameName(entry.name, post.conversation))
+      if (known) known.isArchived = post.isArchived
+      else if (post.conversation) rebuilt.push({ name: post.conversation, unread: 0, needsUser: false, isArchived: post.isArchived })
+    }
+    await update($, conversations, () => rebuilt)
+  }
+  for (const use of uses) if (use.tool === 'Agent' && use.agentId) await tieAgentCall($, use.tool_use_id, use.agentId)
+  // The sidebar the user had open comes back with the view it showed
+  if (record?.isPaneOpen) {
+    saved.isPaneOpen = true
+    const opened = await $.ui.open({ id: PANE, title: 'Conversations', columns: PANE_COLUMNS })
+    if (opened.isPlaced) await update($, view, () => record.view)
+  }
 }
 
 /** The sidebar's key for each conversation, by its place in the list. */
@@ -233,11 +348,19 @@ export const register: Register = on => {
       description: 'Turn on Conversations and open its sidebar',
       immediate: true,
     })
-    // A fresh load of the module: stay on if the session turned it on (state), or if the
-    // tool is still registered after a /clear reset the state
-    const wasOn = (await read($, isOn)) || (await $.tool.list()).some(tool => tool.name === TOOL)
-    if (wasOn) {
+    // A fresh load of the module: stay on if the session turned it on, as its state (a reload
+    // of the module), its still registered tool (after a /clear reset the state), its record or
+    // its transcript's posts (a fresh process: a restart, a resume, coming back to it) say
+    const isStateKept = await read($, isOn)
+    const transcript = await $.session.messages()
+    firstPostId = transcript.flatMap(message => message.toolUses).find(use => use.tool === TOOL)?.tool_use_id
+    const record = (await $.store.get(await recordKey($))) as Saved | undefined
+    saved = record ?? emptySaved()
+    const hasPosted = firstPostId !== undefined
+    const isListed = (await $.tool.list()).some(tool => tool.name === TOOL)
+    if (isStateKept || isListed || record !== undefined || hasPosted) {
       await turnOn($)
+      if (!isStateKept) await restore($, record, transcript)
       await showPending($)
     }
     return next(e)
@@ -248,6 +371,8 @@ export const register: Register = on => {
     promptConversation.clear()
     typedInMain.clear()
     startTurn(MAIN)
+    saved = emptySaved()
+    firstPostId = undefined
     $.ui.status(undefined)
     return next(e)
   })
@@ -255,8 +380,10 @@ export const register: Register = on => {
   on('command.run', { command: 'conversations' }, async ($, e) => {
     if (!e.presentation.isFullscreen) return { text: NOT_FULLSCREEN }
     await turnOn($)
-    await $.ui.open({ id: PANE, title: 'Conversations', columns: 30 })
+    await $.ui.open({ id: PANE, title: 'Conversations', columns: PANE_COLUMNS })
+    saved.isPaneOpen = true
     await showPending($)
+    await save($)
     return {}
   })
 
@@ -264,7 +391,9 @@ export const register: Register = on => {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const closed = await next(e)
     if (e.origin.kind === 'person') await select($, MAIN)
+    saved.isPaneOpen = false
     await showPending($)
+    await save($)
     return closed
   })
 
@@ -303,6 +432,7 @@ export const register: Register = on => {
     const name = list.find(entry => sameName(entry.name, post.conversation))?.name ?? post.conversation
     if (e.agentId === undefined) {
       isAfterPost = true
+      firstPostId ??= e.tool_use_id
       // The first conversation a turn the user started from Main starts takes their view with it
       if (isNew && isTypedInMain && !hasMovedView && viewing === MAIN) {
         hasMovedView = true
@@ -312,9 +442,10 @@ export const register: Register = on => {
       // A subagent's rows live in its own transcript: keep its posts for the main loop's call that started it
       const agent = await topAgentOf($, e.agentId)
       const kept: AgentPost = { conversation: name, text: post.text, needsUser: post.needsUser }
-      await update($, { ...AGENT_POSTS, id: agent }, posts => [...(posts ?? []), kept])
+      await keepAgentPost($, agent, kept)
     }
     await showPending($)
+    await save($)
     return { result: `Posted to "${name}".` }
   })
 
@@ -327,10 +458,9 @@ export const register: Register = on => {
     if (ran.deny !== undefined || ran.isError || !('agentId' in ran.result)) return ran
     const { agentId } = ran.result
     if (e.agentId === undefined) {
-      await $.state.set({ ...AGENT_OF_CALL, id: e.tool_use_id }, agentId)
-      await $.state.set({ ...CALL_OF_AGENT, id: agentId }, e.tool_use_id)
+      await tieAgentCall($, e.tool_use_id, agentId)
     } else {
-      await $.state.set({ ...PARENT_OF_AGENT, id: agentId }, e.agentId)
+      await tieParent($, agentId, e.agentId)
     }
     return ran
   })
@@ -377,6 +507,7 @@ export const register: Register = on => {
       if (turnConversation === MAIN && hasOwnText && (await read($, view)) !== MAIN) await update($, mainUnread, n => n + 1)
       endedConversation = turnConversation
       startTurn(MAIN)
+      await save($)
     }
     return next(e)
   })
@@ -389,20 +520,20 @@ export const register: Register = on => {
     if (message.type === 'user' && e.door === 'prompt') {
       const first = message.content.find(block => block.type === 'text')?.text
       const conversation = typeof first === 'string' ? promptConversation.get(first) : undefined
-      if (conversation) await $.state.set({ ...ROW, id: e.uuid }, conversation)
+      if (conversation) await tieRow($, e.uuid, conversation)
     } else if (message.type === 'user' && e.door === 'tool-result') {
       // A result of another tool: what Claude writes next is about it, not a recap of a post
       if (e.origin.kind === 'tool' && e.origin.tool !== TOOL) isAfterPost = false
     } else if (message.type === 'system' && message.name === 'turn_duration' && endedConversation !== null) {
       // The duration line Claude Code keeps when a turn ends: it draws under this row's id
-      if (endedConversation !== MAIN) await $.state.set({ ...ROW, id: e.uuid }, endedConversation)
+      if (endedConversation !== MAIN) await tieRow($, e.uuid, endedConversation)
       endedConversation = null
     } else if (message.type === 'assistant') {
       if (!isAfterPost && message.content.some(block => block.type === 'text')) hasOwnText = true
       if (turnConversation !== MAIN) {
-        await $.state.set({ ...ROW, id: e.uuid }, turnConversation)
+        await tieRow($, e.uuid, turnConversation)
         for (const block of message.content)
-          if (block.type === 'tool_use' && typeof block.id === 'string') await $.state.set({ ...ROW, id: block.id }, turnConversation)
+          if (block.type === 'tool_use' && typeof block.id === 'string') await tieRow($, block.id, turnConversation)
       }
     }
     return next(e)
@@ -484,12 +615,21 @@ export const register: Register = on => {
     const mainCount = await read($, mainUnread)
     const isArchiveOpen = await read($, isArchiveShown)
 
+    // A fixed column for the marker, so every entry's number lines up under the others
+    const marker = (isShown: boolean) => (
+      <Box width={2} flexShrink={0}>
+        <Text color="suggestion">{isShown ? '❯' : ' '}</Text>
+      </Box>
+    )
     const entry = (name: string, label: string, key: string, hotkey: string | undefined, unread: number, needsUser: boolean) => {
       const isViewed = sameName(name, viewing)
+      const counts = (unread > 0 ? ` ${unread}` : '') + (needsUser ? ' needs you' : '')
+      const room = e.props.bodyColumns - 2 - (hotkey ? `${hotkey}: `.length : 0) - counts.length
+      const fitted = label.length > room ? `${label.slice(0, Math.max(1, room - 1))}…` : label
       return (
         <Box flexDirection="row">
-          <Text color="suggestion">{isViewed ? '▶ ' : '  '}</Text>
-          <Button key={key} label={label} {...(hotkey ? { hotkey } : {})} plain dimColor={!isViewed} onPress={() => select($, name)} />
+          {marker(isViewed)}
+          <Button key={key} label={fitted} {...(hotkey ? { hotkey } : {})} plain dimColor={!isViewed} onPress={() => select($, name)} />
           {unread > 0 && <Text color="suggestion"> {String(unread)}</Text>}
           {needsUser && <Text color="warning"> needs you</Text>}
         </Box>
@@ -514,10 +654,10 @@ export const register: Register = on => {
         {active.map(numbered)}
         {archived.length > 0 && (
           <Box flexDirection="row" marginTop={1}>
-            <Text color="suggestion">{isViewingArchived && !isArchiveOpen ? '▶ ' : '  '}</Text>
+            {marker(isViewingArchived && !isArchiveOpen)}
             <Button
               key="archived"
-              label={`${isArchiveOpen ? '▾' : '▸'} Archived (${archived.length})`}
+              label={`${isArchiveOpen ? '-' : '+'} Archived (${archived.length})`}
               plain
               dimColor
               onPress={() => update($, isArchiveShown, () => true)}

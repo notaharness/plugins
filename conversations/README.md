@@ -40,9 +40,9 @@ extra instructions. Once it is on, it stays on for the rest of the session.
 
 - **The sidebar** lists your conversations under `Conversations`: Main and each conversation
   Claude has started, with a count of unread posts and a `needs you` mark when a post asks for
-  your input. Click one, or press `ctrl+x tab` and then the number shown beside it, to select
-  it. With the sidebar holding the keys, the arrow keys move through the list. `Esc` returns the
-  keys to the prompt.
+  your input; a name too long for the sidebar is cut with `…`. Click one, or press `ctrl+x tab`
+  and then the number shown beside it, to select it. With the sidebar holding the keys, the
+  arrow keys move through the list. `Esc` returns the keys to the prompt.
 - **Archived conversations** sit in a collapsed `Archived` section at the bottom of the sidebar.
   Claude archives a conversation when it wraps up (resolved, merged, answered, abandoned), which
   clears its `needs you` mark. Posts you haven't read stay counted, on the section and on the
@@ -90,6 +90,12 @@ notifications, background agents, messages from other sessions. Those show as un
   recorded as it starts, so its posts find the first call even after the session's list of
   agents has dropped its parent. A subagent's completion notification belongs to that call's
   conversation too, by the agent id it names.
+- What you see outlives the process: backgrounding the session (`←` on an empty prompt) and
+  coming back, `/resume`, `claude --resume` and a restart all bring back the conversations,
+  which rows belong to which, the view and the sidebar if it was open. The mod keeps a record
+  in its store, keyed by the session's first post (a session continued under another id keeps
+  its transcript and so its first post), written as each turn ends and as you move around.
+  Without a record, a transcript with posts still turns the mod on and lists its conversations.
 - The Archived section opens and folds on the sidebar's `ui.focus` event: the ring landing on
   its header or one of its conversations opens it, the ring landing on Main or an active one
   folds it.
@@ -117,9 +123,11 @@ notifications, background agents, messages from other sessions. Those show as un
   notifies Main; Claude then posts the result to a conversation if it belongs to one.
 - **A prompt typed while Claude is busy** with another conversation's turn reaches Claude with
   its note, but the rows of the running turn stay where they were.
-- **Conversations last for the session.** `/clear` empties them. A resumed session starts with
-  none and draws earlier posts as plain tool calls until you run `/conversations`; then they
-  show as pointer lines in Main, and the rest of the earlier traffic stays in Main.
+- **`/clear` empties them.** It starts the conversation over, and its conversations with it.
+- **A session resumed without its record** (one from before this version, or whose record was
+  dropped: the store keeps the 20 most recent sessions and 5,000 rows each) gets its
+  conversations back from its posts, all read, but the rows of earlier conversation turns show
+  in Main.
 - **Claude routes the traffic.** It may sometimes answer in Main what belongs in another
   conversation, or the other way round.
 
@@ -155,7 +163,9 @@ The tests drive the mod's hooks with no model calls: the command and its fullscr
 staying on across a reload, the tool and the sidebar's counts, the rows each view draws
 (prompts, replies, tool rows and groups, thinking and duration lines, notifications, subagent
 posts, nested ones included), that every row draws in full in exactly one view, prompt notes,
-Main's unread count, moving the view into a conversation started from a Main prompt (and not
+Main's unread count, saving a session's record and putting it back in a fresh process (or
+rebuilding from the transcript without one), the sidebar's marker column and cut names, moving
+the view into a conversation started from a Main prompt (and not
 otherwise), the Archived section (opening and folding with the focus ring, selecting,
 and bringing a conversation back by typing or a new post) and the status line. Closing the
 sidebar (which the test kit cannot raise) and `/clear` (which it cannot reset) are checked by
