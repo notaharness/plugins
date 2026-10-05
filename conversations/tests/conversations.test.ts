@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, TestBody } from 'claude-code/testing'
 
 const TOOL = 'mcp__conversations__post'
@@ -9,7 +9,7 @@ type On = Parameters<TestBody>[1]
 type Dollar = Engine
 
 /** Stand in for the engine beneath the mod; collects what the mod asked of it. */
-function engine(on: On, world: { store?: Record<string, unknown>; transcript?: unknown[] } = {}) {
+function engine(on: On, world: { store?: Record<string, unknown>; transcript?: unknown[]; api?: unknown[] } = {}) {
   const store: Record<string, unknown> = { ...world.store }
   on('store.get', ($, e) => ({ value: structuredClone(store[e.key]) }))
   on('store.set', ($, e) => {
@@ -22,7 +22,7 @@ function engine(on: On, world: { store?: Record<string, unknown>; transcript?: u
   })
   on('store.keys', () => ({ value: Object.keys(store) }))
   on('session.id', () => ({ value: 'session-1' }))
-  on('session.messages', () => ({ value: (world.transcript ?? []) as any }))
+  on('session.messages', ($, e) => ({ value: ((e as { as?: string }).as === 'api' ? (world.api ?? []) : (world.transcript ?? [])) as any }))
   const seen = {
     tools: [] as string[],
     panes: [] as string[],
@@ -995,8 +995,13 @@ test("a session's conversations, rows and view are saved in the store", async ($
   expect(kept.agentPosts['agent-1']?.[0]?.text).toBe('from the subagent')
 })
 
+const postedTranscript = [
+  { role: 'user', text: 'start', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'toolu_first', tool: TOOL, input: { conversation: 'Notes', text: 'x' } }] },
+]
+
 test('a fresh process starting a saved session puts its conversations, rows, view and sidebar back', async ($, on) => {
-  const seen = engine(on, { store: { 'session:session-1': record } })
+  const seen = engine(on, { store: { 'post:toolu_first': record }, transcript: postedTranscript })
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
 
   expect(seen.tools).toEqual(['post'])
@@ -1033,7 +1038,7 @@ test('without a record, a session whose transcript has posts is rebuilt from the
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
 
   expect(seen.tools).toEqual(['post'])
-  expect(seen.panes).toEqual([])
+  expect(seen.panes).toEqual(['conversations'])
   const ui = await pane($)
   expect(await ui.find({ key: 'conversation-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '1' } })
   expect(await ui.find({ key: 'archived' })).toMatchObject({ props: { label: '+ Archived (1)' } })
@@ -1072,4 +1077,88 @@ test('a session continued under another id finds its record by its first post', 
   expect(seen.panes).toEqual(['conversations'])
   expect(await isViewing($, 'Notes')).toBe(true)
   expect(await drawn(await assistantRow($, 'notes-reply'))).toBe('engine')
+})
+
+/** Claude's request as the transcript holds it: the notes this mod added name each turn's conversation. */
+const api = [
+  { role: 'user', content: [{ type: 'text', text: 'split these out' }] },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'p1', name: TOOL, input: { conversation: 'CI flakes', text: 'Run failed' } }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'p1', content: 'Posted.' }] },
+  { role: 'assistant', content: [{ type: 'text', text: 'Split out.' }] },
+  {
+    role: 'user',
+    content: [
+      { type: 'text', text: '<system-reminder>\nprompt.submit hook additional context: [Conversations] The user wrote this prompt in the conversation "CI flakes". Reply by calling it.\n</system-reminder>' },
+      { type: 'text', text: 'why did it fail?' },
+    ],
+  },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_read', name: 'Read', input: {} }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_read', content: 'log' }, { type: 'text', text: '<system-reminder>\nsome reminder\n</system-reminder>' }] },
+  { role: 'assistant', content: [{ type: 'text', text: 'A timeout on arm64.' }] },
+  { role: 'user', content: [{ type: 'text', text: 'back in main' }] },
+  { role: 'assistant', content: [{ type: 'text', text: 'Main answer.' }] },
+]
+const apiTranscript = [
+  { role: 'user', text: 'split these out', toolUses: [] },
+  { role: 'assistant', text: '', toolUses: [{ tool_use_id: 'p1', tool: TOOL, input: { conversation: 'CI flakes', text: 'Run failed' } }] },
+]
+
+const userRowOf = ($: Dollar, id: string, text: string) => row($, 'UserMessage', id, { text, origin: { kind: 'composer' }, isExpanded: false })
+const replyRow = ($: Dollar, id: string, text: string) => row($, 'AssistantMessage', id, { text, isFirstOfReply: true })
+
+test("without a record, each turn's rows come back in the conversation its prompt note names, with the sidebar open", async ($, on) => {
+  const seen = engine(on, { transcript: apiTranscript, api })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  expect(seen.panes).toEqual(['conversations'])
+
+  // Main: its own turns, and the conversation's turn as nothing
+  expect(await drawn(await userRowOf($, 'u1', 'split these out'))).toBe('engine')
+  expect(await drawn(await replyRow($, 'a1', 'Main answer.'))).toBe('engine')
+  expect(await drawn(await userRowOf($, 'u2', 'why did it fail?'))).toBe('nothing')
+  expect(await drawn(await replyRow($, 'a2', 'A timeout on arm64.'))).toBe('nothing')
+  const read = () => row($, 'ToolUse', 'toolu_read', { tool_use_id: 'toolu_read', tool: 'Read', input: {}, isRunning: false, isErrored: false, isInterrupted: false })
+  expect(await drawn(await read())).toBe('nothing')
+  // CI flakes: that turn in full
+  await show($, 'conversation-1')
+  expect(await drawn(await userRowOf($, 'u2', 'why did it fail?'))).toBe('engine')
+  expect(await drawn(await replyRow($, 'a2', 'A timeout on arm64.'))).toBe('engine')
+  expect(await drawn(await read())).toBe('engine')
+  expect(await drawn(await replyRow($, 'a1', 'Main answer.'))).toBe('nothing')
+})
+
+test('a session a resume swaps into the process is restored once its transcript is there', async ($, on) => {
+  const world: { transcript: unknown[]; api: unknown[] } = { transcript: [], api: [] }
+  const clock = mock.clock(on)
+  const seen = engine(on, world)
+  // The process starts on an empty session, then a resume swaps in one that had posts
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  expect(seen.tools).toEqual([])
+  await $.session.end({ reason: 'resume', sessionId: 'empty', resume: { id: 'empty' } } as any).catch(() => undefined)
+  await clock.advance(500)
+  expect(seen.tools).toEqual([])
+  world.transcript = apiTranscript
+  world.api = api
+  await clock.advance(500)
+
+  expect(await drawn(await replyRow($, 'a2', 'A timeout on arm64.'))).toBe('nothing')
+  expect(seen.tools).toEqual(['post'])
+  expect(seen.panes).toEqual(['conversations'])
+  // Restored once: the retries stop
+  await clock.advance(1500)
+  expect(seen.panes).toEqual(['conversations'])
+  const ui = await pane($)
+  expect(await ui.find({ key: 'conversation-1' })).toMatchObject({ props: { label: 'CI flakes' } })
+  await ui.unmount()
+})
+
+test('a process that starts before its transcript is there restores it once it is', async ($, on) => {
+  const world: { transcript: unknown[]; api: unknown[] } = { transcript: [], api: [] }
+  const clock = mock.clock(on)
+  const seen = engine(on, world)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+  world.transcript = apiTranscript
+  world.api = api
+  await clock.advance(500)
+  expect(seen.tools).toEqual(['post'])
+  expect(seen.panes).toEqual(['conversations'])
 })

@@ -1,7 +1,7 @@
 // Conversations: one session, many conversations. Claude posts to named conversations
 // with a tool; a sidebar lists them, and the transcript shows one at a time.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderInput, SessionMessage } from 'claude-code'
+import type { EngineInterface, Register, RenderInput, Timer } from 'claude-code'
 
 import type { AgentPost, ConversationEntry } from '../types'
 
@@ -210,13 +210,53 @@ async function tieParent($: EngineInterface, agentId: string, parentId: string) 
   saved.parentOfAgent[agentId] = parentId
 }
 
+/** The conversation a prompt or a reply was written in, by its text, as the transcript tells it. */
+const textConversation = new Map<string, string>()
+/** The notes this mod adds to a prompt (prompt.submit) name its conversation; Claude's request carries them. */
+const NOTE = /\[Conversations\] (?:The user wrote this prompt in|This notification is about) the conversation "([^"]+)"/
+
 /**
- * A fresh process starting a session that had Conversations on: what its record kept, else what
- * the transcript's posts say (each conversation, archived as its last post left it, all read).
- * The Agent calls the transcript names link their subagents either way.
+ * Ties the transcript's turns to their conversations again, from the notes on their prompts as
+ * Claude's request carries them: each prompt's and reply's text, and each tool call's id.
  */
-async function restore($: EngineInterface, record: Saved | undefined, transcript: readonly SessionMessage[]) {
+async function rebuildTurns($: EngineInterface) {
+  let conversation = MAIN
+  for (const message of await $.session.messages({ as: 'api' })) {
+    const blocks = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+    const texts = blocks.flatMap(block => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
+    if (message.role === 'user') {
+      const written = texts.filter(text => !text.startsWith('<system-reminder>'))
+      const note = texts.map(text => NOTE.exec(text)?.[1]).find(name => name !== undefined)
+      // Tool results, with or without reminders, go on with the turn; a prompt starts the next
+      if (written.length === 0 && note === undefined) continue
+      conversation = note ?? MAIN
+      if (conversation !== MAIN) for (const text of written) textConversation.set(text, conversation)
+    } else if (conversation !== MAIN) {
+      for (const text of texts) textConversation.set(text, conversation)
+      for (const block of blocks) if (block.type === 'tool_use' && typeof block.id === 'string') await tieRow($, block.id, conversation)
+    }
+  }
+}
+
+/**
+ * Puts a session back when a process takes it up with nothing in $.state: a restart, a resume,
+ * coming back from the background. Its turns are rebuilt from the transcript; its record, kept
+ * in the store, adds what the transcript cannot say (the view, the sidebar, unread counts, the
+ * rows drawn under their own ids). Without a record, a transcript with posts is enough: its
+ * conversations come back from the posts, all read, with the sidebar open.
+ *
+ * Resolves false while the transcript is not there yet (a resume swaps it in after the start).
+ */
+async function restoreSession($: EngineInterface): Promise<boolean> {
+  const transcript = await $.session.messages()
+  if (transcript.length === 0) return false
   const uses = transcript.flatMap(message => message.toolUses)
+  firstPostId = uses.find(use => use.tool === TOOL)?.tool_use_id
+  const record = (await $.store.get(await recordKey($))) as Saved | undefined
+  saved = emptySaved()
+  if (record === undefined && firstPostId === undefined) return true
+  await turnOn($)
+  await rebuildTurns($)
   if (record) {
     for (const [id, conversation] of Object.entries(record.rows)) await tieRow($, id, conversation)
     for (const [id, posts] of Object.entries(record.agentPosts)) {
@@ -236,14 +276,40 @@ async function restore($: EngineInterface, record: Saved | undefined, transcript
       else if (post.conversation) rebuilt.push({ name: post.conversation, unread: 0, needsUser: false, isArchived: post.isArchived })
     }
     await update($, conversations, () => rebuilt)
+    await update($, mainUnread, () => 0)
   }
   for (const use of uses) if (use.tool === 'Agent' && use.agentId) await tieAgentCall($, use.tool_use_id, use.agentId)
-  // The sidebar the user had open comes back with the view it showed
-  if (record?.isPaneOpen) {
+  await update($, view, () => MAIN)
+  // The sidebar comes back as it was, or open when only the transcript says the session used it
+  if (record?.isPaneOpen ?? true) {
     saved.isPaneOpen = true
     const opened = await $.ui.open({ id: PANE, title: 'Conversations', columns: PANE_COLUMNS })
-    if (opened.isPlaced) await update($, view, () => record.view)
+    if (opened.isPlaced && record) await update($, view, () => record.view)
   }
+  await showPending($)
+  await save($)
+  return true
+}
+
+/**
+ * Restores a session whose transcript is not there yet: one a resume swaps into this process,
+ * which raises no session.start. Tries on a timer until the transcript is there.
+ */
+let restoreTimer: Timer | undefined
+let isRestoring = false
+
+function restoreLater($: EngineInterface) {
+  restoreTimer?.cancel()
+  const timer = $.clock.every(500, async () => {
+    if (isRestoring) return
+    isRestoring = true
+    try {
+      if (await restoreSession($)) timer.cancel()
+    } finally {
+      isRestoring = false
+    }
+  })
+  restoreTimer = timer
 }
 
 /** The sidebar's key for each conversation, by its place in the list. */
@@ -257,9 +323,11 @@ async function conversationOf($: EngineInterface, e: RenderInput): Promise<strin
     const { task } = e.props
     if (task) return taskConversation($, task.toolUseId, task.id)
     // A fresh prompt is drawn before its row is kept, under a placeholder id; a notification that
-    // reached a running turn is drawn as its text, which its submit tied to a conversation
-    return promptConversation.get(e.props.text) ?? MAIN
+    // reached a running turn is drawn as its text, which its submit tied to a conversation; a
+    // prompt of a restored session, by the text its transcript tied to one
+    return promptConversation.get(e.props.text) ?? textConversation.get(e.props.text) ?? MAIN
   }
+  if (e.component === 'AssistantMessage') return textConversation.get(e.props.text) ?? MAIN
   if (e.component === 'ToolGroup') {
     const ids = e.props.calls.flatMap(call => (call.tool_use_id ? [call.tool_use_id] : []))
     if (ids.length > 0) {
@@ -348,27 +416,29 @@ export const register: Register = on => {
       description: 'Turn on Conversations and open its sidebar',
       immediate: true,
     })
-    // A fresh load of the module: stay on if the session turned it on, as its state (a reload
-    // of the module), its still registered tool (after a /clear reset the state), its record or
-    // its transcript's posts (a fresh process: a restart, a resume, coming back to it) say
+    // A reload of the module keeps the session's state, and a /clear its registered tool: stay
+    // on. A fresh process (a restart, a resume, coming back from the background) restores it
     const isStateKept = await read($, isOn)
-    const transcript = await $.session.messages()
-    firstPostId = transcript.flatMap(message => message.toolUses).find(use => use.tool === TOOL)?.tool_use_id
-    const record = (await $.store.get(await recordKey($))) as Saved | undefined
-    saved = record ?? emptySaved()
-    const hasPosted = firstPostId !== undefined
-    const isListed = (await $.tool.list()).some(tool => tool.name === TOOL)
-    if (isStateKept || isListed || record !== undefined || hasPosted) {
+    if (isStateKept || (await $.tool.list()).some(tool => tool.name === TOOL)) {
+      const transcript = await $.session.messages()
+      firstPostId = transcript.flatMap(message => message.toolUses).find(use => use.tool === TOOL)?.tool_use_id
+      saved = ((await $.store.get(await recordKey($))) as Saved | undefined) ?? emptySaved()
       await turnOn($)
-      if (!isStateKept) await restore($, record, transcript)
       await showPending($)
+    } else if (!(await restoreSession($))) {
+      // An empty transcript: a new session, or one a resume will swap in
+      restoreLater($)
     }
     return next(e)
   })
 
   // /clear starts the conversation over: its rows and conversations go with it
   on('session.end', async ($, e, next) => {
+    // A resume swaps another session into this process without a session.start
+    restoreTimer?.cancel()
+    if (e.reason === 'resume') restoreLater($)
     promptConversation.clear()
+    textConversation.clear()
     typedInMain.clear()
     startTurn(MAIN)
     saved = emptySaved()

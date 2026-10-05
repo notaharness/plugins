@@ -94,8 +94,12 @@ notifications, background agents, messages from other sessions. Those show as un
   coming back, `/resume`, `claude --resume` and a restart all bring back the conversations,
   which rows belong to which, the view and the sidebar if it was open. The mod keeps a record
   in its store, keyed by the session's first post (a session continued under another id keeps
-  its transcript and so its first post), written as each turn ends and as you move around.
-  Without a record, a transcript with posts still turns the mod on and lists its conversations.
+  its transcript and so its first post), written as each turn ends and as you move around. An
+  in-process `/resume` (the `claude --resume` picker too) raises no `session.start`, so the mod
+  restores the session on a short timer once its transcript is there. Without a record, a
+  transcript with posts is enough: the mod turns on, opens the sidebar, lists the conversations
+  and puts each turn's prompts, replies and tool calls back in the conversation its prompt note
+  named (the notes reach Claude, so the transcript keeps them).
 - The Archived section opens and folds on the sidebar's `ui.focus` event: the ring landing on
   its header or one of its conversations opens it, the ring landing on Main or an active one
   folds it.
@@ -126,8 +130,9 @@ notifications, background agents, messages from other sessions. Those show as un
 - **`/clear` empties them.** It starts the conversation over, and its conversations with it.
 - **A session resumed without its record** (one from before this version, or whose record was
   dropped: the store keeps the 20 most recent sessions and 5,000 rows each) gets its
-  conversations back from its posts, all read, but the rows of earlier conversation turns show
-  in Main.
+  conversations back from its posts, all read, and its turns from their prompt notes; its
+  thinking and duration lines, and a closing line Claude Code nudged out of a turn that ended on
+  a post, show in Main.
 - **Claude routes the traffic.** It may sometimes answer in Main what belongs in another
   conversation, or the other way round.
 
