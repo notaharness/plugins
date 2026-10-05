@@ -10,7 +10,13 @@ type Dollar = Engine
 
 /** Stand in for the engine beneath the mod; collects what the mod asked of it. */
 function engine(on: On) {
-  const seen = { tools: [] as string[], panes: [] as string[], listed: [] as string[] }
+  const seen = {
+    tools: [] as string[],
+    panes: [] as string[],
+    open: new Set<string>(),
+    listed: [] as string[],
+    status: undefined as string | undefined,
+  }
   on('session.start', () => ({ cwd: '/work' }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => {
@@ -19,7 +25,15 @@ function engine(on: On) {
   })
   on('ui.open', ($, e) => {
     seen.panes.push(e.id)
+    seen.open.add(e.id)
     return { value: { isPlaced: true } }
+  })
+  on('ui.panes', () => ({
+    value: [...seen.open].map(id => ({ id, title: id, isShown: true, isFocused: false, isPlaced: true })),
+  }))
+  on('ui.status', ($, e) => {
+    seen.status = e.text
+    return { value: undefined }
   })
   on('ui.render', () => ({ type: 'Text', props: {}, children: [ENGINE_ROW] }))
   on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
@@ -29,7 +43,9 @@ function engine(on: On) {
   on('turn.complete', () => ({ text: '' }))
   on('tool.list', () => ({ value: seen.listed.map(name => ({ name, description: '', mcp: true })) }))
   on('tool.call', ($, e) =>
-    String(e.tool) === 'Agent' ? { result: { status: 'async_launched', agentId: 'agent-1', description: 'research' } } : { result: 'ok' },
+    String(e.tool) === 'Agent'
+      ? { result: { status: 'async_launched', agentId: e.agentId === undefined ? 'agent-1' : 'agent-3', description: 'research' } }
+      : { result: 'ok' },
   )
   on('agent.list', () => ({
     value: [
@@ -53,8 +69,8 @@ async function turnOn($: Dollar) {
   return $.command.run(contextsCommand())
 }
 
-const post = ($: Dollar, context: string, text: string, needsUser = false) =>
-  $.tool.call({ tool: TOOL, context, text, needsUser } as any)
+const post = ($: Dollar, context: string, text: string, needsUser = false, done = false) =>
+  $.tool.call({ tool: TOOL, context, text, needsUser, ...(done ? { done } : {}) } as any)
 
 const pane = ($: Dollar) =>
   $.ui.mount({
@@ -627,4 +643,129 @@ test('every row draws in full in exactly one view', async ($, on) => {
     }
   }
   for (const [id] of rows) expect([id, (seenIn.get(id) ?? []).length]).toEqual([id, 1])
+})
+
+test('while the sidebar is closed, a status line says what waits in the contexts', async ($, on) => {
+  const seen = engine(on)
+  await turnOn($)
+  await post($, 'Release notes', 'Draft ready', true)
+  expect(seen.status).toBeUndefined()
+
+  // The kit cannot raise ui.close: the sidebar closes as the engine's list of open panes
+  seen.open.delete('contexts')
+  await post($, 'CI flakes', 'Run 4811 failed')
+  expect(seen.status).toBe('1 context needs you, 2 unread posts (/contexts to open the sidebar)')
+  await post($, 'CI flakes', 'Run 4812 passed')
+  expect(seen.status).toBe('1 context needs you, 3 unread posts (/contexts to open the sidebar)')
+  await post($, 'Dependency bump', 'Which version?', true)
+  expect(seen.status).toBe('2 contexts need you, 4 unread posts (/contexts to open the sidebar)')
+
+  // Reopening the sidebar clears it; closing it again with posts still unread brings it back
+  await $.command.run(contextsCommand())
+  expect(seen.status).toBeUndefined()
+  await show($, 'context-1')
+  await show($, 'context-2')
+  await show($, 'context-3')
+  await show($, 'main')
+  seen.open.delete('contexts')
+  await post($, 'CI flakes', 'Run 4814 passed')
+  expect(seen.status).toBe('1 unread post (/contexts to open the sidebar)')
+
+  await $.session.end({ reason: 'clear', sessionId: 's', resume: {} } as any).catch(() => undefined)
+  expect(seen.status).toBeUndefined()
+})
+
+test("a subagent's completion notification finds its context through the Agent call that started it", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await show($, 'context-1')
+  await begin($, 'research it')
+  await say($, 'notes-agent-call', { type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: {} })
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'toolu_agent', prompt: 'research', description: 'research' } as any)
+  await end($, 'research it')
+  await show($, 'main')
+
+  // A notification that names the subagent but no call of the main loop's
+  const notice = '<task-notification><task-id>agent-1</task-id><status>completed</status></task-notification>'
+  const notified = await $.prompt.submit({ text: notice, origin: { kind: 'task-notification' }, wait: false } as any)
+  expect(notified.context?.[0]).toMatch(/about the context "Notes"/)
+  const notification = (task: Record<string, unknown>) =>
+    row($, 'UserMessage', 'n1', { text: 'Agent finished', origin: { kind: 'task-notification' }, isExpanded: false, task })
+  expect(await drawn(await notification({ id: 'agent-1', status: 'completed' }))).toBe('nothing')
+  expect(await drawn(await notification({ id: 'agent-1', status: 'completed', toolUseId: 'toolu_unknown' }))).toBe('nothing')
+  expect(await drawn(await notification({ id: 'b1', status: 'completed' }))).toBe('engine')
+  await show($, 'context-1')
+  expect(await drawn(await notification({ id: 'agent-1', status: 'completed' }))).toBe('engine')
+
+  await $.turn.start({ text: notice, turnId: 'turn-notified' })
+  await say($, 'notified-reply', text('Done.'))
+  expect(await drawn(await assistantRow($, 'notified-reply'))).toBe('engine')
+})
+
+test('a post of a subagent started by a subagent draws with the first call, also once the session no longer lists it', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Notes', 'x')
+  await post($, 'Release', 'y')
+  await show($, 'context-1')
+  await begin($, 'research it')
+  await say($, 'notes-agent-call', { type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: {} })
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'toolu_agent', prompt: 'research', description: 'research' } as any)
+  await end($, 'research it')
+  // agent-1 starts agent-3, which the session's list of agents does not have
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'toolu_inner', prompt: 'more', description: 'more', agentId: 'agent-1' } as any)
+  await $.tool.call({ tool: TOOL, context: 'Release', text: 'nested found it', agentId: 'agent-3' } as any)
+
+  await show($, 'context-2')
+  let ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Markdown', text: 'nested found it' })).toBeDefined()
+  await ui.unmount()
+  await show($, 'main')
+  ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Text', text: '→ Release' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a context Claude marks done moves to a collapsed Done group, stays selectable and reopens on a new post', async ($, on) => {
+  const seen = engine(on)
+  await turnOn($)
+  expect((await compose($)).sections[1]?.text).toMatch(/set done on your last post/)
+  await post($, 'CI flakes', 'Run 4812 failed', true)
+  await post($, 'Release notes', 'Draft ready')
+  await post($, 'CI flakes', 'Fixed and merged.', false, true)
+
+  // Done waits on nothing: no count, no mark, no status line
+  let ui = await pane($)
+  expect(await ui.find({ key: 'context-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '1' } })
+  expect(await ui.find({ key: 'context-1' })).toBeUndefined()
+  expect(await ui.find({ key: 'done' })).toMatchObject({ props: { label: '▸ Done (1)' } })
+  expect(await ui.find({ type: 'Text', text: ' needs you' })).toBeUndefined()
+  seen.open.delete('contexts')
+  await post($, 'Release notes', 'Approve?', true)
+  expect(seen.status).toBe('1 context needs you, 2 unread posts (/contexts to open the sidebar)')
+
+  // Expanded, it is listed after the open ones and selects like any other
+  await ui.press({ key: 'done' })
+  await ui.unmount()
+  ui = await pane($)
+  expect(await ui.find({ key: 'done' })).toMatchObject({ props: { label: '▾ Done (1)' } })
+  expect(await ui.find({ key: 'context-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '2' } })
+  await ui.press({ key: 'context-1' })
+  await ui.unmount()
+  expect(await drawn(await postRow($, 'p-done', 'CI flakes', 'Fixed and merged.', false))).toBe('mod')
+
+  // A new post opens it again: in view, and with its count out of view
+  await post($, 'CI flakes', 'Looking again')
+  ui = await pane($)
+  expect(await ui.find({ key: 'done' })).toBeUndefined()
+  await ui.unmount()
+  await post($, 'CI flakes', 'Fine after all.', false, true)
+  await show($, 'main')
+  await post($, 'CI flakes', 'It flaked again')
+  ui = await pane($)
+  expect(await ui.find({ key: 'done' })).toBeUndefined()
+  expect(await ui.find({ key: 'context-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '1' } })
+  expect(await ui.find({ type: 'Text', text: ' 1' })).toBeDefined()
+  await ui.unmount()
 })

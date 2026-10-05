@@ -41,6 +41,10 @@ instructions. Once it is on, it stays on for the rest of the session.
 - **The sidebar** lists Main chat and each context Claude has created, with a count of unread
   posts and a `needs you` mark when a post asks for your input. Click an entry, or press
   `ctrl+x tab` and then its number, to select it. `Esc` hands the keys back to the prompt.
+- **Done contexts** sit in a collapsed `Done` group at the bottom of the sidebar. Claude marks a
+  context done when its conversation wraps up (resolved, merged, answered, abandoned), which
+  clears its count. Click the group to expand it; a done context still opens like any other,
+  and a new post to it makes it active again. You never manage contexts yourself.
 - **Main chat** is your focus conversation. Traffic for a context shows there as one dim line per
   post, such as `→ CI flakes: Run 4812 failed on linux`.
 - **A context** turns the transcript into that thread: Claude's posts read as its messages, along
@@ -48,7 +52,9 @@ instructions. Once it is on, it stays on for the rest of the session.
   else is hidden.
 - **Write in a context** by selecting it and typing as usual. Claude answers into that context.
 - **Close the sidebar** with its close mark or `ctrl+x x`. The transcript returns to Main chat.
-  Run `/contexts` to bring the sidebar back.
+  While it is closed and a context has unread posts, a status line under the prompt says so,
+  such as `1 context needs you, 3 unread posts (/contexts to open the sidebar)`. Run
+  `/contexts` to bring the sidebar back.
 
 Claude names contexts itself, after the topic. Ask it to move something into a context ("track
 the CI run in its own context") or let it route updates on its own.
@@ -56,7 +62,7 @@ the CI run in its own context") or let it route updates on its own.
 ## How it works
 
 - `/contexts` registers one tool, `mcp__context-switcher__post` (`context`, `text`,
-  `needsUser`), listed up front rather than behind tool search, and adds a short section to the
+  `needsUser`, `done`), listed up front rather than behind tool search, and adds a short section to the
   system prompt that explains contexts to Claude. Both stay out of the session until you run
   the command.
 - A prompt you type in a context carries a note, hidden from the transcript, that tells Claude
@@ -67,8 +73,12 @@ the CI run in its own context") or let it route updates on its own.
 - Every row draws in full in exactly one view, its context's or Main chat's, and as nothing in
   the others, so it takes no lines there. Nothing is hidden everywhere: a closing line Claude
   writes after a post shows in the turn's context, even when it repeats the post.
-- A subagent's rows live in its own transcript, so its posts draw with the Agent call that
-  started it: as Claude's message in the post's context, and as a pointer line in Main chat.
+- A subagent's rows live in its own transcript, so its posts draw with the main loop's Agent
+  call that started it: as Claude's message in the post's context, and as a pointer line in
+  Main chat. A subagent started by a subagent is traced up through the Agent call that started
+  it, recorded as it starts, so its posts find the first call even after the session's list of
+  agents has dropped its parent. A subagent's completion notification belongs to that call's
+  context too, by the agent id it names.
 
 ## Limitations
 
@@ -107,11 +117,12 @@ part degrades as described and the rest keeps working:
 - **The folded thinking line's id.** A thinking line is drawn as a tool group with no calls,
   whose id is `collapsed-<id of its assistant row>`. The mod reads its context from that id.
   If the shape changes, a context's thinking lines show in Main chat instead.
-- **The task id in a notification's text.** When a task notification arrives, the mod reads the
-  id of the call that started the task from the `<tool-use-id>` in its text, to put Claude's
-  reply in that context and to tell Claude which context it is about. If the format changes,
-  Claude's reply to the notification lands in Main chat. The notification row itself uses the
-  documented `task.toolUseId` and keeps its context.
+- **The task ids in a notification's text.** When a task notification arrives, the mod reads the
+  id of the call that started the task from the `<tool-use-id>` in its text, or the subagent's
+  id from its `<task-id>`, to put Claude's reply in that context and to tell Claude which
+  context it is about. If the format changes, Claude's reply to the notification lands in Main
+  chat. The notification row itself uses the documented `task.toolUseId` and `task.id` and keeps
+  its context.
 - **A turn's duration line is the `turn_duration` notice kept after the turn ends.** The mod
   ties the first notice of that name after a turn's `turn.complete` to the turn, and the line
   draws under that notice's id. If the name or the order changes, a context turn's duration
@@ -129,6 +140,6 @@ claude plugin test ./context-switcher
 The tests drive the mod's hooks with no model calls: the command and its fullscreen check,
 staying on across a reload, the tool and the sidebar's counts, the rows each view draws
 (prompts, replies, tool rows and groups, thinking and duration lines, notifications, subagent
-posts), that every row draws in full in exactly one view, prompt notes and Main chat's unread
-count. Closing the sidebar (which the test kit cannot
+posts, nested ones included), that every row draws in full in exactly one view, prompt notes,
+Main chat's unread count, the Done group and the status line. Closing the sidebar (which the test kit cannot
 raise) and `/clear` (which it cannot reset) are checked by hand.

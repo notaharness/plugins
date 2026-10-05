@@ -5,6 +5,8 @@ export type ContextEntry = {
   unread: number
   /** Whether an unread post asks the user for input. */
   needsUser: boolean
+  /** Claude marked its conversation wrapped up; the sidebar lists it under Done. */
+  isDone: boolean
 }
 
 /** A post a subagent made, kept for the main loop's Agent call that started it. */
@@ -24,12 +26,18 @@ declare module 'claude-code' {
       contexts: ContextEntry[]
       /** Main chat replies since the user last viewed it. */
       mainUnread: number
+      /** Whether the sidebar's Done group is expanded. */
+      isDoneShown: boolean
       /** The context a transcript row belongs to, by row id; absent is Main chat. */
       rowContext: StateFamily<string>
       /** The posts a subagent made, by the id of the subagent the main loop started. */
       agentPosts: StateFamily<AgentPost[]>
       /** The subagent each of the main loop's Agent calls started, by the call's tool_use_id. */
       agentOfCall: StateFamily<string>
+      /** The other way round: the main loop's Agent call that started a subagent, by the subagent's id. */
+      callOfAgent: StateFamily<string>
+      /** The subagent that started a subagent, by the started one's id, recorded as it starts. */
+      parentOfAgent: StateFamily<string>
     }
   }
 }

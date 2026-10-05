@@ -14,9 +14,12 @@ const isOn = atom({ plugin: 'context-switcher', key: 'isOn' } as const, false)
 const view = atom({ plugin: 'context-switcher', key: 'view' } as const, MAIN)
 const contexts = atom({ plugin: 'context-switcher', key: 'contexts' } as const, [] as ContextEntry[])
 const mainUnread = atom({ plugin: 'context-switcher', key: 'mainUnread' } as const, 0)
+const isDoneShown = atom({ plugin: 'context-switcher', key: 'isDoneShown' } as const, false)
 const ROW = { plugin: 'context-switcher', key: 'rowContext' } as const
 const AGENT_POSTS = { plugin: 'context-switcher', key: 'agentPosts' } as const
 const AGENT_OF_CALL = { plugin: 'context-switcher', key: 'agentOfCall' } as const
+const CALL_OF_AGENT = { plugin: 'context-switcher', key: 'callOfAgent' } as const
+const PARENT_OF_AGENT = { plugin: 'context-switcher', key: 'parentOfAgent' } as const
 
 const GUIDE = `# Context Switcher
 
@@ -26,6 +29,7 @@ The user turned on Context Switcher. The conversation now holds contexts: named 
 - Post news about a topic with ${TOOL} instead of writing it in Main chat. This matters most for results that arrive on their own: task notifications, background commands, subagents, messages from other sessions.
 - A prompt the user writes from inside a context says so in a note. Answer it with ${TOOL} into that context: the post is your reply, so put everything the user should read in it, and don't repeat it as text afterwards.
 - Set needsUser on a post that asks the user for a decision or for input.
+- Keep the sidebar tidy: the user never manages contexts, you do. As soon as a topic's conversation wraps up (resolved, merged, answered, abandoned), set done on your last post to it, and the sidebar moves it to Done. Don't leave stale contexts open. A later post without done reopens it.
 - Prompts without such a note come from Main chat. Answer those as usual.`
 
 const NOT_FULLSCREEN =
@@ -83,13 +87,15 @@ async function turnOn($: EngineInterface) {
         "Post a message to a context: a named thread in the user's Context Switcher sidebar. " +
         'The user reads it as your message when they open that context, and as a one-line pointer in Main chat. ' +
         'A name not used before creates the context; keep names short and reuse them for the same topic. ' +
-        'text is Markdown. Set needsUser when the post asks the user for a decision or input.',
+        'text is Markdown. Set needsUser when the post asks the user for a decision or input. ' +
+        "Set done on the last post of a topic whose conversation has wrapped up: the sidebar moves it to Done, and a later post without done reopens it.",
       inputSchema: {
         type: 'object',
         properties: {
           context: { type: 'string', description: 'The context, a short topic name such as "CI flakes"' },
           text: { type: 'string', description: 'The message, in Markdown' },
           needsUser: { type: 'boolean', description: 'True when the post asks the user for a decision or input' },
+          done: { type: 'boolean', description: "True when the topic's conversation has wrapped up with this post" },
         },
         required: ['context', 'text'],
       },
@@ -113,8 +119,8 @@ async function contextOf($: EngineInterface, e: RenderInput): Promise<string> {
   const own = await read($, { ...ROW, id: e.requestId })
   if (own !== undefined) return own
   if (e.component === 'UserMessage') {
-    const startedBy = e.props.task?.toolUseId
-    if (startedBy) return (await read($, { ...ROW, id: startedBy })) ?? MAIN
+    const { task } = e.props
+    if (task) return taskContext($, task.toolUseId, task.id)
     // A fresh prompt is drawn before its row is kept, under a placeholder id
     if (e.props.origin.kind === 'composer') return promptContext.get(e.props.text) ?? MAIN
   }
@@ -139,27 +145,59 @@ function thinkingRowOf(requestId: string) {
   return /^collapsed-(.+)$/.exec(requestId)?.[1]
 }
 
-/** The subagent a subagent's own subagent works for, up to the one the main loop started. */
+/**
+ * The context of a background task's notification: that of the call that started it, else, for
+ * a subagent (whose task id is its agent id), that of the main loop's Agent call it works for.
+ */
+async function taskContext($: EngineInterface, toolUseId: string | undefined, taskId: string | undefined) {
+  const byCall = toolUseId ? await read($, { ...ROW, id: toolUseId }) : undefined
+  if (byCall !== undefined || !taskId) return byCall ?? MAIN
+  const call = await read($, { ...CALL_OF_AGENT, id: await topAgentOf($, taskId) })
+  return (call && (await read($, { ...ROW, id: call }))) ?? MAIN
+}
+
+/**
+ * The subagent the main loop started that a subagent works for, itself or up its parents: those
+ * recorded as each started, else the session's live list (which drops an agent once it is done).
+ */
 async function topAgentOf($: EngineInterface, agentId: string) {
-  const agents = await $.agent.list()
   let id = agentId
   for (let depth = 0; depth < 16; depth++) {
-    const parent = agents.find(agent => agent.id === id)?.parentId
-    if (!parent || !agents.some(agent => agent.id === parent)) break
+    const parent =
+      (await read($, { ...PARENT_OF_AGENT, id })) ?? (await $.agent.list()).find(agent => agent.id === id)?.parentId
+    if (!parent) break
     id = parent
   }
   return id
 }
 
-type PostInput = { context?: unknown; text?: unknown; needsUser?: unknown }
+type PostInput = { context?: unknown; text?: unknown; needsUser?: unknown; done?: unknown }
 
 function postOf(input: unknown) {
-  const { context, text, needsUser } = (input ?? {}) as PostInput
+  const { context, text, needsUser, done } = (input ?? {}) as PostInput
   return {
     context: typeof context === 'string' ? context.trim() : '',
     text: typeof text === 'string' ? text : '',
     needsUser: needsUser === true,
+    isDone: done === true,
   }
+}
+
+/**
+ * The status line under the prompt: while the sidebar is closed, how many contexts need the user
+ * and how many posts wait unread; cleared while the sidebar is open or nothing waits.
+ */
+async function showPending($: EngineInterface) {
+  const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
+  const list = await read($, contexts)
+  const needing = list.filter(entry => entry.needsUser).length
+  const unread = list.reduce((sum, entry) => sum + entry.unread, 0)
+  if (isOpen || unread === 0) return $.ui.status(undefined)
+  const parts = [
+    ...(needing > 0 ? [needing === 1 ? '1 context needs you' : `${needing} contexts need you`] : []),
+    unread === 1 ? '1 unread post' : `${unread} unread posts`,
+  ]
+  $.ui.status(`${parts.join(', ')} (/contexts to open the sidebar)`)
 }
 
 function firstLine(markdown: string) {
@@ -177,7 +215,10 @@ export const register: Register = on => {
     // A fresh load of the module: stay on if the session turned it on (state), or if the
     // tool is still registered after a /clear reset the state
     const wasOn = (await read($, isOn)) || (await $.tool.list()).some(tool => tool.name === TOOL)
-    if (wasOn) await turnOn($)
+    if (wasOn) {
+      await turnOn($)
+      await showPending($)
+    }
     return next(e)
   })
 
@@ -185,6 +226,7 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     promptContext.clear()
     startTurn(MAIN)
+    $.ui.status(undefined)
     return next(e)
   })
 
@@ -192,6 +234,7 @@ export const register: Register = on => {
     if (!e.presentation.isFullscreen) return { text: NOT_FULLSCREEN }
     await turnOn($)
     await $.ui.open({ id: PANE, title: 'Contexts', columns: 30 })
+    await showPending($)
     return {}
   })
 
@@ -199,6 +242,7 @@ export const register: Register = on => {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const closed = await next(e)
     if (e.origin.kind === 'person') await select($, MAIN)
+    await showPending($)
     return closed
   })
 
@@ -219,15 +263,17 @@ export const register: Register = on => {
     if (!post.context || !post.text.trim()) return { deny: 'A post needs a context name and some text.' }
     const viewing = await read($, view)
     const unseen = !sameName(viewing, post.context)
+    // A done context waits on nothing: marking it done clears its counts, a later post reopens it
+    const after = (entry: ContextEntry): ContextEntry =>
+      post.isDone
+        ? { ...entry, unread: 0, needsUser: false, isDone: true }
+        : unseen
+          ? { ...entry, unread: entry.unread + 1, needsUser: entry.needsUser || post.needsUser, isDone: false }
+          : { ...entry, isDone: false }
     const list = await update($, contexts, entries => {
       const known = entries.find(entry => sameName(entry.name, post.context))
-      if (!known) return [...entries, { name: post.context, unread: unseen ? 1 : 0, needsUser: unseen && post.needsUser }]
-      if (!unseen) return entries
-      return entries.map(entry =>
-        entry === known
-          ? { ...entry, unread: entry.unread + 1, needsUser: entry.needsUser || post.needsUser }
-          : entry,
-      )
+      if (!known) return [...entries, after({ name: post.context, unread: 0, needsUser: false, isDone: false })]
+      return entries.map(entry => (entry === known ? after(entry) : entry))
     })
     const name = list.find(entry => sameName(entry.name, post.context))?.name ?? post.context
     if (e.agentId === undefined) {
@@ -238,15 +284,24 @@ export const register: Register = on => {
       const kept: AgentPost = { context: name, text: post.text, needsUser: post.needsUser }
       await update($, { ...AGENT_POSTS, id: agent }, posts => [...(posts ?? []), kept])
     }
+    await showPending($)
     return { result: `Posted to "${name}".` }
   })
 
-  // Which subagent each of the main loop's Agent calls started, so its posts draw with that call
-  on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined || String(e.tool) !== 'Agent' || !(await isActive($))) return next(e)
+  // Which subagent each Agent call started: the main loop's, so its posts and notification find
+  // that call; a subagent's, so a post of the one it started finds its way up
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    if (!(await isActive($))) return next(e)
     const ran = await next(e)
-    const agentId = (ran.result as { agentId?: unknown } | undefined)?.agentId
-    if (typeof agentId === 'string') await $.state.set({ ...AGENT_OF_CALL, id: e.tool_use_id }, agentId)
+    // A teammate's record has no agent id: it runs no subagent loop here
+    if (ran.deny !== undefined || ran.isError || !('agentId' in ran.result)) return ran
+    const { agentId } = ran.result
+    if (e.agentId === undefined) {
+      await $.state.set({ ...AGENT_OF_CALL, id: e.tool_use_id }, agentId)
+      await $.state.set({ ...CALL_OF_AGENT, id: agentId }, e.tool_use_id)
+    } else {
+      await $.state.set({ ...PARENT_OF_AGENT, id: agentId }, e.agentId)
+    }
     return ran
   })
 
@@ -254,11 +309,11 @@ export const register: Register = on => {
     if (!(await isActive($))) return next(e)
     await keepOn($)
     if (e.origin.kind === 'task-notification') {
-      // The notification belongs to the context of the call that started the task. Its id is
+      // The notification belongs to the context of the call that started the task. Its ids are
       // read from the notification's text, a format the engine writes but does not document;
-      // a notification without it stays in Main chat
-      const startedBy = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(e.text)?.[1]
-      const context = startedBy ? ((await read($, { ...ROW, id: startedBy })) ?? MAIN) : MAIN
+      // a notification without them stays in Main chat
+      const tag = (name: string) => new RegExp(`<${name}>([^<]+)</${name}>`).exec(e.text)?.[1]
+      const context = await taskContext($, tag('tool-use-id'), tag('task-id'))
       rememberPrompt(e.text, context)
       if (context === MAIN) return next(e)
       return next(withNote(e, `This notification is about the context "${context}". Post what the user should know with ${TOOL} into "${context}".`))
@@ -379,8 +434,9 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const viewing = await read($, view)
-    const list = await read($, contexts)
+    const list = (await read($, contexts)).map((one, i) => ({ ...one, key: `context-${i + 1}` }))
     const mainCount = await read($, mainUnread)
+    const isDoneOpen = await read($, isDoneShown)
 
     const entry = (name: string, label: string, key: string, hotkey: string | undefined, unread: number, needsUser: boolean) => {
       const isViewed = sameName(name, viewing)
@@ -394,10 +450,33 @@ export const register: Register = on => {
       )
     }
 
+    // Open contexts first, then the Done group, numbered in the order they are listed
+    const open = list.filter(one => !one.isDone)
+    const done = list.filter(one => one.isDone)
+    const shown = isDoneOpen ? [...open, ...done] : open
+    const numbered = (one: (typeof list)[number]) => {
+      const i = shown.indexOf(one)
+      return entry(one.name, one.name, one.key, i < 9 ? String(i + 1) : undefined, one.unread, one.needsUser)
+    }
+    const isViewingDone = done.some(one => sameName(one.name, viewing))
+
     return (
       <Box flexDirection="column">
         {entry(MAIN, 'Main chat', 'main', '0', mainCount, false)}
-        {list.map((one, i) => entry(one.name, one.name, `context-${i + 1}`, i < 9 ? String(i + 1) : undefined, one.unread, one.needsUser))}
+        {open.map(numbered)}
+        {done.length > 0 && (
+          <Box flexDirection="row" marginTop={1}>
+            <Text color="suggestion">{isViewingDone && !isDoneOpen ? '▶ ' : '  '}</Text>
+            <Button
+              key="done"
+              label={`${isDoneOpen ? '▾' : '▸'} Done (${done.length})`}
+              plain
+              dimColor
+              onPress={() => update($, isDoneShown, isShown => !isShown)}
+            />
+          </Box>
+        )}
+        {isDoneOpen && done.map(numbered)}
         {list.length === 0 && <Text dimColor>No contexts yet: Claude adds one when it posts about a topic.</Text>}
         <Box marginTop={1}>
           <Text dimColor>ctrl+x tab, then a number</Text>
