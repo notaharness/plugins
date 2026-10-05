@@ -264,6 +264,9 @@ test('a post creates its context and counts unread posts until the user opens it
   await post($, 'Release notes', 'Draft ready')
 
   let ui = await pane($)
+  expect(await ui.find({ type: 'Text', text: 'Conversations' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /ctrl\+x tab then its number\. esc returns to the prompt/ })).toBeDefined()
+  expect(await ui.find({ key: 'main' })).toMatchObject({ props: { label: 'Main chat', hotkey: '0' } })
   expect(await ui.find({ key: 'context-1' })).toMatchObject({ props: { label: 'CI flakes', hotkey: '1' } })
   expect(await ui.find({ key: 'context-2' })).toMatchObject({ props: { label: 'Release notes', hotkey: '2' } })
   expect(await ui.find({ type: 'Text', text: ' 2' })).toBeDefined()

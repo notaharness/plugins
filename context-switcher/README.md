@@ -38,9 +38,10 @@ CLAUDE_CODE_NO_FLICKER=1 claude --plugin-dir ./context-switcher
 Run `/contexts`. Until you do, the plugin does nothing: Claude gets no extra tool and no extra
 instructions. Once it is on, it stays on for the rest of the session.
 
-- **The sidebar** lists Main chat and each context Claude has created, with a count of unread
-  posts and a `needs you` mark when a post asks for your input. Click an entry, or press
-  `ctrl+x tab` and then its number, to select it. `Esc` hands the keys back to the prompt.
+- **The sidebar** lists your conversations under `Conversations`: Main chat and each context
+  Claude has created, with a count of unread posts and a `needs you` mark when a post asks for
+  your input. Click one, or press `ctrl+x tab` and then the number shown beside it, to select
+  it. `Esc` returns the keys to the prompt.
 - **Done contexts** sit in a collapsed `Done` group at the bottom of the sidebar. Claude marks a
   context done when its conversation wraps up (resolved, merged, answered, abandoned), which
   clears its count. Click the group to expand it; a done context still opens like any other,

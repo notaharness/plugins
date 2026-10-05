@@ -462,6 +462,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
+        <Text bold>Conversations</Text>
         {entry(MAIN, 'Main chat', 'main', '0', mainCount, false)}
         {open.map(numbered)}
         {done.length > 0 && (
@@ -479,7 +480,7 @@ export const register: Register = on => {
         {isDoneOpen && done.map(numbered)}
         {list.length === 0 && <Text dimColor>No contexts yet: Claude adds one when it posts about a topic.</Text>}
         <Box marginTop={1}>
-          <Text dimColor>ctrl+x tab, then a number</Text>
+          <Text dimColor>Click one, or press ctrl+x tab then its number. esc returns to the prompt.</Text>
         </Box>
       </Box>
     )
