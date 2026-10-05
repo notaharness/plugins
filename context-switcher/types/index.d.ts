@@ -7,6 +7,13 @@ export type ContextEntry = {
   needsUser: boolean
 }
 
+/** A post a subagent made, kept for the main loop's Agent call that started it. */
+export type AgentPost = {
+  context: string
+  text: string
+  needsUser: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'context-switcher': {
@@ -19,10 +26,10 @@ declare module 'claude-code' {
       mainUnread: number
       /** The context a transcript row belongs to, by row id; absent is Main chat. */
       rowContext: StateFamily<string>
-      /** An assistant row (text or thinking) that ends a context's turn after it posted there: it sums up the post. */
-      isEcho: StateFamily<boolean>
-      /** The context of a turn's duration line, by the turn's length in milliseconds; absent is Main chat. */
-      durationContext: StateFamily<string>
+      /** The posts a subagent made, by the id of the subagent the main loop started. */
+      agentPosts: StateFamily<AgentPost[]>
+      /** The subagent each of the main loop's Agent calls started, by the call's tool_use_id. */
+      agentOfCall: StateFamily<string>
     }
   }
 }

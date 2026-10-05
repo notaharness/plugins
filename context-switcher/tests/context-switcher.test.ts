@@ -28,7 +28,15 @@ function engine(on: On) {
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
   on('tool.list', () => ({ value: seen.listed.map(name => ({ name, description: '', mcp: true })) }))
-  on('tool.call', () => ({ result: 'ok' }))
+  on('tool.call', ($, e) =>
+    String(e.tool) === 'Agent' ? { result: { status: 'async_launched', agentId: 'agent-1', description: 'research' } } : { result: 'ok' },
+  )
+  on('agent.list', () => ({
+    value: [
+      { id: 'agent-1', description: 'research', type: 'general-purpose', status: 'running' },
+      { id: 'agent-2', description: 'helper', type: 'Explore', status: 'running', parentId: 'agent-1' },
+    ],
+  }))
   return seen
 }
 
@@ -159,8 +167,18 @@ const userRow = ($: Dollar, requestId: string, value: string) =>
 
 const thinkingRow = ($: Dollar, requestId: string) => row($, 'ToolGroup', requestId, { calls: [], isActive: false, isExpanded: false })
 
-const durationRow = ($: Dollar, requestId: string, durationMs: number) =>
-  row($, 'TurnDuration', requestId, { word: 'Baked', durationMs })
+const durationRow = ($: Dollar, requestId: string) => row($, 'TurnDuration', requestId, { word: 'Baked', durationMs: 3000 })
+
+/** The duration line Claude Code keeps right after a turn ends. */
+const keepDuration = ($: Dollar, uuid: string) =>
+  keep($, { message: { type: 'system', name: 'turn_duration', content: [text('Baked for 3s')] }, door: 'notice', origin: { kind: 'engine' }, uuid })
+
+/** A tool's result row, kept once the tool has answered. */
+const keepResult = ($: Dollar, uuid: string, tool: string) =>
+  keep($, { message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: uuid, content: 'ok' }] }, door: 'tool-result', origin: { kind: 'tool', tool }, uuid: `result-${uuid}` })
+
+const agentCallRow = ($: Dollar, id: string) =>
+  row($, 'ToolUse', id, { tool_use_id: id, tool: 'Agent', input: { prompt: 'research', description: 'research' }, isRunning: true, isErrored: false, isInterrupted: false })
 
 const compose = ($: Dollar) =>
   $.prompt.compose({ model: 'claude-test', promptModel: 'claude-test', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as any)
@@ -320,22 +338,6 @@ test("a folded thinking line follows its assistant row's context", async ($, on)
   expect(await drawn(await thinkingRow($, 'collapsed-unknown'))).toBe('engine')
 })
 
-test("a context turn's duration line belongs to that context", async ($, on) => {
-  engine(on)
-  await turnOn($)
-  await post($, 'CI flakes', 'x')
-  await show($, 'context-1')
-  const { durationMs } = await turn($, 'rerun it', [{ uuid: 'ci-reply' }])
-  await show($, 'main')
-  const { durationMs: mainMs } = await turn($, 'what next', [{ uuid: 'main-reply' }])
-
-  expect(await drawn(await durationRow($, 'd1', durationMs))).toBe('nothing')
-  expect(await drawn(await durationRow($, 'd2', mainMs))).toBe('engine')
-  await show($, 'context-1')
-  expect(await drawn(await durationRow($, 'd1', durationMs))).toBe('engine')
-  expect(await drawn(await durationRow($, 'd2', mainMs))).toBe('nothing')
-})
-
 test('a prompt written in a context carries a note naming it; one in Main chat does not', async ($, on) => {
   engine(on)
   await turnOn($)
@@ -435,74 +437,110 @@ test("a subagent's turn ending does not end the context turn that started it", a
   expect(await drawn(await assistantRow($, 'after-subagent'))).toBe('engine')
 })
 
-test("Claude's closing recap of a post in its own context is hidden; the rest of the turn stays", async ($, on) => {
+test('a pointer line shows the first line of the post without Markdown marks', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  const pointer = await postRow($, 'p1', 'Release notes', '\n# The **v0.3** draft of `notes.md`\nmore')
+  expect(await pointer.find({ type: 'Text', text: ': The v0.3 draft of notes.md' })).toBeDefined()
+})
+
+test("a context turn's duration line belongs to that context", async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'CI flakes', 'x')
   await show($, 'context-1')
-
-  await begin($, 'rerun it')
-  await say($, 'before', text('Rerunning now.'))
-  await post($, 'CI flakes', 'Run 4813 started')
-  await say($, 'recap-thought', { type: 'thinking', thinking: 'brief line' })
-  await say($, 'recap', text('I posted the rerun to CI flakes.'))
-  await end($, 'rerun it')
-
-  expect(await drawn(await assistantRow($, 'before'))).toBe('engine')
-  expect(await drawn(await assistantRow($, 'recap'))).toBe('nothing')
-  expect(await drawn(await thinkingRow($, 'collapsed-recap-thought'))).toBe('nothing')
+  await turn($, 'rerun it', [{ uuid: 'ci-reply' }])
+  await keepDuration($, 'ci-duration')
   await show($, 'main')
-  expect(await drawn(await assistantRow($, 'recap'))).toBe('nothing')
+  await turn($, 'what next', [{ uuid: 'main-reply' }])
+  await keepDuration($, 'main-duration')
+
+  expect(await drawn(await durationRow($, 'ci-duration'))).toBe('nothing')
+  expect(await drawn(await durationRow($, 'main-duration'))).toBe('engine')
+  await show($, 'context-1')
+  expect(await drawn(await durationRow($, 'ci-duration'))).toBe('engine')
+  expect(await drawn(await durationRow($, 'main-duration'))).toBe('nothing')
 })
 
-test('text after a post and then another tool call is the answer, and stays', async ($, on) => {
+test('text after a post stays in the turn\'s context, also when the post ran beside another tool', async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'Notes', 'x')
   await show($, 'context-1')
 
-  await begin($, 'read the file')
-  await post($, 'Notes', 'starting')
-  await say($, 'between', text('Now reading notes.txt.'))
+  // One response calls Read and post in parallel; the answer comes from Read's result
+  await begin($, 'read and post')
   await $.tool.call({ tool: 'Read', file_path: 'notes.txt' } as any)
-  await say($, 'answer', text('FILE SAYS hello'))
-  await end($, 'read the file')
+  await post($, 'Notes', 'gamma post')
+  await keepResult($, 'toolu_read', 'Read')
+  await say($, 'gamma-after', text('GAMMA-AFTER hello'))
+  await end($, 'read and post')
+  // A turn that ends on a post: what Claude writes after it is still shown
+  await begin($, 'post then explain')
+  await post($, 'Notes', 'beta post')
+  await say($, 'beta-after', text('BETA-AFTER: three sentences the user asked for.'))
+  await end($, 'post then explain')
 
-  expect(await drawn(await assistantRow($, 'between'))).toBe('engine')
-  expect(await drawn(await assistantRow($, 'answer'))).toBe('engine')
+  expect(await drawn(await assistantRow($, 'gamma-after'))).toBe('engine')
+  expect(await drawn(await assistantRow($, 'beta-after'))).toBe('engine')
+  await show($, 'main')
+  expect(await drawn(await assistantRow($, 'gamma-after'))).toBe('nothing')
+  expect(await drawn(await assistantRow($, 'beta-after'))).toBe('nothing')
 })
 
-test("a subagent's post does not make the context turn's answer a recap", async ($, on) => {
+test('a context turn that ends on a post to another context keeps its text in its own context', async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'Alpha', 'x')
+  await post($, 'Beta', 'y')
+  await show($, 'context-1')
+
+  await begin($, 'tell beta')
+  await post($, 'Beta', 'from alpha')
+  await say($, 'alpha-closing', text('I told Beta.'))
+  await end($, 'tell beta')
+
+  expect(await drawn(await assistantRow($, 'alpha-closing'))).toBe('engine')
+  await show($, 'context-2')
+  expect(await drawn(await assistantRow($, 'alpha-closing'))).toBe('nothing')
+  expect(await drawn(await postRow($, 'p-beta', 'Beta', 'from alpha'))).toBe('mod')
+})
+
+test("a subagent's posts draw with the Agent call that started it, each in its own view", async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'Notes', 'x')
+  await post($, 'Research', 'y')
   await show($, 'context-1')
+  await begin($, 'research it')
+  await say($, 'notes-agent-call', { type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: {} })
+  await $.tool.call({ tool: 'Agent', tool_use_id: 'toolu_agent', prompt: 'research', description: 'research' } as any)
+  await end($, 'research it')
+  // The subagent, and a subagent of its own, post while they run
+  await $.tool.call({ tool: TOOL, context: 'Research', text: 'found it', agentId: 'agent-1' } as any)
+  await $.tool.call({ tool: TOOL, context: 'Research', text: 'helper found more', agentId: 'agent-2' } as any)
 
-  await begin($, 'look into it')
-  await $.tool.call({ tool: TOOL, context: 'Notes', text: 'from the subagent', agentId: 'agent-1' } as any)
-  await say($, 'answer', text('Here is what I found.'))
-  await end($, 'look into it')
-
-  expect(await drawn(await assistantRow($, 'answer'))).toBe('engine')
+  // Notes, where the call was made: the call itself, and no post of Research's
+  let ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+  await ui.unmount()
+  // Research: the posts as messages, without the call
+  await show($, 'context-2')
+  ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Markdown', text: 'found it' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: 'helper found more' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeUndefined()
+  await ui.unmount()
+  // Main chat: a pointer line per post
+  await show($, 'main')
+  ui = await agentCallRow($, 'toolu_agent')
+  expect(await ui.find({ type: 'Text', text: '→ Research' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeUndefined()
+  await ui.unmount()
 })
 
-test("a recap belongs to its own turn: the next turn's text stays", async ($, on) => {
-  engine(on)
-  await turnOn($)
-  await post($, 'Notes', 'x')
-  await show($, 'context-1')
-
-  await begin($, 'one')
-  await post($, 'Notes', 'first')
-  await end($, 'one')
-  await begin($, 'two')
-  await say($, 'second-answer', text('A plain answer.'))
-  await end($, 'two')
-
-  expect(await drawn(await assistantRow($, 'second-answer'))).toBe('engine')
-})
-
-test('Main chat counts its replies that land while the user is in a context, not its post recaps', async ($, on) => {
+test('Main chat counts its replies that land while the user is in a context, not a post\'s closing line', async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'CI flakes', 'x')
@@ -511,23 +549,82 @@ test('Main chat counts its replies that land while the user is in a context, not
   await $.prompt.submit({ text: 'ping', origin: { kind: 'peer' }, wait: false } as any)
   await $.turn.start({ text: 'ping', turnId: 'peer' })
   await post($, 'CI flakes', 'from the peer')
-  await say($, 'peer-recap', text('Posted to CI flakes.'))
+  await say($, 'peer-closing', text('Posted to CI flakes.'))
   await end($, 'peer')
   expect(await badge($)).toBeUndefined()
 
+  // Read and post in parallel: the text after them answers Read, and counts
   await $.prompt.submit({ text: 'ping again', origin: { kind: 'peer' }, wait: false } as any)
   await $.turn.start({ text: 'ping again', turnId: 'peer-2' })
-  await say($, 'peer-answer', text('pong'))
+  await $.tool.call({ tool: 'Read', file_path: 'notes.txt' } as any)
+  await post($, 'CI flakes', 'and this')
+  await keepResult($, 'toolu_read', 'Read')
+  await say($, 'peer-answer', text('The file says hello.'))
   await end($, 'peer-2')
+  expect(await badge($)).toBe(' 1')
+
+  // Each turn counts on its own: a post-only turn after an answering one adds nothing
+  await $.prompt.submit({ text: 'ping once more', origin: { kind: 'peer' }, wait: false } as any)
+  await $.turn.start({ text: 'ping once more', turnId: 'peer-3' })
+  await post($, 'CI flakes', 'one more')
+  await say($, 'peer-closing-2', text('Posted.'))
+  await end($, 'peer-3')
   expect(await badge($)).toBe(' 1')
 
   await show($, 'main')
   expect(await badge($)).toBeUndefined()
 })
 
-test('a pointer line shows the first line of the post without Markdown marks', async ($, on) => {
+test('every row draws in full in exactly one view', async ($, on) => {
   engine(on)
   await turnOn($)
-  const pointer = await postRow($, 'p1', 'Release notes', '\n# The **v0.3** draft of `notes.md`\nmore')
-  expect(await pointer.find({ type: 'Text', text: ': The v0.3 draft of notes.md' })).toBeDefined()
+  await post($, 'Alpha', 'a')
+  await post($, 'Beta', 'b')
+  const rows: [string, (view: string) => ReturnType<typeof row>][] = []
+  const assistant = (id: string) => rows.push([id, () => assistantRow($, id)])
+
+  await turn($, 'main question', [{ uuid: 'main-1', toolUseIds: ['toolu_main'] }])
+  assistant('main-1')
+  await keepDuration($, 'dur-main')
+  await show($, 'context-1')
+  await begin($, 'alpha work')
+  await say($, 'alpha-think', { type: 'thinking', thinking: 'hmm' })
+  await say($, 'alpha-1', text('Working.'))
+  await $.tool.call({ tool: 'Read', file_path: 'x' } as any)
+  await post($, 'Alpha', 'alpha post')
+  await keepResult($, 'toolu_read', 'Read')
+  await say($, 'alpha-2', text('After the post.'))
+  await say($, 'alpha-tool', { type: 'tool_use', id: 'toolu_alpha', name: 'Bash', input: {} })
+  await end($, 'alpha work')
+  await keepDuration($, 'dur-alpha')
+  assistant('alpha-1')
+  assistant('alpha-2')
+  await show($, 'context-2')
+  await turn($, 'beta work', [{ uuid: 'beta-1', toolUseIds: ['toolu_beta'] }])
+  assistant('beta-1')
+  await show($, 'main')
+
+  rows.push(['prompt-main question', () => userRow($, 'prompt-main question', 'main question')])
+  rows.push(['prompt-alpha work', () => userRow($, 'prompt-alpha work', 'alpha work')])
+  rows.push(['prompt-beta work', () => userRow($, 'prompt-beta work', 'beta work')])
+  for (const id of ['toolu_main', 'toolu_alpha', 'toolu_beta'])
+    rows.push([id, () => row($, 'ToolUse', id, { tool_use_id: id, tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false })])
+  rows.push(['collapsed-alpha-think', () => thinkingRow($, 'collapsed-alpha-think')])
+  rows.push(['dur-main', () => durationRow($, 'dur-main')])
+  rows.push(['dur-alpha', () => durationRow($, 'dur-alpha')])
+  rows.push(['post-alpha', () => postRow($, 'post-alpha', 'Alpha', 'alpha post')])
+  rows.push(['post-beta', () => postRow($, 'post-beta', 'Beta', 'b')])
+
+  const views = ['main', 'context-1', 'context-2']
+  const seenIn = new Map<string, string[]>()
+  for (const view of views) {
+    await show($, view)
+    for (const [id, mount] of rows) {
+      const ui = await mount(view)
+      const isFull = (await ui.find({ type: 'Text', text: ENGINE_ROW })) !== undefined || (await ui.find({ type: 'Markdown' })) !== undefined
+      await ui.unmount()
+      if (isFull) seenIn.set(id, [...(seenIn.get(id) ?? []), view])
+    }
+  }
+  for (const [id] of rows) expect([id, (seenIn.get(id) ?? []).length]).toEqual([id, 1])
 })

@@ -64,10 +64,11 @@ the CI run in its own context") or let it route updates on its own.
 - Rows of a context's turn (Claude's text, its tool calls, the turn's duration line) belong to
   that context. A background task's notification belongs to the context of the call that
   started it; anything that cannot be traced belongs to Main chat.
-- Rows outside the selected view draw as nothing, so they take no lines.
-- When a context's turn ends on a post into that context, the text and thinking Claude writes
-  after it are hidden: Claude Code nudges a turn that ends on a tool call into a closing line,
-  which only repeats the post. Text after any later tool call is part of the answer and stays.
+- Every row draws in full in exactly one view, its context's or Main chat's, and as nothing in
+  the others, so it takes no lines there. Nothing is hidden everywhere: a closing line Claude
+  writes after a post shows in the turn's context, even when it repeats the post.
+- A subagent's rows live in its own transcript, so its posts draw with the Agent call that
+  started it: as Claude's message in the post's context, and as a pointer line in Main chat.
 
 ## Limitations
 
@@ -77,7 +78,13 @@ the CI run in its own context") or let it route updates on its own.
   go without it.
 - **No unfiltered view.** Main chat collapses context traffic to pointer lines, and the ctrl+o
   transcript shows the selected view too, except Claude's thinking, which shows there in every
-  view. The closing recap of a post (see above) shows in no view.
+  view.
+- **Closing lines can repeat a post.** After Claude posts in a context, it often adds a short
+  line saying so (Claude Code nudges a turn that ends on a tool call into writing one). It shows
+  in that context under the post.
+- **A subagent's posts draw where its Agent call is**, not where in time they were made, and
+  only once the call has said which subagent it started (at once for a background agent, when
+  it finishes for a foreground one).
 - **Some rows show in every view**: slash-command echo lines (`❯ /clear`), notices and other rows
   Claude Code draws without a hook a mod can reach.
 - **The sticky prompt header** at the top of a scrolled transcript can show a prompt from
@@ -94,21 +101,21 @@ the CI run in its own context") or let it route updates on its own.
 
 ## Observed behaviour it relies on
 
-Three things the mod relies on are what Claude Code 2.1.289 does, not documented API. If an
-update changes one, that part degrades as described and the rest keeps working:
+These are what Claude Code 2.1.289 does, not documented API. If an update changes one, that
+part degrades as described and the rest keeps working:
 
 - **The folded thinking line's id.** A thinking line is drawn as a tool group with no calls,
   whose id is `collapsed-<id of its assistant row>`. The mod reads its context from that id.
-  If the shape changes, a context's thinking lines show in Main chat instead, and the thinking
-  line of a hidden recap stays in view.
+  If the shape changes, a context's thinking lines show in Main chat instead.
 - **The task id in a notification's text.** When a task notification arrives, the mod reads the
   id of the call that started the task from the `<tool-use-id>` in its text, to put Claude's
   reply in that context and to tell Claude which context it is about. If the format changes,
   Claude's reply to the notification lands in Main chat. The notification row itself uses the
   documented `task.toolUseId` and keeps its context.
-- **A turn's duration line carries the turn's length.** The mod ties a duration line to its turn
-  by the line's `durationMs` and the turn's `turn.complete` `durationMs`. If the two stop
-  matching, a context turn's duration line shows in Main chat.
+- **A turn's duration line is the `turn_duration` notice kept after the turn ends.** The mod
+  ties the first notice of that name after a turn's `turn.complete` to the turn, and the line
+  draws under that notice's id. If the name or the order changes, a context turn's duration
+  line shows in Main chat.
 
 ## Tests
 
@@ -121,6 +128,7 @@ claude plugin test ./context-switcher
 
 The tests drive the mod's hooks with no model calls: the command and its fullscreen check,
 staying on across a reload, the tool and the sidebar's counts, the rows each view draws
-(prompts, replies, tool rows and groups, thinking and duration lines, notifications), prompt
-notes, recap hiding and Main chat's unread count. Closing the sidebar (which the test kit cannot
+(prompts, replies, tool rows and groups, thinking and duration lines, notifications, subagent
+posts), that every row draws in full in exactly one view, prompt notes and Main chat's unread
+count. Closing the sidebar (which the test kit cannot
 raise) and `/clear` (which it cannot reset) are checked by hand.

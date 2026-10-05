@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { ContextEntry } from '../types'
+import type { AgentPost, ContextEntry } from '../types'
 
 const PANE = 'contexts'
 const TOOL = 'mcp__context-switcher__post'
@@ -15,8 +15,8 @@ const view = atom({ plugin: 'context-switcher', key: 'view' } as const, MAIN)
 const contexts = atom({ plugin: 'context-switcher', key: 'contexts' } as const, [] as ContextEntry[])
 const mainUnread = atom({ plugin: 'context-switcher', key: 'mainUnread' } as const, 0)
 const ROW = { plugin: 'context-switcher', key: 'rowContext' } as const
-const ECHO = { plugin: 'context-switcher', key: 'isEcho' } as const
-const DURATION = { plugin: 'context-switcher', key: 'durationContext' } as const
+const AGENT_POSTS = { plugin: 'context-switcher', key: 'agentPosts' } as const
+const AGENT_OF_CALL = { plugin: 'context-switcher', key: 'agentOfCall' } as const
 
 const GUIDE = `# Context Switcher
 
@@ -24,7 +24,7 @@ The user turned on Context Switcher. The conversation now holds contexts: named 
 
 - Give each separate topic its own context, named with a short topic name of two or three words (for example "CI flakes"). Use the same name for the same topic.
 - Post news about a topic with ${TOOL} instead of writing it in Main chat. This matters most for results that arrive on their own: task notifications, background commands, subagents, messages from other sessions.
-- A prompt the user writes from inside a context says so in a note. Answer it with ${TOOL} into that context: the post is your reply, so put everything the user should read in it. Text you write after that post is hidden from the user; end the turn with one short line such as "Posted to CI flakes." rather than repeating the post.
+- A prompt the user writes from inside a context says so in a note. Answer it with ${TOOL} into that context: the post is your reply, so put everything the user should read in it, and don't repeat it as text afterwards.
 - Set needsUser on a post that asks the user for a decision or for input.
 - Prompts without such a note come from Main chat. Answer those as usual.`
 
@@ -36,20 +36,19 @@ const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().t
 /** The prompt text to the context it was written in, read when its turn starts and its row is drawn. */
 const promptContext = new Map<string, string>()
 /**
- * The main loop's running turn: its context; the context of its last tool call when that was a
- * post (null otherwise); the assistant rows kept since that call; and whether it wrote text that
- * is not a recap of a post.
+ * The main loop's running turn: its context; whether the last tool to answer was a post (so
+ * text now is about that post); and whether the turn wrote text of its own, for Main chat's
+ * unread count. Then the context of the turn that just ended, for its duration line.
  */
 let turnContext = MAIN
-let lastPostContext: string | null = null
-let rowsSinceTool: string[] = []
+let isAfterPost = false
 let hasOwnText = false
+let endedContext: string | null = null
 let isToolRegistered = false
 
 function startTurn(context: string) {
   turnContext = context
-  lastPostContext = null
-  rowsSinceTool = []
+  isAfterPost = false
   hasOwnText = false
 }
 
@@ -128,25 +127,28 @@ async function contextOf($: EngineInterface, e: RenderInput): Promise<string> {
     const row = thinkingRowOf(e.requestId)
     if (row) return (await read($, { ...ROW, id: row })) ?? MAIN
   }
-  if (e.component === 'TurnDuration')
-    return (await read($, { ...DURATION, id: String(e.props.durationMs) })) ?? MAIN
   return MAIN
 }
 
 /**
  * The assistant row a folded thinking line (a ToolGroup with no calls) belongs to. Not part of
  * the documented API: observed as the id `collapsed-<uuid of that row>`. Any other id leaves the
- * line in Main chat and keeps a recap's thinking line in view.
+ * line in Main chat.
  */
 function thinkingRowOf(requestId: string) {
   return /^collapsed-(.+)$/.exec(requestId)?.[1]
 }
 
-/** A recap of a post: an assistant row, or its folded thinking line, that ends a context's turn after it posted there. */
-async function isEcho($: EngineInterface, e: RenderInput) {
-  if (e.component === 'AssistantMessage') return (await read($, { ...ECHO, id: e.requestId })) === true
-  const row = e.component === 'ToolGroup' && e.props.calls.length === 0 ? thinkingRowOf(e.requestId) : undefined
-  return row !== undefined && (await read($, { ...ECHO, id: row })) === true
+/** The subagent a subagent's own subagent works for, up to the one the main loop started. */
+async function topAgentOf($: EngineInterface, agentId: string) {
+  const agents = await $.agent.list()
+  let id = agentId
+  for (let depth = 0; depth < 16; depth++) {
+    const parent = agents.find(agent => agent.id === id)?.parentId
+    if (!parent || !agents.some(agent => agent.id === parent)) break
+    id = parent
+  }
+  return id
 }
 
 type PostInput = { context?: unknown; text?: unknown; needsUser?: unknown }
@@ -229,19 +231,23 @@ export const register: Register = on => {
     })
     const name = list.find(entry => sameName(entry.name, post.context))?.name ?? post.context
     if (e.agentId === undefined) {
-      lastPostContext = name
-      rowsSinceTool = []
+      isAfterPost = true
+    } else {
+      // A subagent's rows live in its own transcript: keep its posts for the main loop's call that started it
+      const agent = await topAgentOf($, e.agentId)
+      const kept: AgentPost = { context: name, text: post.text, needsUser: post.needsUser }
+      await update($, { ...AGENT_POSTS, id: agent }, posts => [...(posts ?? []), kept])
     }
     return { result: `Posted to "${name}".` }
   })
 
-  // Any other tool call of the main loop: what Claude writes next is not a recap of a post
+  // Which subagent each of the main loop's Agent calls started, so its posts draw with that call
   on('tool.call', async ($, e, next) => {
-    if (e.agentId === undefined && String(e.tool) !== TOOL) {
-      lastPostContext = null
-      rowsSinceTool = []
-    }
-    return next(e)
+    if (e.agentId !== undefined || String(e.tool) !== 'Agent' || !(await isActive($))) return next(e)
+    const ran = await next(e)
+    const agentId = (ran.result as { agentId?: unknown } | undefined)?.agentId
+    if (typeof agentId === 'string') await $.state.set({ ...AGENT_OF_CALL, id: e.tool_use_id }, agentId)
+    return ran
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -267,7 +273,7 @@ export const register: Register = on => {
     return next(
       withNote(
         e,
-        `The user wrote this prompt in the context "${context}". Reply by calling ${TOOL} with context "${context}"; the post is your reply, and text after it is hidden from the user.`,
+        `The user wrote this prompt in the context "${context}". Reply by calling ${TOOL} with context "${context}"; the post is your reply, so don't repeat it as text.`,
       ),
     )
   })
@@ -279,15 +285,8 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined && (await isActive($))) {
-      if (turnContext !== MAIN) {
-        // Claude sums up a post it ended its turn on; in the context that reads twice
-        if (lastPostContext !== null && sameName(lastPostContext, turnContext))
-          for (const id of rowsSinceTool) await $.state.set({ ...ECHO, id }, true)
-        // The turn's duration line carries the turn's length, the one thing that ties it to the turn
-        await $.state.set({ ...DURATION, id: String(e.durationMs) }, turnContext)
-      } else if (hasOwnText && (await read($, view)) !== MAIN) {
-        await update($, mainUnread, n => n + 1)
-      }
+      if (turnContext === MAIN && hasOwnText && (await read($, view)) !== MAIN) await update($, mainUnread, n => n + 1)
+      endedContext = turnContext
       startTurn(MAIN)
     }
     return next(e)
@@ -302,9 +301,15 @@ export const register: Register = on => {
       const first = message.content.find(block => block.type === 'text')?.text
       const context = typeof first === 'string' ? promptContext.get(first) : undefined
       if (context) await $.state.set({ ...ROW, id: e.uuid }, context)
+    } else if (message.type === 'user' && e.door === 'tool-result') {
+      // A result of another tool: what Claude writes next is about it, not a recap of a post
+      if (e.origin.kind === 'tool' && e.origin.tool !== TOOL) isAfterPost = false
+    } else if (message.type === 'system' && message.name === 'turn_duration' && endedContext !== null) {
+      // The duration line Claude Code keeps when a turn ends: it draws under this row's id
+      if (endedContext !== MAIN) await $.state.set({ ...ROW, id: e.uuid }, endedContext)
+      endedContext = null
     } else if (message.type === 'assistant') {
-      rowsSinceTool.push(e.uuid)
-      if (lastPostContext === null && message.content.some(block => block.type === 'text')) hasOwnText = true
+      if (!isAfterPost && message.content.some(block => block.type === 'text')) hasOwnText = true
       if (turnContext !== MAIN) {
         await $.state.set({ ...ROW, id: e.uuid }, turnContext)
         for (const block of message.content)
@@ -323,11 +328,8 @@ export const register: Register = on => {
       const viewing = await read($, view)
       const nothing = <Box />
 
-      if ((e.component === 'ToolUse' || e.component === 'ToolResult') && e.props.tool === TOOL) {
-        if (e.component === 'ToolResult') return nothing
-        if (e.props.isErrored) return next(e)
-        const post = postOf(e.props.input)
-        if (!post.context) return nothing
+      // A post: Claude's message in its context, one pointer line in Main chat
+      const drawPost = (post: AgentPost) => {
         if (viewing === MAIN)
           return (
             <Box flexDirection="row" marginTop={1}>
@@ -338,7 +340,7 @@ export const register: Register = on => {
               <Text dimColor wrap="truncate">: {firstLine(post.text)}</Text>
             </Box>
           )
-        if (!sameName(viewing, post.context)) return nothing
+        if (!sameName(viewing, post.context)) return null
         return (
           <Box flexDirection="row" marginTop={1}>
             <Text>● </Text>
@@ -349,9 +351,28 @@ export const register: Register = on => {
         )
       }
 
-      if (await isEcho($, e)) return nothing
-      const context = await contextOf($, e)
-      return sameName(context, viewing) ? next(e) : nothing
+      if ((e.component === 'ToolUse' || e.component === 'ToolResult') && e.props.tool === TOOL) {
+        if (e.component === 'ToolResult') return nothing
+        if (e.props.isErrored) return next(e)
+        const post = postOf(e.props.input)
+        return (post.context && drawPost(post)) || nothing
+      }
+
+      const isOwn = sameName(await contextOf($, e), viewing)
+      if (e.component === 'ToolUse' && e.props.tool === 'Agent') {
+        // The posts of the subagent this call started draw with the call, each in its own view
+        const agentId = await read($, { ...AGENT_OF_CALL, id: e.requestId })
+        const posts = agentId ? ((await read($, { ...AGENT_POSTS, id: agentId })) ?? []) : []
+        const drawn = posts.flatMap(post => drawPost(post) ?? [])
+        if (drawn.length > 0)
+          return (
+            <Box flexDirection="column">
+              {isOwn && (await next(e))}
+              {drawn}
+            </Box>
+          )
+      }
+      return isOwn ? next(e) : nothing
     },
   )
 
