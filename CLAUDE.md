@@ -16,7 +16,7 @@ orchestra/               # Plugin: Orchestra (orchestrator + player skills)
     orchestrator/        # Shared SKILL.md, scripts/, agents/openai.yaml
     player/               # Shared SKILL.md, scripts/, agents/openai.yaml
   tests/                  # Mock-tmux unit tests and a real-tmux smoke test
-context-switcher/        # Plugin: Context Switcher (a Claude Code mod)
+conversations/           # Plugin: Conversations (a Claude Code mod)
   .claude-plugin/
     plugin.json          # Plugin metadata, and the $.state contract under "types"
   hooks/register.tsx     # The hooks module
@@ -85,7 +85,7 @@ install would use:
   bash orchestra/tests/smoke_tmux.sh
   ```
 
-## Context Switcher-specific conventions
+## Conversations-specific conventions
 
 - A mod: one hooks module of function hooks against the mod API. Use only documented API
   (code.claude.com/docs/en/plugins/mods and the types Claude Code lays in
@@ -93,6 +93,6 @@ install would use:
 - Standalone: no reference to Orchestra or any workflow.
 - Checks (no model calls):
   ```bash
-  claude plugin validate --strict ./context-switcher
-  claude plugin test ./context-switcher
+  claude plugin validate --strict ./conversations
+  claude plugin test ./conversations
   ```

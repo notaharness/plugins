@@ -1,35 +1,35 @@
-/** A context Claude has posted to, as the sidebar lists it. */
-export type ContextEntry = {
+/** A conversation Claude has posted to, as the sidebar lists it. */
+export type ConversationEntry = {
   name: string
-  /** Posts since the user last viewed the context. */
+  /** Posts since the user last viewed the conversation. */
   unread: number
   /** Whether an unread post asks the user for input. */
   needsUser: boolean
-  /** Claude marked its conversation wrapped up; the sidebar lists it under Done. */
-  isDone: boolean
+  /** Claude archived it as wrapped up; the sidebar lists it under Archived. */
+  isArchived: boolean
 }
 
 /** A post a subagent made, kept for the main loop's Agent call that started it. */
 export type AgentPost = {
-  context: string
+  conversation: string
   text: string
   needsUser: boolean
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    'context-switcher': {
-      /** Turned on by /contexts; carries that over a reload of the mod. */
+    conversations: {
+      /** Turned on by /conversations; carries that over a reload of the mod. */
       isOn: boolean
-      /** The context the transcript shows; '' is Main chat. */
+      /** The conversation the transcript shows; '' is Main. */
       view: string
-      contexts: ContextEntry[]
-      /** Main chat replies since the user last viewed it. */
+      conversations: ConversationEntry[]
+      /** Main's replies since the user last viewed it. */
       mainUnread: number
-      /** Whether the sidebar's Done group is expanded. */
-      isDoneShown: boolean
-      /** The context a transcript row belongs to, by row id; absent is Main chat. */
-      rowContext: StateFamily<string>
+      /** Whether the sidebar's Archived section is expanded. */
+      isArchiveShown: boolean
+      /** The conversation a transcript row belongs to, by row id; absent is Main. */
+      rowConversation: StateFamily<string>
       /** The posts a subagent made, by the id of the subagent the main loop started. */
       agentPosts: StateFamily<AgentPost[]>
       /** The subagent each of the main loop's Agent calls started, by the call's tool_use_id. */

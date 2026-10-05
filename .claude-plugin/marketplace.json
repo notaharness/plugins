@@ -17,9 +17,9 @@
       "license": "MIT"
     },
     {
-      "name": "context-switcher",
-      "source": "./context-switcher",
-      "description": "Split one busy Claude Code session into named contexts and read them one at a time from a sidebar",
+      "name": "conversations",
+      "source": "./conversations",
+      "description": "Split one busy Claude Code session into named conversations and read them one at a time from a sidebar",
       "version": "0.1.0",
       "author": {
         "name": "notaharness"

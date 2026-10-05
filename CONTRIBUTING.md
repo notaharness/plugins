@@ -9,7 +9,7 @@ orchestra/                        # The Orchestra plugin
   skills/orchestrator/            # SKILL.md, scripts/, agents/openai.yaml (Codex metadata)
   skills/player/                  # SKILL.md, scripts/, agents/openai.yaml
   tests/                          # Unit tests (mock tmux) and a real-tmux smoke test
-context-switcher/                 # The Context Switcher plugin (a Claude Code mod)
+conversations/                    # The Conversations plugin (a Claude Code mod)
   .claude-plugin/plugin.json      # Plugin manifest, naming the $.state contract
   hooks/register.tsx              # The hooks module
   types/index.d.ts                # $.state contract
@@ -25,7 +25,7 @@ Load the plugin from your checkout in Claude Code:
 
 ```bash
 claude --plugin-dir ./orchestra
-CLAUDE_CODE_NO_FLICKER=1 claude --plugin-dir ./context-switcher
+CLAUDE_CODE_NO_FLICKER=1 claude --plugin-dir ./conversations
 ```
 
 A `--plugin-dir` session reloads a mod when you save its files.
@@ -50,11 +50,11 @@ Both use temporary Git repositories and fake agent CLIs, so they make no model c
 The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
 sessions, delivery through `codex queue`, or a spawn on a real second machine.
 
-For Context Switcher:
+For Conversations:
 
 ```bash
-claude plugin validate --strict ./context-switcher
-claude plugin test ./context-switcher
+claude plugin validate --strict ./conversations
+claude plugin test ./conversations
 ```
 
 These drive the mod's hooks through Claude Code's test kit, with no session or model calls.

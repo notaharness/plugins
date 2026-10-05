@@ -6,7 +6,7 @@ Codex and other coding agents.
 | Plugin | What it does |
 | --- | --- |
 | [Orchestra](orchestra/) | One agent hands tasks to other coding agents, each working on its own branch in its own tmux session and git worktree, and receives their progress, questions and results. |
-| [Context Switcher](context-switcher/) | A Claude Code mod that splits one busy session into named contexts: a sidebar lists them, and the transcript shows one at a time. |
+| [Conversations](conversations/) | A Claude Code mod that splits one busy session into named conversations: a sidebar lists them, and the transcript shows one at a time. |
 
 ## Install
 
@@ -20,11 +20,11 @@ Orchestra needs tmux, Git and an authenticated `claude` or `codex` CLI; see the
 /plugin install orchestra@notaharness
 ```
 
-Context Switcher is a Claude Code mod for the terminal and needs fullscreen rendering; see its
-[README](context-switcher/README.md):
+Conversations is a Claude Code mod for the terminal and needs fullscreen rendering; see its
+[README](conversations/README.md):
 
 ```text
-/plugin install context-switcher@notaharness
+/plugin install conversations@notaharness
 ```
 
 ### Codex and other agents
