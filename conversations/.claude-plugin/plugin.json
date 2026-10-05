@@ -1,6 +1,6 @@
 {
   "name": "conversations",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Split one busy Claude Code session into named conversations and read them one at a time from a sidebar",
   "author": {
     "name": "notaharness"
