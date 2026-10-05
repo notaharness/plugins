@@ -273,7 +273,7 @@ test('a fresh load of the module after /clear stays on while the tool is still r
   expect(seen.tools).toEqual(['post'])
   expect((await compose($)).sections.map(section => section.id)).toContain('conversations:guide')
   const pointer = await postRow($, 'p1', 'Alpha', 'hello')
-  expect(await pointer.find({ type: 'Text', text: '→ Alpha' })).toBeDefined()
+  expect(await pointer.find({ type: 'Text', text: '› Alpha' })).toBeDefined()
 })
 
 test('a post creates its conversation and counts unread posts until the user opens it', async ($, on) => {
@@ -330,7 +330,7 @@ test('Main draws its own rows and one pointer line per post', async ($, on) => {
   expect(await drawn(await userRow($, 'prompt-why is CI red', 'why is CI red'))).toBe('nothing')
 
   const pointer = await postRow($, 'p1', 'CI flakes', '## Run 4812\nfailed on linux', true)
-  expect(await pointer.find({ type: 'Text', text: '→ CI flakes' })).toBeDefined()
+  expect(await pointer.find({ type: 'Text', text: '› CI flakes' })).toBeDefined()
   expect(await pointer.find({ type: 'Text', text: ' needs you' })).toBeDefined()
   expect(await pointer.find({ type: 'Text', text: ': Run 4812' })).toBeDefined()
   expect(await pointer.find({ type: 'Markdown' })).toBeUndefined()
@@ -583,7 +583,7 @@ test("a subagent's posts draw with the Agent call that started it, each in its o
   // Main: a pointer line per post
   await show($, 'main')
   ui = await agentCallRow($, 'toolu_agent')
-  expect(await ui.find({ type: 'Text', text: '→ Research' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '› Research' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: ENGINE_ROW })).toBeUndefined()
   await ui.unmount()
 })
@@ -755,7 +755,7 @@ test('a post of a subagent started by a subagent draws with the first call, also
   await ui.unmount()
   await show($, 'main')
   ui = await agentCallRow($, 'toolu_agent')
-  expect(await ui.find({ type: 'Text', text: '→ Release' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '› Release' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -943,7 +943,7 @@ test('a new conversation leaves the view alone when the user did not start the t
   expect(await isViewing($, 'Later')).toBe(false)
 })
 
-test('the sidebar keeps a fixed marker column and cuts a long name to fit with an ellipsis', async ($, on) => {
+test('the sidebar keeps a fixed marker column and cuts a long name to fit', async ($, on) => {
   engine(on)
   await turnOn($)
   await post($, 'A very long conversation name that does not fit', 'x')
@@ -953,7 +953,7 @@ test('the sidebar keeps a fixed marker column and cuts a long name to fit with a
   const ui = await pane($)
   const long = (await ui.find({ key: 'conversation-1' })) as any
   // 28 body columns: the marker's 2, "1: " and the unread count's " 1" leave 21
-  expect(long.props.label).toBe('A very long conversa…')
+  expect(long.props.label).toBe('A very long conver...')
   expect(await ui.find({ type: 'Text', text: '❯' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /▶/ })).toBeUndefined()
   await ui.unmount()
@@ -1015,7 +1015,7 @@ test('a fresh process starting a saved session puts its conversations, rows, vie
   await ui.unmount()
   expect(await drawn(await assistantRow($, 'notes-reply'))).toBe('nothing')
   ui = await agentCallRow($, 'toolu_agent')
-  expect(await ui.find({ type: 'Text', text: '→ CI flakes' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '› CI flakes' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1047,7 +1047,7 @@ test('without a record, a session whose transcript has posts is rebuilt from the
   // A subagent of a rebuilt Agent call posts with that call
   await $.tool.call({ tool: TOOL, conversation: 'Release notes', text: 'from the subagent', agentId: 'agent-1' } as any)
   const call = await agentCallRow($, 'a1')
-  expect(await call.find({ type: 'Text', text: '→ Release notes' })).toBeDefined()
+  expect(await call.find({ type: 'Text', text: '› Release notes' })).toBeDefined()
   await call.unmount()
 })
 
@@ -1161,4 +1161,22 @@ test('a process that starts before its transcript is there restores it once it i
   await clock.advance(500)
   expect(seen.tools).toEqual(['post'])
   expect(seen.panes).toEqual(['conversations'])
+})
+
+test("the mod's rows and sidebar use only glyphs every terminal draws one cell wide, and no ellipsis", async ($, on) => {
+  engine(on)
+  await turnOn($)
+  await post($, 'A very long conversation name that does not fit', `Run failed: ${'x'.repeat(300)}`, true)
+  // Characters some terminals draw two cells wide (East Asian width "ambiguous")
+  const ambiguous = /[→●…▶▸▾─-╿■-◿]/
+  const drawnTrees = [JSON.stringify(await (await postRow($, 'p1', 'Other', 'pointer text')).find({ type: 'Box' }))]
+  const ui = await pane($)
+  drawnTrees.push(JSON.stringify(await ui.find({ type: 'Box' })))
+  await ui.unmount()
+  await show($, 'conversation-1')
+  drawnTrees.push(JSON.stringify(await (await postRow($, 'p2', 'A very long conversation name that does not fit', 'message')).find({ type: 'Box' })))
+  for (const tree of drawnTrees) expect(ambiguous.test(tree)).toBe(false)
+  // The pointer line is cut by its one-row box, not by Text's truncation, which ends in "…"
+  expect(drawnTrees[0]).not.toContain('truncate')
+  expect(drawnTrees[0]).toContain('"overflow":"hidden"')
 })

@@ -40,7 +40,7 @@ extra instructions. Once it is on, it stays on for the rest of the session.
 
 - **The sidebar** lists your conversations under `Conversations`: Main and each conversation
   Claude has started, with a count of unread posts and a `needs you` mark when a post asks for
-  your input; a name too long for the sidebar is cut with `…`. Click one, or press `ctrl+x tab`
+  your input; a name too long for the sidebar is cut with `...`. Click one, or press `ctrl+x tab`
   and then the number shown beside it, to select it. With the sidebar holding the keys, the
   arrow keys move through the list. `Esc` returns the keys to the prompt.
 - **Archived conversations** sit in a collapsed `Archived` section at the bottom of the sidebar.
@@ -50,7 +50,8 @@ extra instructions. Once it is on, it stays on for the rest of the session.
   and moving back up folds it; a click on its header opens it too. An archived conversation
   still opens and reads like any other. You never manage conversations yourself.
 - **Main** is your focus conversation. Traffic for another conversation shows there as one dim
-  line per post, such as `→ CI flakes: Run 4812 failed on linux`.
+  line per post, such as `› CI flakes: Run 4812 failed on linux`, cut at the edge of the
+  transcript.
 - **A conversation** turns the transcript into that thread: Claude's posts read as its messages,
   along with your prompts there and the tool calls and notifications that belong to it.
   Everything else is hidden.
@@ -100,6 +101,10 @@ notifications, background agents, messages from other sessions. Those show as un
   transcript with posts is enough: the mod turns on, opens the sidebar, lists the conversations
   and puts each turn's prompts, replies and tool calls back in the conversation its prompt note
   named (the notes reach Claude, so the transcript keeps them).
+- The rows and the sidebar the mod draws use only glyphs every terminal draws one cell wide
+  (no East Asian "ambiguous" ones such as `→`, `●` or `…`), and a pointer line is cut by its
+  one-row box rather than with an ellipsis, so the edge beside the sidebar stays straight
+  where a terminal draws ambiguous glyphs wide. Claude Code's own rows are its own.
 - The Archived section opens and folds on the sidebar's `ui.focus` event: the ring landing on
   its header or one of its conversations opens it, the ring landing on Main or an active one
   folds it.

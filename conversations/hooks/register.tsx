@@ -618,22 +618,26 @@ export const register: Register = on => {
       const viewing = await read($, view)
       const nothing = <Box />
 
-      // A post: Claude's message in its conversation, one pointer line in Main
+      // A post: Claude's message in its conversation, one pointer line in Main. Only glyphs every
+      // terminal draws one cell wide, and the line cut by its box rather than with an ellipsis,
+      // so no row runs a cell past the width it was laid out at, into the sidebar's edge
       const drawPost = (post: AgentPost) => {
         if (viewing === MAIN)
           return (
             <Box flexDirection="row" marginTop={1}>
               <Box flexShrink={0}>
-                <Text dimColor>→ {post.conversation}</Text>
+                <Text dimColor>› {post.conversation}</Text>
                 {post.needsUser && <Text color="warning"> needs you</Text>}
               </Box>
-              <Text dimColor wrap="truncate">: {firstLine(post.text)}</Text>
+              <Box height={1} overflow="hidden" flexShrink={1}>
+                <Text dimColor>: {firstLine(post.text)}</Text>
+              </Box>
             </Box>
           )
         if (!sameName(viewing, post.conversation)) return null
         return (
           <Box flexDirection="row" marginTop={1}>
-            <Text>● </Text>
+            <Text>⏺ </Text>
             <Box flexDirection="column" flexShrink={1}>
               <Markdown text={post.text.slice(0, 10000)} />
             </Box>
@@ -695,7 +699,7 @@ export const register: Register = on => {
       const isViewed = sameName(name, viewing)
       const counts = (unread > 0 ? ` ${unread}` : '') + (needsUser ? ' needs you' : '')
       const room = e.props.bodyColumns - 2 - (hotkey ? `${hotkey}: `.length : 0) - counts.length
-      const fitted = label.length > room ? `${label.slice(0, Math.max(1, room - 1))}…` : label
+      const fitted = label.length > room ? `${label.slice(0, Math.max(1, room - 3))}...` : label
       return (
         <Box flexDirection="row">
           {marker(isViewed)}
