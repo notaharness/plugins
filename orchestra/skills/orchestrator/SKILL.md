@@ -59,7 +59,13 @@ spawn/adopt. Task text travels through a tmux buffer, not the command line or re
 `--permission-mode auto` is available for Claude within existing authorization; `--dry-run`
 previews without writes or fetches, and `--from REF` deliberately stacks work. A failed launch
 removes its placeholder session but keeps the worktree; rerun the command to retry. Claude
-players start pre-trusted with `--strict-mcp-config`, preventing startup dialogs swallowing tasks.
+players start with the worktree pre-trusted and load the same MCP servers as a normal session.
+
+**MCP servers.** A repo's `.mcp.json` servers need approval, and a click in Claude's dialog is
+stored per folder, so a new worktree does not inherit it and the dialog stops the player. Offer the
+user to approve once in a settings file every checkout reads: the repo's committed
+`.claude/settings.json` (team) or the user's `~/.claude/settings.json` (or the account's config
+dir), with `enabledMcpjsonServers` (named servers) or `enableAllProjectMcpServers`.
 
 Check startup with `sessions.sh --all` and `screen.sh SESSION` once players have had time to
 start (about ten seconds). Inspect authentication, permission or missing-skill failures before
