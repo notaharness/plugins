@@ -43,7 +43,7 @@
 # queued: Claude Code does not run a skill invocation posted to its inbox socket, and a Codex
 # conversation has no thread to queue to before its first turn. Messages after that go through
 # send.sh, which queues where the agent allows it. Claude players are pre-trusted for their
-# worktree and started with --strict-mcp-config, so no startup dialog stops them.
+# worktree; a .mcp.json server not yet approved there still raises a dialog (SKILL.md, MCP servers).
 #
 # Naming (see _lib.sh): worktree at <main checkout>/.claude/worktrees/<branch with / → ->;
 # the tmux session is a label, <repo basename>-<branch> with "/", "." and ":" replaced by "-"
@@ -314,6 +314,8 @@ fi
 # The checkout's canonical path, resolved where it lives: the worktree session's identity tag.
 # Resolved above when the worktree already existed; a new one is resolved now.
 [ -n "$DIR" ] || [ $RESOLVED = 1 ] || resolve_checkout
+r --cwd "$workdir" test -f .mcp.json 2>/dev/null \
+  && echo "spawn.sh: $workdir has a .mcp.json; an unapproved server stops a Claude player at a dialog (SKILL.md, MCP servers)" >&2
 r mkdir -p "$AGENT_TMUX_TMPDIR" || { echo "spawn.sh: could not create $AGENT_TMUX_TMPDIR on $(machine_label)" >&2; exit 1; }
 
 unset TMUX TMUX_PANE

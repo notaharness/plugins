@@ -499,17 +499,17 @@ class PortTests(unittest.TestCase):
         cfg = self.base/'claude-config/.claude.json'; cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(json.dumps({'numStartups': 7, 'projects': projects}, indent=2)); cfg.chmod(0o600)
         return cfg
-    def test_claude_launch_pre_accepts_trust_and_skips_project_mcp(self):
+    def test_claude_launch_pre_accepts_trust_and_keeps_mcp_servers(self):
         cfg = self.claude_config({'/elsewhere': {'hasTrustDialogAccepted': False, 'mcpServers': {}}})
         self.spawn('--agent', 'claude'); c = self.calls()[-1]
-        self.assertEqual(c['args'][-2], '--strict-mcp-config'); self.assertTrue(c['args'][-1].startswith(INV+' Task with'))
+        self.assertNotIn('--strict-mcp-config', c['args']); self.assertTrue(c['args'][-1].startswith(INV+' Task with'))
         data = json.loads(cfg.read_text())
         self.assertIs(data['projects'][str(self.wt)]['hasTrustDialogAccepted'], True)
         self.assertEqual(data['numStartups'], 7); self.assertEqual(data['projects']['/elsewhere'], {'hasTrustDialogAccepted': False, 'mcpServers': {}})
         self.assertEqual(cfg.stat().st_mode & 0o777, 0o600)
         self.assertEqual(sorted(x.name for x in cfg.parent.iterdir() if x.name.startswith('.claude.json')), ['.claude.json'])   # replaced, no temp left
         self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)
-        self.assertEqual(self.calls()[-1]['args'][-2], '--strict-mcp-config')
+        self.assertNotIn('--strict-mcp-config', self.calls()[-1]['args'])
     def test_claude_trust_is_written_for_the_worktree_itself_and_only_once(self):
         # A trusted ancestor is not enough for Claude (a trusted /tmp still prompts below it).
         cfg = self.claude_config({str(self.repo): {'hasTrustDialogAccepted': True}, '/': {'hasTrustDialogAccepted': True}})

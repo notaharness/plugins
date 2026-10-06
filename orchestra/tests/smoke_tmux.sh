@@ -69,7 +69,7 @@ check "pane alive" "[ \"\$(tm display-message -p -t '=$S1:' '#{pane_dead}')\" = 
 check "prompt reached claude intact" "grep -q '^END-OF-TASK' '$T/last-claude' && grep -q '^second line' '$T/last-claude' && grep -q '^arg=$INV Task: x' '$T/last-claude'"
 check "prompt does not name the orchestrator" "! grep -q 'reporting target' '$T/last-claude'"
 check "explicit model/effort passed" "grep -q '^arg=fable' '$T/last-claude' && grep -q '^arg=high' '$T/last-claude'"
-check "claude starts without project MCP servers" "grep -qx 'arg=--strict-mcp-config' '$T/last-claude'"
+check "claude starts with MCP servers enabled" "! grep -qx 'arg=--strict-mcp-config' '$T/last-claude'"
 check "the worktree is pre-trusted in Claude's config" \
   "python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"projects\"][sys.argv[2]][\"hasTrustDialogAccepted\"] is True and d[\"numStartups\"] == 3' '$CLAUDE_CONFIG_DIR/.claude.json' \"\$(cd '$W1' && pwd -P)\""
 check "parent markers stripped" "grep -q 'env CLAUDECODE= ' '$T/last-claude' && grep -q 'CODEX_THREAD_ID= ' '$T/last-claude'"

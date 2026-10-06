@@ -28,9 +28,9 @@
 # it itself. Nothing can queue it instead — Claude Code never runs a skill invocation posted to its
 # inbox socket, and a Codex conversation has no thread to queue to before its first turn. A dialog
 # at Claude's startup still swallows keys (the trust dialog's default answer is "No, exit"), so
-# every Claude launch here passes --strict-mcp-config (no "new MCP server found" prompt for the
-# repo's .mcp.json; players run without MCP servers) and pre-accepts the workspace-trust dialog
-# for this worktree first (claude_trust_here).
+# every Claude launch here pre-accepts the workspace-trust dialog for this worktree first
+# (claude_trust_here). Players load the same MCP servers as a normal session; a .mcp.json server
+# not yet approved for the worktree raises its own dialog (see the orchestrator SKILL.md).
 #
 # A dir player (@orchestra-session-type dir) may share its directory with other conversations, the
 # orchestrator's own included, so Claude's "newest conversation here" is not necessarily its own: a
@@ -114,7 +114,7 @@ PY
 fresh() {
   local prompt; prompt="$(preamble "$1")"; remember "$1"
   case "$1" in
-    claude)   claude_trust_here; exec claude $(claude_conversation_args) ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt";;
+    claude)   claude_trust_here; exec claude $(claude_conversation_args) ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt";;
     codex)    exec codex ${model:+-m "$model"} $(codex_effort_args) "$prompt";;
     gemini)   exec gemini ${model:+-m "$model"} -i "$prompt";;
     copilot)  exec copilot ${model:+--model "$model"} -i "$prompt";;
@@ -154,7 +154,7 @@ claude_continue_probed() {
   # script(1) runs the command through $SHELL: pin /bin/sh so a login shell's rc files cannot
   # reorder PATH or otherwise change which claude binary starts.
   PROMPT="$(preamble claude)" SHELL=/bin/sh script -qefc \
-    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} --strict-mcp-config "$PROMPT"' "$log"
+    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} "$PROMPT"' "$log"
   rc=$?; NOCONV=0
   [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log" && NOCONV=1
   rm -f "$log"; return $rc
@@ -171,7 +171,7 @@ resume_claude() {
     [ "$NOCONV" = 1 ] && fail "$NO_CLAUDE_HERE; $SPAWN_ACCOUNT"
     exit $rc
   fi
-  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} --strict-mcp-config "$prompt"
+  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt"
 }
 resume_auto() {
   [ "$stype" = "$SESSION_TYPE_DIR" ] && resume_claude
