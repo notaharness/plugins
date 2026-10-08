@@ -77,6 +77,7 @@ reach the tmux server; Kirby reads and writes the same names. `sessions.sh` show
 | `@orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
 | `@orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
 | `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
+| `@orchestra-target` | on an orchestrator's own session, never a player's: the local `claude:<session-id>` or `codex:<thread-id>` target its players carry, written by `spawn.sh`/`adopt.sh` when they resolve that target from their own identity inside tmux. A `tmux:` target needs none: it names the session. The latest orchestrator in the session replaces it |
 | `@orchestra-launching` | `1` only while the placeholder pane exists |
 | `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
 | `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |

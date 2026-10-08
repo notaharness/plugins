@@ -19,6 +19,7 @@ TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | 
 TAG_LAUNCHING=@orchestra-launching        # 1 while the placeholder pane exists; unset once the harness started
 TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
 TAG_CLAUDE_SESSION=@orchestra-claude-session  # dir players: the id of the Claude conversation the launcher started
+TAG_TARGET=@orchestra-target              # an orchestrator's OWN session: the claude:/codex: target its players carry
 SESSION_TYPE_WORKTREE=worktree            # a session's name is a label; spawner + session-type say whose it is
 SESSION_TYPE_DIR=dir                      # a player in an existing directory: no branch, no worktree, maybe no repo
 nl=$'\n'                                  # assigned once: ANSI-C quoting inside ${x:+...} is not portable

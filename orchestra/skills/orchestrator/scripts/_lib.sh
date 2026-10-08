@@ -253,6 +253,30 @@ set_orchestrator() {
   tag_set "$1" "$2" "$TAG_ORCHESTRATOR" "$3"
 }
 
+# Marking an orchestrator's own session: a tool reading the server (n10's tab strip) can tell
+# which session a claude:/codex: target lives in — the target names none — only when that session
+# says so. orchestrator_home, called right after resolve_orchestrator and before anything unsets
+# $TMUX, remembers the session tmux itself says this pane is in ($TMUX, $TMUX_PANE; this machine
+# whatever ORCH_MACHINE says), and only for a target resolved from this process's own identity: an
+# explicit --orchestrator hands players to someone else. Outside tmux there is nothing to mark.
+ORCH_HOME_SOCK=""; ORCH_HOME_SESSION=""
+orchestrator_home() {
+  ORCH_HOME_SOCK=""; ORCH_HOME_SESSION=""
+  [ -z "$1" ] && [ -n "${TMUX:-}" ] || return 0
+  case "${2#beam:*/}" in claude:*|codex:*) ;; *) return 0;; esac     # tmux:<session> names itself
+  ORCH_HOME_SESSION="$(tmux_local display-message -p '#S' 2>/dev/null)" || ORCH_HOME_SESSION=""
+  [ -z "$ORCH_HOME_SESSION" ] || ORCH_HOME_SOCK="${TMUX%%,*}"
+}
+# mark_orchestrator_session <target>: write the local target (never beam-qualified: the session is
+# on this machine) as the home session's @orchestra-target. One value: a later orchestrator in the
+# same session replaces it. Best effort — the player already points at its target, so a failure
+# warns and spawning carries on.
+mark_orchestrator_session() {
+  [ -n "$ORCH_HOME_SESSION" ] || return 0
+  tmux -u -S "$ORCH_HOME_SOCK" set-option -t "$(tmux_target "$ORCH_HOME_SESSION")" "$TAG_TARGET" "${1#beam:*/}" 2>/dev/null ||
+    echo "warning: could not set $TAG_TARGET on this orchestrator's session $ORCH_HOME_SESSION" >&2
+}
+
 # Deliver multi-line text to a pane as one bracketed paste on the default/current server, like
 # every other orchestrator-side call here, so it honours ORCH_MACHINE too (paste_into_pane,
 # _routing.sh). Usage: paste_into <session> <text>

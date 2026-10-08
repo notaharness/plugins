@@ -87,7 +87,10 @@ Spawn/adopt chooses the reporting target: explicit `--orchestrator`, then a veri
 session with an inbox, else Codex thread/session ID, else current tmux session. Claude ignores
 inherited Codex IDs. Missing or stale identity is an error; do not guess a destination or use a
 player's ID as its parent. The target lives in `@orchestra-orchestrator`, with the config directory
-beside local Claude targets; players do not change it.
+beside local Claude targets; players do not change it. When that target is the orchestrator's
+own `claude:` or `codex:` identity and it runs inside tmux, spawn/adopt also write it as
+`@orchestra-target` on the orchestrator's own session, so n10 can group the players under that
+session's tab. An explicit `--orchestrator` leaves it alone.
 
 Local players inherit the launching process's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly,
 including their unset state. Other credentials come from the tmux server's environment. Record
