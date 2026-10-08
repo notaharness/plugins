@@ -1200,7 +1200,7 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex')                                                   # outside tmux: nothing to mark
         self.foreign('claude-tab', sock='/tmp/orchestrator-sock')
         self.env.update(TMUX='/tmp/orchestrator-sock,1,1', TEST_TMUX_SESSION='claude-tab')
-        self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p')                  # a handoff to someone else
+        self.orch('adopt.sh', self.session, '--orchestrator', 'claude:'+UUID)             # a handoff to another conversation
         self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'))
         self.orch('adopt.sh', self.session)
         self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'), 'claude:'+self.SID)
@@ -1227,6 +1227,16 @@ class PortTests(unittest.TestCase):
         self.drop_tag_of_on(sock, 'claude-tab', '@orchestra-target')
         self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/inherited')   # an inherited Codex id is not Claude's own
         self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock=sock))
+    def test_a_conversation_resumed_in_another_session_leaves_one_claimant(self):
+        sock = '/tmp/orchestrator-sock'
+        self.foreign('first-tab', {'@orchestra-target': 'codex:'+ID}, sock=sock)     # where the conversation ran before
+        self.foreign('unrelated', {'@orchestra-target': 'codex:'+UUID}, sock=sock)
+        self.foreign('resumed-tab', sock=sock)
+        self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='resumed-tab')
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-target', 'resumed-tab', sock=sock), 'codex:'+ID)
+        self.assertIsNone(self.tag('@orchestra-target', 'first-tab', sock=sock))
+        self.assertEqual(self.tag('@orchestra-target', 'unrelated', sock=sock), 'codex:'+UUID)
     def test_an_orchestrator_outside_tmux_marks_nothing(self):
         self.spawn('--agent', 'codex')
         self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)

@@ -285,10 +285,17 @@ orchestrator_home() {
 }
 # mark_orchestrator_session: write the remembered local target (never beam-qualified: the session
 # is on this machine) as the home session's @orchestra-target. One value: a later orchestrator in
-# the same session replaces it. Best effort — the player already points at its target, so a failure
-# warns and spawning carries on.
+# the same session replaces it. Any other session on that server holding the same value gives it up
+# first — the conversation was resumed here — so one server never has two claimants (another
+# server, or another machine, can still hold a stale one). Best effort — the player already points
+# at its target, so a failure warns and spawning carries on.
 mark_orchestrator_session() {
   [ -n "$ORCH_HOME_SESSION" ] || return 0
+  local name value
+  while IFS="$TAB" read -r name value; do
+    [ "$value" = "$ORCH_HOME_TARGET" ] && [ "$name" != "$ORCH_HOME_SESSION" ] || continue
+    tmux -u -S "$ORCH_HOME_SOCK" set-option -u -t "$(tmux_target "$name")" "$TAG_TARGET" 2>/dev/null || :
+  done < <(tmux -u -S "$ORCH_HOME_SOCK" list-sessions -F "#{session_name}$TAB#{$TAG_TARGET}" 2>/dev/null)
   tmux -u -S "$ORCH_HOME_SOCK" set-option -t "$(tmux_target "$ORCH_HOME_SESSION")" "$TAG_TARGET" "$ORCH_HOME_TARGET" 2>/dev/null ||
     echo "warning: could not set $TAG_TARGET on this orchestrator's session $ORCH_HOME_SESSION" >&2
 }
