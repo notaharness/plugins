@@ -1204,18 +1204,29 @@ class PortTests(unittest.TestCase):
         self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'))
         self.orch('adopt.sh', self.session)
         self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'), 'claude:'+self.SID)
-    def test_a_codex_orchestrator_in_tmux_is_marked_and_tmux_or_explicit_targets_are_not(self):
+    def test_a_codex_orchestrator_in_tmux_is_marked_and_another_or_a_tmux_target_is_not(self):
         sock = '/tmp/orchestrator-sock'; self.foreign('codex-tab', sock=sock)
         self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='codex-tab')
         self.spawn('--agent', 'codex')
         self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
         self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
-        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/explicit')
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+UUID, branch='feature/someone-else')   # a handoff
         self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/explicit-self')    # its own id, given explicitly
+        self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
+        self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
         self.env.pop('CODEX_THREAD_ID'); self.env.pop('CODEX_SESSION_ID')               # resolves to tmux:codex-tab, which names itself
         self.spawn('--agent', 'codex', branch='feature/tmux')
         self.assertEqual(self.tag('@orchestra-orchestrator', 'repo-feature-tmux', sock=sock), 'tmux:codex-tab')
         self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+    def test_a_claude_orchestrator_giving_its_own_id_explicitly_is_marked(self):
+        sock = '/tmp/orchestrator-sock'; self.foreign('claude-tab', sock=sock)
+        self.own_claude_session(); self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='claude-tab')
+        self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+self.SID)
+        self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock=sock), 'claude:'+self.SID)
+        self.drop_tag_of_on(sock, 'claude-tab', '@orchestra-target')
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/inherited')   # an inherited Codex id is not Claude's own
+        self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock=sock))
     def test_an_orchestrator_outside_tmux_marks_nothing(self):
         self.spawn('--agent', 'codex')
         self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)

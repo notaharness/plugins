@@ -352,7 +352,7 @@ fi
 buf="$(prompt_buffer_name "$name")"
 tag "$TAG_LAUNCHING" 1 || exit 1
 set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
-mark_orchestrator_session "$ORCH"
+mark_orchestrator_session
 case "$HARNESS" in auto) ;; *) tag "$TAG_AGENT" "$HARNESS";; esac
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on

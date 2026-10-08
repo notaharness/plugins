@@ -54,7 +54,7 @@ pane_owned_by_agent "" "$target" || { echo "adopt.sh: no agent is reading $targe
 [ -n "$AGENT" ] || AGENT="$(tag_get "" "$target" "$TAG_AGENT")"
 case "${AGENT:-claude}" in codex) invocation='$player';; *) invocation="$(claude_player_invocation)";; esac
 set_orchestrator "" "$target" "$ORCH" || { echo "adopt.sh: could not set $TAG_ORCHESTRATOR on $target" >&2; exit 1; }
-mark_orchestrator_session "$ORCH"
+mark_orchestrator_session
 msg="$invocation${TEXT:+ $TEXT}"
 codex_queue_pane "$msg" && rc=0 || rc=$?
 case "$rc" in

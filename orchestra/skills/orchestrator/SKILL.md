@@ -90,7 +90,7 @@ player's ID as its parent. The target lives in `@orchestra-orchestrator`, with t
 beside local Claude targets; players do not change it. When that target is the orchestrator's
 own `claude:` or `codex:` identity and it runs inside tmux, spawn/adopt also write it as
 `@orchestra-target` on the orchestrator's own session, so n10 can group the players under that
-session's tab. An explicit `--orchestrator` leaves it alone.
+session's tab. An explicit `--orchestrator` naming another orchestrator leaves it alone.
 
 Local players inherit the launching process's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly,
 including their unset state. Other credentials come from the tmux server's environment. Record
