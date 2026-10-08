@@ -31,7 +31,7 @@ RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
 TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path', '@orchestra-orchestrator',
         '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config',
-        '@orchestra-claude-session']
+        '@orchestra-claude-session', '@orchestra-target']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -1187,6 +1187,62 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID)
         x = self.spawn('--agent', 'codex', branch='feature/other', ok=False); self.assertEqual(x.returncode, 2)
         self.assertEqual(sorted(self.state()), [self.session])
+    def test_spawn_and_adopt_mark_the_orchestrators_own_session_with_its_target(self):
+        # A Claude orchestrator inside tmux (a terminal tab where `claude` was run by hand): its
+        # players carry claude:<id>, which names no session, so its own session is marked with it.
+        sock = '/tmp/orchestrator-sock'; self.foreign('kirby-shell-2', sock=sock)
+        self.own_claude_session(); self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='kirby-shell-2')
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-target', 'kirby-shell-2', sock=sock), 'claude:'+self.SID)
+        self.assertIsNone(self.tag('@orchestra-target', sock=sock))                     # never on the player itself
+    def test_adopt_marks_the_orchestrators_own_session_unless_handing_off(self):
+        self.own_claude_session(); self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex')                                                   # outside tmux: nothing to mark
+        self.foreign('claude-tab', sock='/tmp/orchestrator-sock')
+        self.env.update(TMUX='/tmp/orchestrator-sock,1,1', TEST_TMUX_SESSION='claude-tab')
+        self.orch('adopt.sh', self.session, '--orchestrator', 'claude:'+UUID)             # a handoff to another conversation
+        self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'))
+        self.orch('adopt.sh', self.session)
+        self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'), 'claude:'+self.SID)
+    def test_a_codex_orchestrator_in_tmux_is_marked_and_another_or_a_tmux_target_is_not(self):
+        sock = '/tmp/orchestrator-sock'; self.foreign('codex-tab', sock=sock)
+        self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='codex-tab')
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
+        self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+UUID, branch='feature/someone-else')   # a handoff
+        self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/explicit-self')    # its own id, given explicitly
+        self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
+        self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
+        self.env.pop('CODEX_THREAD_ID'); self.env.pop('CODEX_SESSION_ID')               # resolves to tmux:codex-tab, which names itself
+        self.spawn('--agent', 'codex', branch='feature/tmux')
+        self.assertEqual(self.tag('@orchestra-orchestrator', 'repo-feature-tmux', sock=sock), 'tmux:codex-tab')
+        self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+    def test_a_claude_orchestrator_giving_its_own_id_explicitly_is_marked(self):
+        sock = '/tmp/orchestrator-sock'; self.foreign('claude-tab', sock=sock)
+        self.own_claude_session(); self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='claude-tab')
+        self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+self.SID)
+        self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock=sock), 'claude:'+self.SID)
+        self.drop_tag_of_on(sock, 'claude-tab', '@orchestra-target')
+        self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/inherited')   # an inherited Codex id is not Claude's own
+        self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock=sock))
+    def test_a_conversation_resumed_in_another_session_leaves_one_claimant(self):
+        sock = '/tmp/orchestrator-sock'
+        self.foreign('first-tab', {'@orchestra-target': 'codex:'+ID}, sock=sock)     # where the conversation ran before
+        self.foreign('unrelated', {'@orchestra-target': 'codex:'+UUID}, sock=sock)
+        self.foreign('resumed-tab', sock=sock)
+        self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='resumed-tab')
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-target', 'resumed-tab', sock=sock), 'codex:'+ID)
+        self.assertIsNone(self.tag('@orchestra-target', 'first-tab', sock=sock))
+        self.assertEqual(self.tag('@orchestra-target', 'unrelated', sock=sock), 'codex:'+UUID)
+    def test_an_orchestrator_outside_tmux_marks_nothing(self):
+        self.spawn('--agent', 'codex')
+        self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)
+        self.assertNotIn('@orchestra-target', self.tmux_log())
+    def drop_tag_of_on(self, sock, session, name):
+        s = self.state(sock); s[session]['options'].pop(name, None); self.set_state(s, sock)
     def test_relay_delivers_to_a_claude_session_by_id(self):
         received = self.fake_claude(session=self.SID)                                    # under the relay's own config dir
         x, log = self.run_relay('--allow', 'claude:'+self.SID, ok=False,

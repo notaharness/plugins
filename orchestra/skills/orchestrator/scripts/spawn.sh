@@ -104,7 +104,8 @@ fi
 # so it is qualified with this machine's own peerId, learned from `beam status --json` run here
 # (never through the executor: "who am I" is always a local question). An already-qualified
 # --orchestrator (an explicit handoff to some other beam-qualified target) is left as given.
-ORCH="$(resolve_orchestrator "$ORCH")" || exit 2
+ORCH_GIVEN="$ORCH"; ORCH="$(resolve_orchestrator "$ORCH")" || exit 2
+orchestrator_home "$ORCH_GIVEN" "$ORCH"
 case "$ORCH" in
   beam:*) ;;
   *) is_local_machine || { own_peer="$(beam_own_peer_id)" || exit 1; ORCH="beam:$own_peer/$ORCH"; };;
@@ -351,6 +352,7 @@ fi
 buf="$(prompt_buffer_name "$name")"
 tag "$TAG_LAUNCHING" 1 || exit 1
 set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
+mark_orchestrator_session
 case "$HARNESS" in auto) ;; *) tag "$TAG_AGENT" "$HARNESS";; esac
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on
