@@ -22,6 +22,6 @@ require_valid_repo_for_machine || exit 2
 machine_socket || exit 1
 target="$(resolve_session "$session")" || exit 1
 session_exists "$target" || exit 1
-[ "$HISTORY" -gt 0 ] || [ "$(tmux_on "" display-message -p -t "$(tmux_target "$target")" '#{pane_dead}')" != 1 ] || HISTORY=40
-text="$(tmux_on "" capture-pane -p -t "$(tmux_target "$target")" -S "-$HISTORY" | sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2')"
+[ "$HISTORY" -gt 0 ] || [ "$(pane_dead "" "$target")" != 1 ] || HISTORY=40
+text="$(capture_pane "$target" "$HISTORY" | normalize_screen)"
 if [ "$LINES" -gt 0 ]; then printf '%s\n' "$text" | grep -v '^\s*$' | tail -n "$LINES"; else printf '%s\n' "$text"; fi

@@ -48,8 +48,7 @@ esac
 target="$(resolve_session "$session")" || exit 1
 is_player_session "$target" || { echo "adopt.sh: $target is not a player session (its tags do not say $TAG_SPAWNER + $TAG_SESSION_TYPE $SESSION_TYPE_WORKTREE or $SESSION_TYPE_DIR); nothing changed" >&2; exit 1; }
 session_exists "$target" || exit 1
-tt="$(tmux_target "$target")"
-[ "$(tmux_on "" display-message -p -t "$tt" '#{pane_dead}')" = 0 ] || { echo "adopt.sh: $target has a dead pane; use spawn.sh --resume instead" >&2; exit 1; }
+[ "$(pane_dead "" "$target")" = 0 ] || { echo "adopt.sh: $target has a dead pane; use spawn.sh --resume instead" >&2; exit 1; }
 pane_owned_by_agent "" "$target" || { echo "adopt.sh: no agent is reading $target (a shell owns the pane); nothing changed" >&2; exit 1; }
 [ -n "$AGENT" ] || AGENT="$(tag_get "" "$target" "$TAG_AGENT")"
 case "${AGENT:-claude}" in codex) invocation='$player';; *) invocation="$(claude_player_invocation)";; esac
@@ -64,7 +63,7 @@ case "$rc" in
   # multi-line text is pasted as one bracketed block so embedded newlines do not submit early.
   *) case "$msg" in
        *$'\n'*) paste_into "$target" "$msg"; route=paste;;
-       *) tmux_on "" send-keys -t "$tt" -l "$msg"; sleep 0.3; tmux_on "" send-keys -t "$tt" Enter; route=keys;;
+       *) type_line "$target" "$msg"; route=keys;;
      esac;;
 esac
 echo "adopted $target -> reports to $ORCH${TEXT:+ (new task sent)}${TEXT:- (expect a PROGRESS handoff report)} via $route"

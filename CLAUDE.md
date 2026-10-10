@@ -79,10 +79,14 @@ install would use:
 - Session names are labels (`<repo dir>-<branch>`, with a numeric suffix on collision);
   identity lives in the `@orchestra-*` tmux session options. Those options and the
   worktree location (`.claude/worktrees/`) are shared with n10; do not change them.
-- Tests (no model calls, isolated tmux socket):
+- Backends: tmux wherever it is installed, unchanged, and never a probe for n10; only without
+  tmux the scripts drive a running n10's sessions through `n10 mux` (`skills/player/scripts/_mux.sh`).
+- Tests (no model calls, isolated tmux socket; the last needs `n10` on PATH and no tmux, and CI
+  builds it from the commit in `orchestra/tests/n10.sha`; move that pin with n10's mux contract):
   ```bash
   python3 orchestra/tests/test_port.py
   bash orchestra/tests/smoke_tmux.sh
+  bash orchestra/tests/mux_e2e.sh
   ```
 
 ## Conversations-specific conventions

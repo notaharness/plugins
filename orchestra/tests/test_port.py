@@ -1860,9 +1860,10 @@ class PortTests(unittest.TestCase):
         for tag in TAGS: self.assertIn(tag, text, tag)
         self.assertEqual(sorted(set(re.findall(r'@orchestra-[a-z-]+', text))), sorted(TAGS))
         self.assertEqual(sorted(set(re.findall(r'\bORCHESTRA_[A-Z_]+', text))),
-                         ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_FORCE_LOCAL',
-                          'ORCHESTRA_HARNESS', 'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',
-                          'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_RELAY_RETRY', 'ORCHESTRA_SESSION', 'ORCHESTRA_SOCKET'])
+                         ['ORCHESTRA_BACKEND', 'ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT',
+                          'ORCHESTRA_FORCE_LOCAL', 'ORCHESTRA_HARNESS', 'ORCHESTRA_LAUNCH', 'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE',
+                          'ORCHESTRA_MODEL', 'ORCHESTRA_PERMISSION_MODE', 'ORCHESTRA_RELAY_RETRY', 'ORCHESTRA_SESSION',
+                          'ORCHESTRA_SESSION_TYPE', 'ORCHESTRA_SOCKET'])
         self.assertNotIn('list-sessions -f', text); self.assertNotIn('ls -F', text)
 
 if __name__ == '__main__': unittest.main(verbosity=2)
