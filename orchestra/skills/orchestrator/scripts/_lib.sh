@@ -150,6 +150,7 @@ free_session_name() {
 # same rules work on every tmux Kirby supports.
 TAB=$'\t'
 list_sessions_tagged() {
+  if uses_mux; then mux_sessions_tagged; return; fi
   tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_WORKTREE_PATH}" 2>/dev/null || true
 }
 # Player sessions = spawner set, repo set AND session-type dir, or worktree with the checkout set,
@@ -211,10 +212,42 @@ resolve_session() {
 }
 # Exact-match check for a resolved name; prints a uniform error. Routed through tmux_on (not a
 # bare `tmux`) so it honours ORCH_MACHINE like every other read here.
-session_exists() { tmux_on "" has-session -t "=$1" 2>/dev/null || { echo "no such session: $1" >&2; return 1; }; }
+session_exists() {
+  if uses_mux; then mux_find "$1" || { echo "no such session: $1" >&2; return 1; }; return; fi
+  tmux_on "" has-session -t "=$1" 2>/dev/null || { echo "no such session: $1" >&2; return 1; }
+}
 
-# Visible pane text, trailing whitespace trimmed, runs of blank lines collapsed.
-screen_text() { tmux_on "" capture-pane -p -t "$1" 2>/dev/null | sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2'; }
+# --- Per-session operations: one tmux command each, or its n10 equivalent ---------------------
+# pane_dead <socket> <session>: 1 when the session's command has exited, 0 while it runs, empty
+# when there is no such session.
+pane_dead() {
+  if uses_mux; then mux_find "$2" || return 0; [ "${MUX_F[$MUX_STATE]}" = running ] && echo 0 || echo 1; return; fi
+  tmux_on "$1" display-message -p -t "$(tmux_target "$2")" '#{pane_dead}'
+}
+# capture_pane <session> <history>: the screen and that many lines of history above it.
+capture_pane() {
+  if uses_mux; then mux_capture "$1" "$2"; return; fi
+  tmux_on "" capture-pane -p -t "$(tmux_target "$1")" -S "-$2"
+}
+# send_key <session> <key>: one keypress, by tmux's name for it (Enter, Escape, C-c, Up, …).
+send_key() { if uses_mux; then mux_send "$1" key "$2" || { echo "$DELIVER_REASON" >&2; return 1; }; return; fi; tmux_on "" send-keys -t "$(tmux_target "$1")" "$2"; }
+# type_line <session> <text>: the text typed as keystrokes, not pasted, then Enter.
+type_line() {
+  if uses_mux; then mux_send "$1" literal "$2" submit || { echo "$DELIVER_REASON" >&2; return 1; }; return; fi
+  tmux_on "" send-keys -t "$(tmux_target "$1")" -l "$2" && sleep 0.3 && tmux_on "" send-keys -t "$(tmux_target "$1")" Enter
+}
+
+# Trailing whitespace trimmed, runs of blank lines collapsed.
+normalize_screen() { sed -e 's/[[:space:]]*$//' | awk 'NF{blank=0} !NF{blank++} blank<2'; }
+# Visible pane text, normalized.
+screen_text() { tmux_on "" capture-pane -p -t "$1" 2>/dev/null | normalize_screen; }
+# screen_digests: "<session><TAB><digest of its screen_text>" for every player session; with n10,
+# every screen comes from one batched listing.
+screen_digests() {
+  local n
+  if uses_mux; then mux_screen_digests; return; fi
+  while IFS= read -r n; do printf '%s\t%s\n' "$n" "$(screen_text "=$n:" | md5sum)"; done < <(all_player_sessions)
+}
 
 # sh_quote <word>...: the words single-quoted for a POSIX sh command line, space-separated. The
 # pane command runs under /bin/sh (the one shell path NixOS guarantees), where printf %q's bash-only
@@ -273,9 +306,16 @@ is_own_target() {
     *) return 1;;
   esac
 }
+# In a session of n10's, that session is the one marked, by its owner (mux self).
 # orchestrator_home <given --orchestrator> <resolved target>
 orchestrator_home() {
   ORCH_HOME_SOCK=""; ORCH_HOME_SESSION=""; ORCH_HOME_TARGET=""
+  if uses_mux; then
+    case "$2" in claude:*|codex:*) ;; *) return 0;; esac
+    [ -z "$1" ] || is_own_target "$2" || return 0
+    mux_self || return 0
+    ORCH_HOME_SESSION="${MUX_F[$MUX_LABEL]}"; ORCH_HOME_TARGET="$2"; return 0
+  fi
   [ -n "${TMUX:-}" ] || return 0
   case "$2" in claude:*|codex:*) ;; *) return 0;; esac
   [ -z "$1" ] || is_own_target "$2" || return 0
@@ -291,6 +331,7 @@ orchestrator_home() {
 # at its target, so a failure warns and spawning carries on.
 mark_orchestrator_session() {
   [ -n "$ORCH_HOME_SESSION" ] || return 0
+  if uses_mux; then mux_claim "$ORCH_HOME_TARGET" || echo "warning: could not set $TAG_TARGET on this orchestrator's session $ORCH_HOME_SESSION" >&2; return 0; fi
   local name value
   while IFS="$TAB" read -r name value; do
     [ "$value" = "$ORCH_HOME_TARGET" ] && [ "$name" != "$ORCH_HOME_SESSION" ] || continue

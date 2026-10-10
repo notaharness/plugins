@@ -21,7 +21,9 @@ Resolve the reporting command for the current agent:
   `bash` prefix or `cd … &&`, so it matches the skill's tool allowlist.
 - **Codex and other agents:** resolve `scripts/report.sh` relative to this
   installed `SKILL.md`, then run `bash` with that absolute script path. Do not
-  treat `${CLAUDE_SKILL_DIR}` as an environment variable in these agents.
+  treat `${CLAUDE_SKILL_DIR}` as an environment variable in these agents. On
+  Windows that `bash` is Git for Windows' `bin\bash.exe` (`ORCHESTRA_GIT_BASH`
+  overrides it), called with PowerShell's `&`; never WSL's.
 
 Every `report.sh` call below uses the command resolved above.
 
@@ -36,7 +38,9 @@ scripts that spawn or adopt you set it, with the orchestrator's Claude config di
 `claude:` target in `@orchestra-orchestrator-config`. `report.sh` finds your own session through
 `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` (the tmux server socket that holds it), which
 `spawn.sh` injects; in a pane `spawn.sh` did not start (a session another tool created that an
-orchestrator adopted) it derives them from tmux's own `TMUX` variable instead. You cannot change
+orchestrator adopted) it derives them from tmux's own `TMUX` variable instead. On a machine without
+tmux your session is a running n10's, with the same tags; `report.sh` asks n10 which session it
+launched you in, and the target may be `mux:<hostId>/<sessionId>`. You cannot change
 the target and do not need to know it: `report.sh --orchestrator` prints the current value when
 asked. Never substitute your own `CODEX_THREAD_ID` or `CLAUDE_CODE_SESSION_ID` for the
 orchestrator. Nothing is stored in files.

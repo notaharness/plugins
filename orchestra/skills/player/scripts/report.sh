@@ -16,7 +16,10 @@
 # its pane ("paste"). The session and the socket of the server
 # holding it come from ORCHESTRA_SESSION and ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own
 # tmux environment points at a scratch server, so every local call here passes -S), or from TMUX
-# in a pane spawn.sh did not start (a Kirby session adopted by adopt.sh). No file is read or
+# in a pane spawn.sh did not start (a Kirby session adopted by adopt.sh). On a machine whose
+# sessions are n10's, the session is the one n10 launched this process in, its tags are n10's, and
+# a mux:<hostId>/<sessionId> target gets the report through the agent n10 launched there (its inbox
+# where Claude Code's is reachable, else a paste). No file is read or
 # written. Delivery is reported only when the transport accepted the message; then
 # @orchestra-last-report is set to "<KIND> <ISO-8601 UTC> <outcome>" (a parser that reads only
 # the first two whitespace-separated fields still gets KIND and the timestamp). A beam send that
@@ -38,7 +41,7 @@ if [ "${1:-}" = "--orchestrator" ]; then
   [ -n "$session" ] || { echo 'report.sh: neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane' >&2; exit 2; }
   target="$(tag_get "$sock" "$session" "$TAG_ORCHESTRATOR")"; printf '%s\n' "${target:-<unset>}"; exit
 fi
-[ $# -ge 2 ] || { sed -n '2,27p' "$0" >&2; exit 2; }
+[ $# -ge 2 ] || { sed -n '2,30p' "$0" >&2; exit 2; }
 kind="$1"; shift
 case "$kind" in PROGRESS|QUESTION|BLOCKED|DONE) ;; *) echo "report.sh: KIND must be PROGRESS, QUESTION, BLOCKED or DONE" >&2; exit 2;; esac
 msg="[player $name] $kind: $*"
@@ -63,7 +66,7 @@ case "$target" in
   codex:*)
     deliver_to_local_target "$sock" "$target" "$msg" || delivery_failed "$DELIVER_REASON"
     delivered delivered; echo "queued for $target"; exit 0;;
-  claude:*|tmux:*)
+  claude:*|tmux:*|mux:*)
     deliver_to_local_target "$sock" "$target" "$msg" "$(tag_get "$sock" "$session" "$TAG_ORCH_CONFIG")" ||
       delivery_failed "$DELIVER_REASON"
     delivered "$DELIVER_ROUTE"; echo "sent to ${target#*:} ($DELIVER_ROUTE)"; exit 0;;

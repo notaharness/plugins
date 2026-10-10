@@ -20,7 +20,8 @@ other machines.
 
 - Linux or macOS with Bash, Git, coreutils (`realpath`, `sha256sum`) and `ps`/`pgrep`.
   Tested on Linux.
-- tmux 3.x (tested with 3.4).
+- tmux 3.x (tested with 3.4), or, without tmux, a running [n10](https://github.com/notaharness/n10)
+  (see [Without tmux](#without-tmux)).
 - An authenticated `claude` or `codex` CLI for each kind of player you want to run. Codex
   players need Codex CLI 0.157 or later for the default model, `gpt-6-sol`.
 - For a Claude Code orchestrator: Claude Code 2.1.224 or later, and `socat` or OpenBSD `nc`
@@ -237,6 +238,15 @@ in. Each `--allow` names a target it may deliver to and replaces that default, s
 own session if you still want reports there. It needs `socat` or an `nc` with `-U`. Restart it
 after restarting beam; beam keeps any reports that arrive in between. Do not run it alongside
 N10 Desktop, which does this itself.
+
+## Without tmux
+
+On a machine without tmux, including Windows under Git for Windows' Bash, players are sessions of
+a running n10 (its desktop, its TUI or `n10 mux serve`), and the same commands drive them.
+Where tmux is installed nothing changes and n10 is never consulted. The sessions end when that
+n10 closes. The [orchestrator's reference](skills/orchestrator/references/operations.md#without-tmux)
+lists the differences: a resume needs a known agent, Claude asks to trust a new worktree, and
+only agents n10 started can be sent to or adopted.
 
 ## Reporting
 

@@ -53,6 +53,20 @@ fi
 is_local_machine() { [ -z "$ORCH_MACHINE" ] || [ "$ORCH_MACHINE" = local ]; }
 machine_label() { is_local_machine && printf 'this machine' || printf '%s' "$ORCH_MACHINE"; }
 
+# --- Session backend -------------------------------------------------------------------------
+# This machine's sessions are tmux's wherever tmux is installed: every call below is then exactly
+# what it always was, and n10 is never looked for. Only without tmux are they a running n10's,
+# reached through `n10 mux` (_mux.sh). A player n10 launched is pinned to it by
+# ORCHESTRA_BACKEND=mux, whatever is installed later. Another machine is always reached with
+# tmux through beam.
+if [ "${ORCHESTRA_BACKEND:-}" = mux ] || { ! command -v tmux >/dev/null 2>&1 && command -v n10 >/dev/null 2>&1; }; then
+  LOCAL_BACKEND=mux
+else
+  LOCAL_BACKEND=tmux
+fi
+uses_mux() { [ "$LOCAL_BACKEND" = mux ] && is_local_machine; }
+. "$(dirname "${BASH_SOURCE[0]}")/_mux.sh"
+
 # --- beam executor ---------------------------------------------------------------------------
 # beam_cmd: resolve how to invoke beam into the BEAM_CMD array. First hit wins: $ORCHESTRA_BEAM,
 # then `beam` on PATH. Fails, leaving BEAM_CMD unset, when neither resolves — callers must not fall back to running
@@ -269,17 +283,27 @@ tmux_local() {
   if [ -n "${TMUX:-}" ]; then tmux -u -S "${TMUX%%,*}" "$@"; else tmux -u "$@"; fi
 }
 # tag_get <socket> <session> <tag>: the value, empty when unset or unreachable; never fails.
-tag_get()   { tmux_on "$1" show-options -qv -t "$(tmux_target "$2")" "$3" 2>/dev/null || :; }
-tag_set()   { tmux_on "$1" set-option -t "$(tmux_target "$2")" "$3" "$4"; }
-tag_unset() { tmux_on "$1" set-option -u -t "$(tmux_target "$2")" "$3"; }
+# With n10 the socket means nothing; the session is its label.
+tag_get() {
+  if uses_mux; then mux_find "$2" 2>/dev/null && mux_tag "$3"; return 0; fi
+  tmux_on "$1" show-options -qv -t "$(tmux_target "$2")" "$3" 2>/dev/null || :
+}
+tag_set()   { if uses_mux; then mux_tag_write "$2" set "$3" "$4"; return; fi; tmux_on "$1" set-option -t "$(tmux_target "$2")" "$3" "$4"; }
+tag_unset() { if uses_mux; then mux_tag_write "$2" unset "$3"; return; fi; tmux_on "$1" set-option -u -t "$(tmux_target "$2")" "$3"; }
 
 # player_session_context: the player's own session name and the socket of the server holding it,
 # into player_session and player_socket (lowercase: not environment). spawn.sh injects
 # ORCHESTRA_SESSION/ORCHESTRA_SOCKET into the panes it starts. A pane it did not start (a Kirby
 # session adopted by adopt.sh) keeps tmux's own TMUX variable, so the session comes from
 # `display-message -p '#S'` and the socket from TMUX. The name is used as is (it is a label,
-# never parsed). Fails when neither source is available.
+# never parsed). With n10 the session is the one its owner launched this process in (mux self),
+# and there is no socket. Fails when neither source is available.
 player_session_context() {
+  if uses_mux; then
+    player_socket=""; player_session=""
+    mux_self && player_session="${MUX_F[$MUX_LABEL]}"
+    [ -n "$player_session" ]; return
+  fi
   player_session="${ORCHESTRA_SESSION:-}"; player_socket="${ORCHESTRA_SOCKET:-}"
   if [ -z "$player_session" ] && [ -n "${TMUX:-}" ]; then
     player_socket="${TMUX%%,*}"
@@ -295,11 +319,13 @@ player_session_context() {
 # where a tmux name is neither. tmux session names: tmux itself rewrites "." and ":" but otherwise
 # allows most characters. peerId: 32 lowercase hex characters, the first 16 bytes of the SHA-256 of
 # the peer's node public key (beam/docs/02-identity.md), validated in full wherever it arrives from
-# outside.
+# outside. On a machine whose sessions are n10's, mux:<hostId>/<sessionId> names one of them; it
+# lasts as long as the owner that holds it, and is never qualified with a beam peer.
 _valid_local_target() {
   case "$1" in
     claude:*|codex:*) [[ "${1#*:}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]];;
     tmux:*) [[ -n "${1#tmux:}" && ! "${1#tmux:}" =~ [:[:cntrl:]] ]];;
+    mux:*) [[ "${1#mux:}" =~ ^[0-9a-f]+/[0-9a-f]+$ ]];;
     *) return 1;;
   esac
 }
@@ -312,13 +338,14 @@ normalize_target() {
       [[ "$peer" =~ ^[0-9a-f]{32}$ ]] || { echo "invalid beam peerId: $peer" >&2; return 2; }
       case "$local_part" in claude:*|codex:*|tmux:*) ;;
         *) echo "invalid beam-qualified target: $1 (the local part must be $_TARGET_FORMS)" >&2; return 2;; esac;;
-    claude:*|codex:*|tmux:*) ;;
+    claude:*|codex:*|tmux:*|mux:*) ;;
     *) echo "invalid orchestrator target: $1 (use $_TARGET_FORMS, or beam:<peerId>/ followed by one of those)" >&2; return 2;;
   esac
   _valid_local_target "$local_part" || {
     case "$local_part" in
       claude:*) echo "invalid Claude session ID: ${local_part#claude:}" >&2;;
       codex:*) echo "invalid Codex thread ID: ${local_part#codex:}" >&2;;
+      mux:*) echo "invalid n10 session: ${local_part#mux:} (use mux:<hostId>/<sessionId>)" >&2;;
       *) echo "invalid tmux session name: ${local_part#tmux:}" >&2;;
     esac
     return 2; }
@@ -329,10 +356,15 @@ normalize_target() {
 # accepted only when Claude's registry entry for CLAUDE_PID confirms it (claude_own_session). A
 # Codex ID identifies the orchestrator only when the caller is not a Claude session: Claude marks
 # itself with CLAUDECODE, and any CODEX_* ID it sees is inherited from some unrelated Codex
-# ancestor, so its players would otherwise report to the wrong conversation.
+# ancestor, so its players would otherwise report to the wrong conversation. Inside a session of
+# n10's, last, that session (mux self) is the target; it also stands in for a Claude session whose
+# inbox cannot be verified there (on Windows the inbox is an authenticated pipe), so the report
+# goes to the agent n10 launched instead.
 resolve_orchestrator() {
+  local own
   if [[ -n "${1:-}" ]]; then normalize_target "$1"
   elif [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
+    if uses_mux && ! claude_own_session 2>/dev/null && own="$(mux_self_target)"; then printf '%s' "$own"; return; fi
     claude_own_session || return 2
     normalize_target "claude:$CLAUDE_CODE_SESSION_ID"
   elif [[ -z "${CLAUDECODE:-}" && -n "${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}" ]]; then
@@ -342,6 +374,8 @@ resolve_orchestrator() {
     # tmux_local; a spawn.sh/adopt.sh run with --machine must still learn its OWN orchestrator
     # target from its own pane, not from whatever session happens to be current on the target.
     normalize_target "tmux:$(tmux_local display-message -p '#S')"
+  elif uses_mux && own="$(mux_self_target)"; then
+    printf '%s' "$own"
   else
     echo "Cannot identify orchestrator; pass --orchestrator $_TARGET_FORMS." >&2
     return 2
@@ -386,10 +420,12 @@ pane_has_agent() {
 # shell) is at the terminal. The socket selects the server as in tmux_on. On this machine it also
 # leaves the agent's pid and name in PANE_AGENT_PID and PANE_AGENT (both empty when the foreground
 # command is not a known agent binary, such as an editor, or the pane is on another machine).
+# With n10, only an agent it launched directly counts (mux_agent).
 PANE_AGENT_PID=""; PANE_AGENT=""
 pane_owned_by_agent() {
   local sock="$1" session="$2" cmd pid agent=""
   PANE_AGENT_PID=""; PANE_AGENT=""
+  if uses_mux; then mux_agent "$session"; return; fi
   [ "$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_dead}' 2>/dev/null)" = 0 ] || return 1
   cmd="$(tmux_on "$sock" display-message -p -t "$(tmux_target "$session")" '#{pane_current_command}' 2>/dev/null)"
   case "$cmd" in
@@ -536,9 +572,11 @@ codex_queue_pane() {
 # paste_into_pane <socket> <session> <text>: one bracketed paste (-p keeps embedded newlines from
 # submitting early), then Enter. The text goes through load-buffer on stdin because tmux rejects
 # command lines over ~16 KiB; the pause lets a slow UI ingest the paste before Enter. The socket
-# selects the server as in tmux_on. On failure the reason is left in DELIVER_REASON.
+# selects the server as in tmux_on. On failure the reason is left in DELIVER_REASON. With n10 it is
+# one send, the paste and its submission written together.
 paste_into_pane() {
   local sock="$1" session="$2" text="$3" tt buf="orchestra-$$"
+  if uses_mux; then mux_send "$session" paste "$text" submit; return; fi
   tt="$(tmux_target "$session")"
   printf '%s' "$text" | tmux_on "$sock" load-buffer -b "$buf" - || { DELIVER_REASON="tmux could not load the message"; return 1; }
   # errexit is live inside callers with `set -e`: cleanup must not exit before the reason is set.
@@ -598,6 +636,11 @@ deliver_to_local_target() {
       DELIVER_REASON='Codex queue refused the message; inspect before retrying to avoid duplicate reports'
       return 1;;
     tmux:*) target="${target#tmux:}";;
+    mux:*)
+      uses_mux || { DELIVER_REASON="orchestrator session $target is n10's, and this machine's sessions are tmux's"; return 1; }
+      target="$(mux_target_label "${target#mux:}")" || { DELIVER_REASON="orchestrator session ${2#mux:} is gone or its n10 is no longer running"; return 1; }
+      pane_owned_by_agent "" "$target" || { DELIVER_REASON="no agent n10 launched is running in $target"; return 1; }
+      deliver_to_pane "" "$target" "$msg"; return;;
     *) DELIVER_REASON="unroutable local target: $target"; return 1;;
   esac
   tmux_on "$sock" has-session -t "=$target" 2>/dev/null || { DELIVER_REASON="orchestrator session $target is gone or unreachable"; return 1; }
