@@ -68,6 +68,13 @@
 # the known parent-session markers are removed from it (see _lib.sh). The agent runs with TMUX unset and TMUX_TMPDIR on a scratch directory, so
 # tests it runs cannot reach the user's tmux; ORCHESTRA_SOCKET names the real server for
 # the launcher and report.sh.
+#
+# On a machine without tmux the session is a running n10's instead (_mux.sh): _launch.sh, run here
+# with the task on its stdin, says which harness argv to start, and one `n10 mux create` starts it
+# directly, with every tag and the environment above already in place (and ORCHESTRA_BACKEND=mux,
+# which pins the player's own scripts to n10). There is no placeholder and no buffer. A dead
+# player is resumed by restarting its record, which needs a known harness: --agent or its tag.
+# The worktree, the tags and the cwd reach n10 as native paths (cygpath, on Git for Windows).
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 AGENT=""; MODEL=""; EFFORT=""; PERM=""; CMD=""; FROM=""; LINK_NM=1; DRY=0; RESUME=0; BRANCH=""; DIR=""; PROMPT=""; PFILE=""; ORCH=""
 while [ $# -gt 0 ]; do case "$1" in
@@ -75,7 +82,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,70p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,77p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 if [ -n "$DIR" ]; then
   [ -z "$BRANCH$ORCH_REPO$FROM" ] || { echo "spawn.sh: --dir starts a player without a worktree; it takes no --branch, --repo or --from" >&2; exit 2; }
@@ -92,7 +99,7 @@ if [ -n "$PFILE" ]; then PROMPT="$(cat "$PFILE")" || exit 1; fi
 if [ -z "$PROMPT" ] && [ $RESUME = 0 ]; then echo "spawn.sh: task prompt is required (--prompt or --prompt-file)" >&2; exit 2; fi
 # tmux itself is only ever invoked through tmux_on/beam_exec; on a remote machine this process
 # never runs it directly, so only the local case needs tmux on this PATH.
-is_local_machine && { command -v tmux >/dev/null || { echo "spawn.sh: tmux is not installed" >&2; exit 1; }; }
+is_local_machine && ! uses_mux && { command -v tmux >/dev/null || { echo "spawn.sh: tmux is not installed" >&2; exit 1; }; }
 case "$AGENT" in ""|claude|codex|gemini|copilot|opencode) ;; *) echo "spawn.sh: unknown --agent $AGENT (use --cmd for other harnesses)" >&2; exit 2;; esac
 if [ -n "$EFFORT" ]; then
   case "$EFFORT" in low|medium|high|xhigh|max) ;; *) echo "spawn.sh: invalid --effort: $EFFORT" >&2; exit 2;; esac
@@ -183,7 +190,7 @@ if [ -z "$DIR" ]; then checkout="$workdir"; ! dir_exists || resolve_checkout; fi
 EXISTING=none
 if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
-  if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
+  if [ "$(pane_dead "$ORCH_SOCK" "$name")" = 1 ]; then EXISTING=dead
   elif [ "$(tag_get "$ORCH_SOCK" "$name" "$TAG_LAUNCHING")" = 1 ]; then EXISTING=placeholder
   else EXISTING=running; fi
 fi
@@ -226,6 +233,7 @@ if [ $RESUME = 0 ]; then
   esac
 fi
 [ -n "$CMD" ] && HARNESS=custom
+uses_mux && [ "$HARNESS" = auto ] && { echo "spawn.sh: n10 restarts the harness it is told to, and none is recorded for this player; pass --agent claude, codex or opencode" >&2; exit 1; }
 # A dir player's Claude conversation is known only from its session's tag (see _launch.sh), so once
 # the session is gone there is nothing to resume for Claude, or for auto, which is Claude there.
 if [ -n "$DIR" ] && [ $RESUME = 1 ] && [ "$EXISTING" = none ]; then
@@ -235,8 +243,9 @@ fi
 # checkable now; on another one there is no cheap way to ask without a round trip for a check
 # that respawn-pane will make anyway (a missing binary there fails loudly, just later, with a dead
 # pane rather than this message) — so the check is skipped rather than answered from this
-# machine's PATH, which would refuse a harness that is perfectly installed on the target.
-if is_local_machine; then
+# machine's PATH, which would refuse a harness that is perfectly installed on the target. n10
+# resolves the executable itself (with Windows' extensions), and refuses a launch it cannot find.
+if is_local_machine && ! uses_mux; then
   case "$HARNESS" in
     auto) command -v claude >/dev/null || command -v codex >/dev/null || { echo "spawn.sh: neither claude nor codex is on PATH" >&2; exit 1; };;
     custom) ;;
@@ -264,8 +273,8 @@ esac
 [ "$EXISTING" = none ] && name="$(session_label "$root" "$TYPE" "$BRANCH")"     # preferred label; the free one is picked at creation
 { if [ -n "$DIR" ]; then printf 'dir       %s\n' "$workdir"
   else printf 'repo      %s\nbranch    %s%s\nworktree  %s\n' "$root" "$BRANCH" "${FROM:+ (from $FROM)}" "$workdir"; fi
-  printf 'tmux      %s (%s)\nreports   %s\nmode      %s\ncommand   %s\nprompt    %s\n' \
-    "$name" "$EXISTING" "$ORCH" "$MODE" "$desc" "$(printf %s "$PROMPT" | head -c 80 | tr '\n' ' ')"; } | cut -c1-200
+  printf '%-10s%s (%s)\nreports   %s\nmode      %s\ncommand   %s\nprompt    %s\n' \
+    "$(uses_mux && echo n10 || echo tmux)" "$name" "$EXISTING" "$ORCH" "$MODE" "$desc" "$(printf %s "$PROMPT" | head -c 80 | tr '\n' ' ')"; } | cut -c1-200
 [ $DRY = 1 ] && exit 0
 
 # Everything below that is not a tmux call (git, the node_modules copy, the scratch tmux
@@ -317,6 +326,46 @@ fi
 [ -n "$DIR" ] || [ $RESOLVED = 1 ] || resolve_checkout
 r --cwd "$workdir" test -f .mcp.json 2>/dev/null \
   && echo "spawn.sh: $workdir has a .mcp.json; an unapproved server stops a Claude player at a dialog (SKILL.md, MCP servers)" >&2
+if uses_mux; then
+  # What to start, from the launcher: recorded facts, an empty field, then the argv.
+  mapfile -d '' launched < <(cd "$workdir" && printf '%s' "$PROMPT" | env ORCHESTRA_BACKEND=mux ORCHESTRA_LAUNCH=argv \
+    ORCHESTRA_SESSION="$([ "$EXISTING" = none ] || printf %s "$name")" ORCHESTRA_SESSION_TYPE="$TYPE" \
+    ORCHESTRA_MODE="$MODE" ORCHESTRA_HARNESS="$HARNESS" ORCHESTRA_MODEL="$MODEL" ORCHESTRA_EFFORT="$EFFORT" \
+    ORCHESTRA_PERMISSION_MODE="$PERM" ORCHESTRA_COMMAND="$CMD" ORCHESTRA_CLAUDE_SKILL="$CLAUDE_INVOCATION" bash "$LAUNCHER")
+  facts=(); envs=(); argv=(); seen=0
+  for f in ${launched[@]+"${launched[@]}"}; do
+    if [ $seen = 1 ]; then argv+=("$f")
+    elif [ -z "$f" ]; then seen=1
+    elif [ "${f:0:1}" = @ ]; then facts+=("${f%%=*}" "${f#*=}")
+    else envs+=("${f%%=*}" "${f#*=}"); fi
+  done
+  [ ${#argv[@]} -gt 0 ] || { echo "spawn.sh: nothing was launched for $name; worktree kept" >&2; exit 1; }
+  env_set=(ORCHESTRA_BACKEND mux PATH "$(native_path_list "$PATH")" HOME "$(native_path "$HOME")")
+  env_unset=("${PARENT_SESSION_MARKERS[@]}" ORCHESTRA_SESSION ORCHESTRA_SOCKET)
+  for v in "${ACCOUNT_VARS[@]}"; do
+    if [ -n "${!v:-}" ]; then env_set+=("$v" "$(native_path "${!v}")"); else env_unset+=("$v"); fi
+  done
+  tags=("$TAG_ORCHESTRATOR" "$ORCH")
+  case "$ORCH" in claude:*) tags+=("$TAG_ORCH_CONFIG" "$(native_path "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")");; esac
+  launch="\"cwd\":$(json_str "$(native_path "$workdir")"),\"argv\":$(mux_json_array "${argv[@]}"),\"envSet\":$(mux_json_object "${env_set[@]}" ${envs[@]+"${envs[@]}"})"
+  launch+=",\"envUnset\":$(mux_json_array "${env_unset[@]}"),\"cols\":220,\"rows\":50,\"retainOnExit\":true"
+  if [ "$EXISTING" = none ]; then
+    tags+=("$TAG_SPAWNER" orchestra "$TAG_REPO" "$(native_path "$root")" "$TAG_SESSION_TYPE" "$TYPE")
+    [ -n "$DIR" ] || tags+=("$TAG_BRANCH" "$BRANCH" "$TAG_WORKTREE_PATH" "$(native_path "$checkout")")
+    row="$(printf '{"label":%s,%s,"tags":%s}' "$(json_str "$name")" "$launch" "$(mux_json_object "${tags[@]}" ${facts[@]+"${facts[@]}"})" |
+      mux create --request -)" || { echo "spawn.sh: n10 could not launch $name; worktree kept. Fix the cause and rerun." >&2; exit 1; }
+  else
+    # The identity tags stay as the creator wrote them; restart takes only an exited record.
+    mux_find "$name" || { echo "spawn.sh: $name is gone" >&2; exit 1; }
+    row="$(printf '{"expectedHostId":%s,"generation":%s,%s,"tags":%s}' "$(json_str "${MUX_F[$MUX_HOST]}")" "${MUX_F[$MUX_GEN]}" \
+      "$launch" "$(mux_json_object "${tags[@]}" ${facts[@]+"${facts[@]}"})" | mux restart "${MUX_F[$MUX_ID]}" --request -)" ||
+      { echo "spawn.sh: n10 could not relaunch $name; it is left as it was. Fix the cause and rerun with --resume." >&2; exit 1; }
+  fi
+  mux_split "$row"; name="${MUX_F[$MUX_LABEL]}"
+  mark_orchestrator_session
+  echo "started   $name"
+  exit 0
+fi
 r mkdir -p "$AGENT_TMUX_TMPDIR" || { echo "spawn.sh: could not create $AGENT_TMUX_TMPDIR on $(machine_label)" >&2; exit 1; }
 
 unset TMUX TMUX_PANE

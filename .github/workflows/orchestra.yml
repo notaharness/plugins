@@ -1,0 +1,97 @@
+name: Orchestra
+
+on:
+  pull_request:
+    paths: ['orchestra/**', '.github/workflows/orchestra.yml']
+  push:
+    branches: [main]
+    paths: ['orchestra/**', '.github/workflows/orchestra.yml']
+
+jobs:
+  # The tmux arm, on machines with tmux and no n10 at all.
+  tmux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux and the tests' tools
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y tmux socat jq
+          else
+            brew install bash coreutils tmux socat jq
+          fi
+
+      - name: No n10 installed
+        run: '! command -v n10'
+
+      - run: python3 orchestra/tests/test_port.py
+
+      - run: bash orchestra/tests/smoke_tmux.sh
+
+  # The n10 arm, on machines without tmux, against n10 built from the commit in
+  # orchestra/tests/n10.sha: one-shot mux is n10's, so its contract is pinned, never latest.
+  mux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      NX_DAEMON: 'false'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pinned n10 commit
+        id: n10
+        run: echo "sha=$(cat orchestra/tests/n10.sha)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: notaharness/n10
+          ref: ${{ steps.n10.outputs.sha }}
+          path: .n10
+
+      - name: Check out exactly that commit
+        run: test "$(git -C .n10 rev-parse HEAD)" = "${{ steps.n10.outputs.sha }}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: .n10/package-lock.json
+
+      - name: Build the n10 CLI
+        working-directory: .n10
+        run: npm ci && npx nx build cli
+
+      - name: Put n10 on PATH
+        run: |
+          bin="$RUNNER_TEMP/n10-bin"; main="$GITHUB_WORKSPACE/.n10/apps/cli/dist/main.js"
+          if command -v cygpath >/dev/null; then bin="$(cygpath -u "$bin")"; main="$(cygpath -m "$main")"; fi
+          mkdir -p "$bin"
+          printf '#!/bin/sh\nexec node "%s" "$@"\n' "$main" > "$bin/n10"; chmod +x "$bin/n10"
+          if command -v cygpath >/dev/null; then cygpath -w "$bin"; else echo "$bin"; fi >> "$GITHUB_PATH"
+
+      - name: Orchestra against n10, without tmux
+        if: runner.os == 'Linux'
+        run: bash orchestra/tests/mux_e2e.sh
+
+      # As Codex in PowerShell runs a script (orchestrator SKILL.md), from an installation whose
+      # path has a space and a non-ASCII letter in it.
+      - name: Orchestra against n10, from PowerShell through Git Bash
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $skills = Join-Path $env:RUNNER_TEMP 'Orchestra Skills ü'
+          Copy-Item -Recurse orchestra $skills
+          $bash = if ($env:ORCHESTRA_GIT_BASH) { $env:ORCHESTRA_GIT_BASH } else { Join-Path (Split-Path (Split-Path (Split-Path (git --exec-path)))) 'bin\bash.exe' }
+          & $bash (Join-Path $skills 'tests\mux_e2e.sh')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

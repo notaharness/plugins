@@ -137,6 +137,31 @@ If a player looks finished but nothing arrived, inspect its pane with `screen.sh
 for the result. Inspect the destination before requesting a resend: a paste may have succeeded
 before submission failed, so another attempt could duplicate the report.
 
+## Without tmux
+
+On a machine without tmux, and with `n10` on PATH, every script reaches player sessions through
+`n10 mux`. tmux always wins where it is installed: n10 is then never consulted. Spawned players
+carry `ORCHESTRA_BACKEND=mux`, which keeps their own scripts on n10. `--machine` still reaches
+another machine's tmux through beam.
+
+- A running n10 owns the sessions: its desktop, its TUI, or `n10 mux serve` in another
+  terminal. Closing it ends them; a script with no owner to ask finds no sessions.
+- `spawn.sh` starts the agent directly, with every tag in place: the task is its initial
+  prompt argument, with no placeholder and no buffer. Workspace trust is Claude's own dialog,
+  so check a new Claude player's screen and answer it (`send.sh SESSION --key Enter`).
+- `--resume` restarts the player's exited session with `--agent` or its `@orchestra-agent` tag;
+  with neither it stops, since there is no probe to detect the harness. A session that is gone
+  is spawned under its label again.
+- Delivery and adoption need an agent n10 launched itself (`claude`, `codex`, …); a shell, or an
+  agent a shell started, is refused. A Claude Code inbox is used where it can be reached, else
+  the report is pasted. Inside an n10 session the orchestrator's own session,
+  `mux:<hostId>/<sessionId>`, is the default destination after Claude, Codex and tmux, and it
+  stands in for a Claude session whose inbox cannot be verified (Windows). It lasts as long as
+  that n10 and cannot be beam-qualified.
+- On Git for Windows' Bash the scripts hand n10 native paths: the cwd, `PATH`, `HOME`, the
+  account directories and the path-valued tags (`@orchestra-repo`, `@orchestra-worktree-path`,
+  `@orchestra-orchestrator-config`).
+
 ## Recovering after a crash
 
 A power loss, reboot or dead tmux server takes every player session and its tags with it. Nothing

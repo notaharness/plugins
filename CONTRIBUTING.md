@@ -47,7 +47,13 @@ bash orchestra/tests/smoke_tmux.sh
 ```
 
 Both use temporary Git repositories and fake agent CLIs, so they make no model calls.
-The smoke test needs tmux and runs it on an isolated socket. Neither covers live model
+The smoke test needs tmux and runs it on an isolated socket.
+
+`bash orchestra/tests/mux_e2e.sh` runs the same scripts against a real `n10 mux serve` in an
+isolated profile, with tmux hidden from PATH. It needs `n10` on PATH: build n10's CLI
+(`npm ci && NX_DAEMON=false npx nx build cli`) at the commit in `orchestra/tests/n10.sha` and
+put a shim running `node <n10>/apps/cli/dist/main.js` on PATH. CI does this on Linux and
+Windows. Neither covers live model
 sessions, delivery through `codex queue`, or a spawn on a real second machine.
 
 For Conversations:

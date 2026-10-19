@@ -38,23 +38,46 @@
 # @orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
 # with the session) a Claude resume refuses rather than guess; so does auto mode, which for a dir
 # player means Claude only.
+#
+# For a session of n10's (no tmux on this machine) spawn.sh runs this script itself, before the
+# session exists, with ORCHESTRA_LAUNCH=argv, ORCHESTRA_SESSION_TYPE, the existing session's label
+# (if any) in ORCHESTRA_SESSION, the task body on stdin and the worktree as its directory. Instead
+# of starting the harness it prints what to start, for n10 to launch directly so that it knows
+# which agent runs there: NUL-terminated fields, first the facts this script would record on the
+# session (<tag>=<value>, and PROMPT=<prompt> for a custom harness), then an empty field, then
+# the argv. That launch has no resume probe (the agent is n10's first process, so its output is
+# not this script's to read), so auto is refused, and workspace trust is left to Claude's own
+# dialog rather than written into its private config.
 set -u
 . "$(dirname "$(realpath "$0")")/_lib.sh"
 mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
 model="${ORCHESTRA_MODEL:-}"; effort="${ORCHESTRA_EFFORT:-}"; perm="${ORCHESTRA_PERMISSION_MODE:-}"
-session="${ORCHESTRA_SESSION:?ORCHESTRA_SESSION is required}"; sock="${ORCHESTRA_SOCKET:?ORCHESTRA_SOCKET is required}"
+launch="${ORCHESTRA_LAUNCH:-exec}"
+if [ "$launch" = argv ]; then
+  session="${ORCHESTRA_SESSION:-}"; sock=""; stype="${ORCHESTRA_SESSION_TYPE:-}"
+  exec 3>&1                # recorded facts go here even from inside a command substitution
+else
+  session="${ORCHESTRA_SESSION:?ORCHESTRA_SESSION is required}"; sock="${ORCHESTRA_SOCKET:?ORCHESTRA_SOCKET is required}"
+  stype="$(tag_get "$sock" "$session" "$TAG_SESSION_TYPE")"
+fi
 NO_CONVERSATION='No conversation found to continue'
-stype="$(tag_get "$sock" "$session" "$TAG_SESSION_TYPE")"
 where=worktree; [ "$stype" = "$SESSION_TYPE_DIR" ] && where=directory
 RESTART_NOTE="Your session was restarted in this $where; files and commits are intact, so do not redo finished work."
 
 fail() { echo "player launch: $*" >&2; exit 1; }
-buf="$(prompt_buffer_name "$session")"
-# show-buffer writes the bytes as they are; the command substitution drops the trailing newline
-# spawn.sh adds (tmux never creates an empty buffer, and an empty body is allowed).
-body="$(tmux -S "$sock" show-buffer -b "$buf" 2>/dev/null)" || fail "no task buffer $buf on $sock (rerun spawn.sh)"
-tmux -S "$sock" delete-buffer -b "$buf" 2>/dev/null
-remember() { tag_set "$sock" "$session" "$TAG_AGENT" "$1" 2>/dev/null; true; }
+if [ "$launch" = argv ]; then body="$(cat)"
+else
+  buf="$(prompt_buffer_name "$session")"
+  # show-buffer writes the bytes as they are; the command substitution drops the trailing newline
+  # spawn.sh adds (tmux never creates an empty buffer, and an empty body is allowed).
+  body="$(tmux -S "$sock" show-buffer -b "$buf" 2>/dev/null)" || fail "no task buffer $buf on $sock (rerun spawn.sh)"
+  tmux -S "$sock" delete-buffer -b "$buf" 2>/dev/null
+fi
+# launch_tag <tag> <value>: record a fact about this launch on the session (for n10, print it).
+launch_tag() { if [ "$launch" = argv ]; then printf '%s=%s\0' "$1" "$2" >&3; else tag_set "$sock" "$session" "$1" "$2"; fi; }
+# run <argv…>: start the harness in place of this script (for n10, print it).
+run() { if [ "$launch" = argv ]; then printf '\0'; printf '%s\0' "$@"; exit 0; fi; exec "$@"; }
+remember() { launch_tag "$TAG_AGENT" "$1" 2>/dev/null; true; }
 # <invocation> [restart note] <body>
 preamble() {
   local inv; case "$1" in codex) inv='$player';; *) inv="${ORCHESTRA_CLAUDE_SKILL:-/orchestra:player}";; esac
@@ -75,9 +98,11 @@ claude_conversation_args() {
     [ -n "$id" ] && printf '%s\n' --resume "$id"
     return
   fi
-  id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null)" || :
+  # Git for Windows has neither, only /dev/urandom: a version 4 UUID from 16 of its bytes.
+  id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null ||
+    od -An -N16 -tx1 /dev/urandom | tr -d ' \n' | sed -E 's/^(.{8})(.{4}).(.{3}).(.{3})(.{12})$/\1-\2-4\3-a\4-\5/')" || :
   id="$(printf %s "$id" | tr A-F a-f)"
-  if [ -n "$id" ] && tag_set "$sock" "$session" "$TAG_CLAUDE_SESSION" "$id"; then printf '%s\n' --session-id "$id"
+  if [ -n "$id" ] && launch_tag "$TAG_CLAUDE_SESSION" "$id"; then printf '%s\n' --session-id "$id"
   else echo "player launch: could not record a Claude conversation id on $session; this dir player cannot be resumed" >&2; fi
   return 0
 }
@@ -90,6 +115,7 @@ claude_conversation_args() {
 # and the dialog may appear.
 claude_trust_here() {
   local cfg
+  [ "$launch" = exec ] || return 0
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else cfg="$HOME/.claude.json"; fi
   [ -f "$cfg" ] || return 0
   command -v python3 >/dev/null 2>&1 || { echo "player launch: python3 not found; Claude may ask whether to trust $PWD" >&2; return 0; }
@@ -114,23 +140,24 @@ PY
 fresh() {
   local prompt; prompt="$(preamble "$1")"; remember "$1"
   case "$1" in
-    claude)   claude_trust_here; exec claude $(claude_conversation_args) ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt";;
-    codex)    exec codex ${model:+-m "$model"} $(codex_effort_args) "$prompt";;
-    gemini)   exec gemini ${model:+-m "$model"} -i "$prompt";;
-    copilot)  exec copilot ${model:+--model "$model"} -i "$prompt";;
-    opencode) exec opencode ${model:+-m "$model"} --prompt "$prompt";;
+    claude)   claude_trust_here; run claude $(claude_conversation_args) ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt";;
+    codex)    run codex ${model:+-m "$model"} $(codex_effort_args) "$prompt";;
+    gemini)   run gemini ${model:+-m "$model"} -i "$prompt";;
+    copilot)  run copilot ${model:+--model "$model"} -i "$prompt";;
+    opencode) run opencode ${model:+-m "$model"} --prompt "$prompt";;
   esac
   fail "unknown harness $1"
 }
 
 # Newest recorded Codex conversation whose cwd is this worktree (rollout files carry it in
-# their session_meta line). Prints the UUID; fails when none exists.
+# their session_meta line; a native Windows Codex writes its own form of the path, JSON-escaped).
+# Prints the UUID; fails when none exists.
 codex_session_here() {
-  local home="${CODEX_HOME:-$HOME/.codex}" here real f
-  here="$PWD"; real="$(pwd -P)"
+  local home="${CODEX_HOME:-$HOME/.codex}" here real native f
+  here="$PWD"; real="$(pwd -P)"; native="$(native_path "$real")"; native="${native//\\/\\\\}"
   while IFS= read -r f; do
     case "$(head -c 4096 "$f" | tr -d ' ')" in
-      *"\"cwd\":\"$here\""*|*"\"cwd\":\"$real\""*)
+      *"\"cwd\":\"$here\""*|*"\"cwd\":\"$real\""*|*"\"cwd\":\"$native\""*)
         printf '%s\n' "$f" | sed -nE 's/.*-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/\1/p'
         return 0;;
     esac
@@ -143,7 +170,7 @@ resume_codex() {
   local prompt id; prompt="$(preamble codex)"
   id="$(codex_session_here)" || fail "${1:-no Codex conversation is recorded for $PWD; nothing to resume (use a fresh spawn for a new task)}"
   remember codex
-  exec codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
+  run codex resume ${model:+-m "$model"} $(codex_effort_args) "$id" "$prompt"
 }
 # claude_continue_probed: `claude --continue` under script(1), so its output can be checked for the
 # exact NO_CONVERSATION diagnostic. Returns Claude's exit status; NOCONV=1 when it printed that.
@@ -166,12 +193,12 @@ resume_claude() {
   local prompt conv rc; prompt="$(preamble claude)"
   conv="$(claude_conversation_args)" || fail "no Claude conversation is recorded on this dir player's session (kill.sh removes it); nothing to resume. Spawn it fresh, or pass --agent codex for a Codex player"
   remember claude; claude_trust_here
-  if [ "$stype" != "$SESSION_TYPE_DIR" ] && command -v script >/dev/null; then
+  if [ "$launch" = exec ] && [ "$stype" != "$SESSION_TYPE_DIR" ] && command -v script >/dev/null; then
     claude_continue_probed; rc=$?
     [ "$NOCONV" = 1 ] && fail "$NO_CLAUDE_HERE; $SPAWN_ACCOUNT"
     exit $rc
   fi
-  exec claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt"
+  run claude $conv ${perm:+--permission-mode "$perm"} ${model:+--model "$model"} ${effort:+--effort "$effort"} "$prompt"
 }
 resume_auto() {
   [ "$stype" = "$SESSION_TYPE_DIR" ] && resume_claude
@@ -189,13 +216,14 @@ resume_auto() {
 
 if [ "$harness" = custom ]; then
   PROMPT="$(preamble claude)"; export PROMPT; remember custom
-  exec bash -c "${ORCHESTRA_COMMAND:?ORCHESTRA_COMMAND is required for the custom harness}"
+  [ "$launch" = exec ] || printf 'PROMPT=%s\0' "$PROMPT" >&3
+  run bash -c "${ORCHESTRA_COMMAND:?ORCHESTRA_COMMAND is required for the custom harness}"
 fi
 if [ "$mode" = fresh ]; then fresh "$harness"; fi
 case "$harness" in
   claude)   resume_claude;;
   codex)    resume_codex;;
   auto)     resume_auto;;
-  opencode) remember opencode; exec opencode --continue --prompt "$(preamble opencode)";;
+  opencode) remember opencode; run opencode --continue --prompt "$(preamble opencode)";;
   *)        fail "--resume is not supported for $harness; use a fresh spawn";;
 esac

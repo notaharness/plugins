@@ -17,7 +17,9 @@
 # spawned for), -agent, -orchestrator and -last-report tags (empty when unset). --json gives
 # "session" and "name" (both the tmux name), "repo", "branch", "worktree" (@orchestra-worktree-path,
 # the checkout that identifies a worktree player), "state", "cmd", "quiet_s", "agent",
-# "orchestrator", "last_report" and "title". Everything comes from one tmux list-panes call.
+# "orchestrator", "last_report" and "title". Everything comes from one tmux list-panes call, or,
+# on a machine whose sessions are n10's, one `n10 mux list` (and one batched capture listing per
+# --sample screenshot), where CMD is the agent n10 launched and QUIET counts from its last output.
 #
 # QUIET is seconds since the pane last produced output (tmux window_activity), so one
 # tmux call covers every session. It cannot say *why* a session is idle — use screen.sh
@@ -43,9 +45,9 @@ while [ $# -gt 0 ]; do case "$1" in
   --all) ALL=1;; --repo) ORCH_REPO="$2"; shift;;
   --machine) ORCH_MACHINE="$2"; EXPLICIT_MACHINE=1; shift;;
   --quiet) QUIET="$2"; shift;; --sample) SAMPLE="$2"; shift;; --json) JSON=1;;
-  -h|--help) sed -n '2,35p' "$0"; exit 0;;
+  -h|--help) sed -n '2,37p' "$0"; exit 0;;
   *) echo "sessions.sh: unknown argument $1" >&2; exit 0;; esac; shift; done
-command -v tmux >/dev/null || { echo "tmux is not installed"; exit 0; }
+uses_mux || command -v tmux >/dev/null || { echo "tmux is not installed"; exit 0; }
 require_valid_repo_for_machine || exit 0
 
 in_repo || ALL=1
@@ -93,11 +95,12 @@ if [ "$SAMPLE" -gt 0 ]; then
     # The server that machine keeps its sessions on, resolved once per machine (_routing.sh);
     # a peer that cannot be reached contributes no baseline and no rows, as before, quietly.
     machine_socket 2>/dev/null || continue
-    while IFS= read -r n; do before["$machine_iter$TAB$n"]="$(screen_text "=$n:" | md5sum)"; done < <(all_player_sessions)
+    while IFS="$TAB" read -r n digest; do before["$machine_iter$TAB$n"]="$digest"; done < <(screen_digests)
   done
   ORCH_MACHINE="$SAMPLE_STARTING_MACHINE"
   sleep "$SAMPLE"
 fi
+declare -A after
 
 # Fields are tab-separated (tag values never contain a tab; the title comes last so it may). A
 # whitespace IFS makes `read` collapse the empty fields of unset tags, so lines are split by hand.
@@ -117,6 +120,7 @@ for machine_iter in "${MACHINES[@]}"; do
   ORCH_MACHINE="$machine_iter"; [ "$machine_iter" = local ] && ORCH_MACHINE=""
   machine_socket 2>/dev/null || continue                  # see the sample loop above
   machine_disp="${MACHINE_LABEL[$machine_iter]:-$machine_iter}"
+  if [ "$SAMPLE" -gt 0 ]; then after=(); while IFS="$TAB" read -r n digest; do after["$n"]="$digest"; done < <(screen_digests); fi
   while IFS= read -r line; do
     split_tabs "$line"; set -- "${F[@]}"
     name="${1:-}"; dead="${2:-}"; cmd="${3:-}"; activity="${4:-}"; agent="${5:-}"; orch="${6:-}"; last="${7:-}"; tag_repo="${8:-}"; branch="${9:-}"; spawner="${10:-}"; type="${11:-}"; worktree="${12:-}"
@@ -126,7 +130,7 @@ for machine_iter in "${MACHINES[@]}"; do
     quiet=$(( now - ${activity:-$now} )); [ $quiet -lt 0 ] && quiet=0
     if [ "${dead:-1}" = 1 ]; then state=dead
     elif [ "$SAMPLE" -gt 0 ]; then
-      if [ "${before["$machine_iter$TAB$name"]:-}" != "$(screen_text "=$name:" | md5sum)" ]; then state=busy; else state=idle; fi
+      if [ "${before["$machine_iter$TAB$name"]:-}" != "${after[$name]:-}" ]; then state=busy; else state=idle; fi
     elif [ $quiet -lt "$QUIET" ]; then state=busy
     else state=idle; fi
     repo="$tag_repo"
@@ -149,7 +153,7 @@ for machine_iter in "${MACHINES[@]}"; do
       [ $rows = 1 ] && printf '%-5s %6s  %-40s %-32s %-8s %-42s %-26s %s\n' STATE QUIET SESSION BRANCH AGENT ORCHESTRATOR LAST-REPORT TITLE
       printf '%-5s %5ss  %-40s %-32s %-8s %-42s %-26s %s\n' "$state" "$quiet" "$(printf %s "$name" | cut -c1-40)" "$(printf %s "$branch" | cut -c1-32)" "$agent" "$(printf %s "$orch" | cut -c1-42)" "$last" "$(printf %s "$title" | cut -c1-40)"
     fi
-  done < <(tmux_on "" list-panes -a -F "$FORMAT" 2>/dev/null || true)
+  done < <(if uses_mux; then mux_panes; else tmux_on "" list-panes -a -F "$FORMAT" 2>/dev/null || true; fi)
 done
 ORCH_MACHINE="$STARTING_MACHINE"
 [ $JSON = 1 ] && printf ']\n'

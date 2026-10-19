@@ -32,9 +32,8 @@ require_valid_repo_for_machine || exit 2
 machine_socket || exit 1
 target="$(resolve_session "$session")" || exit 1
 session_exists "$target" || exit 1
-tt="$(tmux_target "$target")"
-if [ "$1" = "--key" ]; then tmux_on "" send-keys -t "$tt" "$2"; exit; fi
-if [ "$1" = "--type" ]; then shift; tmux_on "" send-keys -t "$tt" -l "$*" && sleep 0.3 && tmux_on "" send-keys -t "$tt" Enter && echo "typed into $target"; exit; fi
+if [ "$1" = "--key" ]; then send_key "$target" "$2"; exit; fi
+if [ "$1" = "--type" ]; then shift; type_line "$target" "$*" && echo "typed into $target"; exit; fi
 if [ "$1" = "--raw" ]; then
   shift; paste_into "$target" "$*" || { echo "send.sh: $DELIVER_REASON" >&2; exit 1; }
   echo "sent to $target (paste)"; exit

@@ -37,6 +37,8 @@ if [ -f "\$T/fake-$cli-exit" ]; then exit "\$(cat "\$T/fake-$cli-exit")"; fi
 exec cat >> "\$T/received-$cli"
 FAKE
 chmod +x "$T/bin/$cli"; done
+# An n10 on PATH that records any call: where tmux is installed nothing may consult it.
+printf '#!/bin/sh\necho "$*" >> "%s/n10-called"\nexit 1\n' "$T" > "$T/bin/n10"; chmod +x "$T/bin/n10"
 export PATH="$T/bin:$PATH"
 export CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CODEX_THREAD_ID=11111111-2222-3333-4444-555555555555
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID     # the session running this script is not the orchestrator under test
@@ -480,5 +482,8 @@ echo "# relay.sh refuses to run with no default target and no --allow"
 env -u TMUX bash "$O/relay.sh" --topic orchestra >"$T/noallow.out" 2>"$T/noallow.err"; noallow_rc=$?
 check "relay.sh needs --allow outside a tmux pane" \
   "[ $noallow_rc = 2 ] && grep -q 'pass --allow' '$T/noallow.err'"
+
+echo "# tmux wins"
+check "no script consulted n10 while tmux is installed" "[ ! -e '$T/n10-called' ]"
 
 echo; echo "passed $pass, failed $fail"; [ $fail = 0 ]
