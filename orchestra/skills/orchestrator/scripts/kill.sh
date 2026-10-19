@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Kill ONE player session's tmux session (its agent). Leaves the worktree and branch alone —
-# remove those with `git worktree remove` (and `git branch -d`) after the PR merges.
+# retire those separately after the PR merges and all checkout users stop (SKILL.md cleanup).
 # <session> is a branch (resolved in this repo, --repo, or uniquely across repos) or an exact
 # tmux session name, a dir player's only name. Only a session whose tags say it is a player (spawner
 # set, @orchestra-session-type worktree or dir) is killed; a session that merely wears such a name, the
