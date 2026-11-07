@@ -364,7 +364,10 @@ class PortTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='orch-test.')
         self.base = Path(self.tmp.name); self.repo = self.base/'repo'; self.repo.mkdir(); self.bin = self.base/'bin'; self.bin.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CLAUDE', 'CODEX', 'ORCHESTRA', 'TMUX', 'ANTHROPIC', 'PLAYER'))}
-        self.env.update(PATH=str(self.bin)+':'+self.env['PATH'], CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
+        # A beam installed on the machine running the tests must not answer for the fake machines
+        # here (sessions.sh --all would list its real peers): only a test's own stub is beam.
+        path = ':'.join(d for d in self.env['PATH'].split(':') if not os.access(os.path.join(d, 'beam'), os.X_OK))
+        self.env.update(PATH=str(self.bin)+':'+path, CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
                         CODEX_HOME=str(self.base/'codex-home'), CLAUDE_CONFIG_DIR=str(self.base/'claude-config'),
                         ORCH_TEST_DEFAULT_SOCK='/tmp/tmux-%d/default' % os.getuid())
         self.git_init(self.repo)
@@ -829,12 +832,12 @@ class PortTests(unittest.TestCase):
         self.foreign('stranger', self.player_tags(branch='feature/b', launcher='other'))
         self.foreign('bad-agent', self.player_tags(branch='feature/c', agent='Claude Code'))
         self.foreign('relative', dict(self.player_tags(branch='feature/d'), **{'@session-repo': 'repo'}))
-        self.foreign('global-version', {k: v for k, v in self.player_tags(branch='feature/e').items() if k != '@session-version'})
+        self.foreign('no-version', {k: v for k, v in self.player_tags(branch='feature/e').items() if k != '@session-version'})
         rows = self.sessions('--all'); self.assertEqual([r['session'] for r in rows], ['n10-worktree'])
         r = rows[0]
         self.assertEqual((r['repo'], r['branch'], r['worktree'], r['agent']),
                          (str(self.repo.resolve()), 'feature/conv', str(self.repo.resolve()/'.claude/worktrees/feature-conv'), 'codex'))
-        for name in ('n10-agent-tab', 'n10-shell-tab', 'next-major', 'stranger', 'bad-agent', 'relative', 'global-version'):
+        for name in ('n10-agent-tab', 'n10-shell-tab', 'next-major', 'stranger', 'bad-agent', 'relative', 'no-version'):
             self.assertIn('no player session named '+name, self.orch('kill.sh', name, ok=False).stderr)
         self.orch('adopt.sh', 'n10-worktree', '--orchestrator', 'tmux:parent')
         o = self.options('n10-worktree')
@@ -849,6 +852,46 @@ class PortTests(unittest.TestCase):
         self.foreign('n10', dict(n10, **{'@session-x-orchestra-session-type': 'worktree'}))     # even one wearing Orchestra's extension
         self.lib('for s in own own-incomplete n10; do session_publish_version "" "$s"; done')
         self.assertEqual({n: self.options(n).get('@session-version') for n in ('own', 'own-incomplete', 'n10')}, {'own': '1', 'own-incomplete': None, 'n10': None})
+    def test_a_resume_with_no_known_harness_registers_the_session_before_it_starts(self):
+        # The session is gone (a reboot, say) and no --agent is given: auto. The session is recorded
+        # with the harness tried first, so it is listed while it runs and reused after a failed start.
+        self.spawn('--agent', 'claude'); self.orch('kill.sh', self.session)
+        self.env['TEST_CLAUDE_EXIT'] = '1'; self.spawn('--resume', prompt=False)
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        self.assertEqual([(r['session'], r['agent']) for r in self.sessions()], [(self.session, 'claude')])
+        self.assertEqual(self.options()['@session-version'], '1')
+        del self.env['TEST_CLAUDE_EXIT']; self.spawn('--resume', prompt=False)
+        self.assertEqual(sorted(self.state()), [self.session]); self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session)
+    def test_a_failed_spawn_leaves_no_session_behind(self):
+        # A config dir or target that cannot be recorded stops the spawn before anything exists.
+        mine = self.env['CLAUDE_CONFIG_DIR']
+        for config, target in (('relative/config', 'claude:'+ID), (mine, 'tmux:'+'a'*4100)):
+            self.env['CLAUDE_CONFIG_DIR'] = config
+            x = self.spawn('--agent', 'codex', '--orchestrator', target, ok=False)
+            self.assertEqual(x.returncode, 2, x.stderr); self.assertIn('cannot be recorded', x.stderr)
+            self.assertNotIn('new-session', self.tmux_log() if (self.base/'tmux-log').exists() else '')
+        self.env['CLAUDE_CONFIG_DIR'] = mine
+        # A write that fails after the session exists removes it, so a retry gets the same label.
+        self.env['TEST_SET_OPTION_FAIL'] = '@session-x-orchestra-launching'
+        x = self.spawn('--agent', 'codex', ok=False); self.assertIn('removed', x.stderr)
+        self.assertEqual(self.state(), {})
+        del self.env['TEST_SET_OPTION_FAIL']; self.spawn('--agent', 'codex')
+        self.assertEqual(sorted(self.state()), [self.session])
+    def test_a_dir_player_whose_version_was_not_written_still_launches_as_one(self):
+        self.env['TEST_SET_OPTION_FAIL'] = '@session-agent'
+        d = self.notes_dir(); self.dir_spawn(d, '--agent', 'claude')
+        self.assertNotIn('@session-version', self.options('notes-dir'))
+        args = self.calls()[-1]['args']; self.assertIn('--session-id', args)
+        self.assertEqual(args[args.index('--session-id')+1], self.options('notes-dir')['@session-x-orchestra-claude-session'])
+    def test_resume_respawns_the_recorded_pane_only_while_it_belongs_to_the_session(self):
+        self.spawn('--agent', 'codex'); self.foreign('elsewhere'); own = self.pane()
+        self.set_tag('@session-pane', self.pane('elsewhere')); self.kill_pane()
+        self.spawn('--resume', prompt=False)
+        respawn = [c for c in self.tmux_commands() if c[0] == 'respawn-pane'][-1]
+        self.assertEqual(respawn[respawn.index('-t')+1], '=%s:' % self.session)       # another session's pane: never touched
+        self.set_tag('@session-pane', own); self.kill_pane(); self.spawn('--resume', prompt=False)
+        respawn = [c for c in self.tmux_commands() if c[0] == 'respawn-pane'][-1]
+        self.assertEqual(respawn[respawn.index('-t')+1], own)
     def test_status_keys_are_withdrawn_before_an_agent_is_replaced(self):
         self.spawn('--agent', 'codex')
         for k, v in (('@session-status', 'blocked'), ('@session-status-kind', 'question'), ('@session-status-at', '2026-01-01T00:00:00Z')): self.set_tag(k, v)

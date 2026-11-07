@@ -241,24 +241,37 @@ PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)
 
+# orchestrator_recordable <target>: can the target, and for a local claude: target this process's
+# Claude config dir, be recorded on a session? The config dir is taken canonical
+# (symlink-resolved, as the convention requires of a path) into ORCH_CONFIG_DIR, empty for any
+# other target. Says why not and fails otherwise, so a caller can stop before it changes anything:
+# a target that cannot be recorded would leave a player whose reports go nowhere, and a config
+# dir that cannot be recorded would leave report.sh looking in the wrong place.
+ORCH_CONFIG_DIR=""
+orchestrator_recordable() {
+  local cfg
+  ORCH_CONFIG_DIR=""
+  session_value_ok "$KEY_ORCHESTRATOR" "$1" ||
+    { echo "orchestra: the orchestrator target '$1' cannot be recorded in $KEY_ORCHESTRATOR (not a single-line UTF-8 value of at most 4096 bytes)" >&2; return 1; }
+  case "$1" in
+    claude:*)
+      cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; cfg="$(cd "$cfg" 2>/dev/null && pwd -P)" || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      session_value_ok "$KEY_ORCH_CONFIG" "$cfg" ||
+        { echo "orchestra: the Claude config dir '$cfg' cannot be recorded in $KEY_ORCH_CONFIG (not an absolute, canonical path)" >&2; return 1; }
+      ORCH_CONFIG_DIR="$cfg";;
+  esac
+}
 # set_orchestrator <socket> <session> <target>: point a player's reports at <target>. A local
 # claude: target is found through the orchestrator's Claude config dir, which the player's own
 # environment need not share, so it goes on beside the target (first: report.sh never sees the
 # target without it); every other target drops it. A beam-qualified one leaves the lookup to the
 # far side's relay, with its own environment.
-# Both keys travel in one queue, the config dir ahead of the target. The config dir is recorded
-# canonical (symlink-resolved, as the convention requires of a path); one that cannot be recorded
-# fails here rather than leave report.sh looking in the wrong place.
+# Both keys travel in one queue, the config dir ahead of the target; nothing is written when
+# either cannot be recorded.
 set_orchestrator() {
-  local cfg
+  orchestrator_recordable "$3" || return 1
   tq_reset
-  case "$3" in
-    claude:*)
-      cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; cfg="$(cd "$cfg" 2>/dev/null && pwd -P)" || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-      session_value_ok "$KEY_ORCH_CONFIG" "$cfg" || { echo "orchestra: the Claude config dir '$cfg' cannot be recorded in $KEY_ORCH_CONFIG (not an absolute, canonical path)" >&2; return 1; }
-      tq_set "$2" "$KEY_ORCH_CONFIG" "$cfg";;
-    *) tq_unset "$2" "$KEY_ORCH_CONFIG";;
-  esac
+  if [ -n "$ORCH_CONFIG_DIR" ]; then tq_set "$2" "$KEY_ORCH_CONFIG" "$ORCH_CONFIG_DIR"; else tq_unset "$2" "$KEY_ORCH_CONFIG"; fi
   tq_set "$2" "$KEY_ORCHESTRATOR" "$3"
   tq_run "$1"
 }

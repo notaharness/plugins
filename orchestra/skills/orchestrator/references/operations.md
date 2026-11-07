@@ -108,6 +108,11 @@ fail as undeliverable rather than reach the previous orchestrator. Orchestra doe
 `@session-status*`; it withdraws any such keys before it respawns an agent, and `sessions.sh`
 keeps its own busy/idle/dead observation.
 
+The scripts read the record through tmux formats (`#{@session-…}` in one `list-sessions`,
+`list-panes` or `display-message` call). A format falls back to a global option of the same name,
+so a `@session-*` option someone set with `set-option -g` reads as if every session carried it;
+the scripts do not guard against that. Set these keys only on sessions.
+
 The identity (launcher, session-type, cwd, worktree, repo, branch and pane; launcher,
 session-type, cwd and pane for a dir player) is written once when the session is created, in one
 tmux command queue, before anything starts in the pane; the name is only a label. Values are

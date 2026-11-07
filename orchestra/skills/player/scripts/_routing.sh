@@ -282,9 +282,9 @@ tmux_local() {
 # A queue is built with tq_* and run with tq_run as ONE tmux invocation, commands separated by
 # a lone ";" argument. Within it core keys come first, then extensions, then @session-version,
 # whatever order they were added in. tmux stops a queue at the first failing command, so a
-# failure leaves the rest unwritten, the version included. Two tmux argv rules apply to every
-# value: an argument ending in ";" ends the command there (tmux strips it), so such a value
-# carries "\;" instead; and an empty value is an error, so an empty value unsets the key.
+# failure leaves the rest unwritten, the version included. An argument ending in ";" ends the
+# command there (tmux strips it), so such a value carries "\;" instead. An empty value unsets
+# the key: the convention reads empty as absent and allows no sentinels, so none is stored.
 TQ_CORE=(); TQ_EXT=(); TQ_VERSION=(); TQ_ALL=()
 tq_reset() { TQ_CORE=(); TQ_EXT=(); TQ_VERSION=(); }
 _tq_add() {
@@ -344,7 +344,7 @@ session_value_ok() {
 # display-message -F format; RECORD_AWK (with -v at=<first record column>) replaces those
 # RECORD_KEYS columns with the RECORD_COLUMNS below, keeping any columns before and after:
 #   launcher repo session-type branch worktree agent orchestrator orchestrator-config last-report
-#   target launching claude-session ready
+#   target launching claude-session ready pane orchestra-session-type
 # A record is valid when @session-version is 1, agent and launcher are tokens, the launcher is
 # orchestra or n10, and worktree/repo/cwd are absolute when present. A valid record with worktree
 # and repo is a worktree player; one with launcher orchestra, session-type dir and a cwd is a dir
@@ -352,14 +352,16 @@ session_value_ok() {
 # empty session-type, so it is no player. An invalid record, or none, is foreign: every column is
 # empty but the vendor extensions an orchestrator may still have put on it (orchestrator,
 # orchestrator-config, last-report, target), which report.sh needs on an adopted session and
-# which never make a session a player. branch is the launcher's own task-branch extension.
+# which never make a session a player; so is orchestra-session-type, Orchestra's own extension as
+# written, which the launcher needs even before a record is registered. branch is the launcher's
+# own task-branch extension; pane is @session-pane of a valid record.
 # ready is 1 when the record is Orchestra's own, unversioned and otherwise complete, i.e. when
 # session_publish_version may register it.
 RECORD_KEYS=("$KEY_VERSION" "$KEY_AGENT" "$KEY_LAUNCHER" "$KEY_CWD" "$KEY_WORKTREE" "$KEY_REPO"
   "$KEY_SESSION_TYPE" "$KEY_BRANCH" "$KEY_N10_BRANCH"
-  "$KEY_ORCHESTRATOR" "$KEY_ORCH_CONFIG" "$KEY_LAST_REPORT" "$KEY_TARGET" "$KEY_LAUNCHING" "$KEY_CLAUDE_SESSION")
+  "$KEY_ORCHESTRATOR" "$KEY_ORCH_CONFIG" "$KEY_LAST_REPORT" "$KEY_TARGET" "$KEY_LAUNCHING" "$KEY_CLAUDE_SESSION" "$KEY_PANE")
 RECORD_FORMAT="$(k=""; for key in "${RECORD_KEYS[@]}"; do printf '%s#{%s}' "$k" "$key"; k="$TAB"; done)"
-RECORD_COLUMNS=13
+RECORD_COLUMNS=15
 RECORD_AWK='
 function tok(v) { return v ~ /^[a-z][a-z0-9-]*$/ && length(v) <= 64 }
 function abs_or_unset(v) { return v == "" || v ~ /^\// }
@@ -367,24 +369,24 @@ BEGIN { FS = OFS = "\t" }
 {
   i = at
   v = $(i); ag = $(i+1); la = $(i+2); cwd = $(i+3); wt = $(i+4); re = $(i+5); xty = $(i+6); xbr = $(i+7); nbr = $(i+8)
-  orch = $(i+9); conf = $(i+10); last = $(i+11); targ = $(i+12); lnch = $(i+13); csid = $(i+14)
+  orch = $(i+9); conf = $(i+10); last = $(i+11); targ = $(i+12); lnch = $(i+13); csid = $(i+14); pa = $(i+15)
   shaped = tok(ag) && (la == "orchestra" || la == "n10") && abs_or_unset(wt) && abs_or_unset(re) && abs_or_unset(cwd)
   ready = (v == "" && shaped && la == "orchestra" && ((xty == "worktree" && wt != "" && re != "") || (xty == "dir" && cwd != "" && wt == "" && re == ""))) ? 1 : ""
-  s_la = ""; s_rp = ""; s_ty = ""; s_br = ""; s_wt = ""; s_ag = ""; s_ln = ""; s_cs = ""
+  s_la = ""; s_rp = ""; s_ty = ""; s_br = ""; s_wt = ""; s_ag = ""; s_ln = ""; s_cs = ""; s_pa = ""
   if (v == "1" && shaped) {
-    s_la = la; s_ag = ag; s_ln = lnch; s_cs = csid; s_br = (la == "n10" ? nbr : xbr)
+    s_la = la; s_ag = ag; s_ln = lnch; s_cs = csid; s_br = (la == "n10" ? nbr : xbr); s_pa = (pa ~ /^%[0-9]+$/ ? pa : "")
     if (wt != "" && re != "") { s_ty = "worktree"; s_rp = re; s_wt = wt }
     else if (la == "orchestra" && xty == "dir" && cwd != "") { s_ty = "dir"; s_rp = cwd; s_br = "" }
     else s_br = ""
   }
   out = ""
   for (k = 1; k < at; k++) out = out $k OFS
-  out = out s_la OFS s_rp OFS s_ty OFS s_br OFS s_wt OFS s_ag OFS orch OFS conf OFS last OFS targ OFS s_ln OFS s_cs OFS ready
-  for (k = at + 15; k <= NF; k++) out = out OFS $k
+  out = out s_la OFS s_rp OFS s_ty OFS s_br OFS s_wt OFS s_ag OFS orch OFS conf OFS last OFS targ OFS s_ln OFS s_cs OFS ready OFS s_pa OFS xty
+  for (k = at + nkeys; k <= NF; k++) out = out OFS $k
   print out
 }'
 # normalize_records <at>: RECORD_AWK over stdin, the record starting at column <at>; bytes, not characters.
-normalize_records() { LC_ALL=C awk -v at="$1" "$RECORD_AWK"; }
+normalize_records() { LC_ALL=C awk -v at="$1" -v nkeys="${#RECORD_KEYS[@]}" "$RECORD_AWK"; }
 # split_tabs <line>: the tab-separated fields of <line> into the array F, empty fields kept (a
 # whitespace IFS would make `read` collapse the empty fields of unset tags).
 split_tabs() {
@@ -394,18 +396,20 @@ split_tabs() {
 }
 # session_record <socket> <session>: that session's normalized record, from one display-message,
 # into REC_LAUNCHER REC_REPO REC_TYPE REC_BRANCH REC_WORKTREE REC_AGENT REC_ORCHESTRATOR
-# REC_ORCH_CONFIG REC_LAST_REPORT REC_TARGET REC_LAUNCHING REC_CLAUDE_SESSION REC_READY (all
-# empty, and a nonzero status, when the session cannot be read).
+# REC_ORCH_CONFIG REC_LAST_REPORT REC_TARGET REC_LAUNCHING REC_CLAUDE_SESSION REC_READY REC_PANE
+# REC_ORCHESTRA_TYPE (all empty, and a nonzero status, when the session cannot be read).
 session_record() {
   local line
   REC_LAUNCHER=""; REC_REPO=""; REC_TYPE=""; REC_BRANCH=""; REC_WORKTREE=""; REC_AGENT=""; REC_ORCHESTRATOR=""
   REC_ORCH_CONFIG=""; REC_LAST_REPORT=""; REC_TARGET=""; REC_LAUNCHING=""; REC_CLAUDE_SESSION=""; REC_READY=""
+  REC_PANE=""; REC_ORCHESTRA_TYPE=""
   line="$(tmux_on "$1" display-message -p -t "$(tmux_target "$2")" "$RECORD_FORMAT" 2>/dev/null)" || return 1
   line="$(printf '%s\n' "${line%%$nl*}" | normalize_records 1)"
   split_tabs "$line"
   REC_LAUNCHER="${F[0]:-}"; REC_REPO="${F[1]:-}"; REC_TYPE="${F[2]:-}"; REC_BRANCH="${F[3]:-}"; REC_WORKTREE="${F[4]:-}"
   REC_AGENT="${F[5]:-}"; REC_ORCHESTRATOR="${F[6]:-}"; REC_ORCH_CONFIG="${F[7]:-}"; REC_LAST_REPORT="${F[8]:-}"
   REC_TARGET="${F[9]:-}"; REC_LAUNCHING="${F[10]:-}"; REC_CLAUDE_SESSION="${F[11]:-}"; REC_READY="${F[12]:-}"
+  REC_PANE="${F[13]:-}"; REC_ORCHESTRA_TYPE="${F[14]:-}"
 }
 # session_publish_version <socket> <session>: register the session (@session-version, last) when
 # its record is Orchestra's own, unversioned and otherwise complete; leave any other session as it

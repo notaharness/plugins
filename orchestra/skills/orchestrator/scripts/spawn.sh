@@ -112,6 +112,8 @@ case "$ORCH" in
   beam:*) ;;
   *) is_local_machine || { own_peer="$(beam_own_peer_id)" || exit 1; ORCH="beam:$own_peer/$ORCH"; };;
 esac
+# Checked before anything exists, so an unrecordable target or config dir creates nothing.
+orchestrator_recordable "$ORCH" || exit 2
 # The socket the player's session will live on. Locally this is $TMUX's socket (the orchestrator's
 # own pane) or the default per-user path. $TMUX describes only this process's own binding, so it
 # never applies to a remote machine, and neither does a path built here: the target is asked which
@@ -185,7 +187,11 @@ EXISTING=none
 if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
   session_record "$ORCH_SOCK" "$name"      # the record the placeholder marker and the harness come from
-  if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
+  # The agent's pane is the one the record names while it still belongs to this session; a helper
+  # pane split beside it may be the active one that =name: resolves to.
+  agent_pane="$tt"
+  [ -n "$REC_PANE" ] && [ "$(t display-message -p -t "$REC_PANE" '#{session_name}' 2>/dev/null)" = "$name" ] && agent_pane="$REC_PANE"
+  if [ "$(t display-message -p -t "$agent_pane" '#{pane_dead}')" = 1 ]; then EXISTING=dead
   elif [ "$REC_LAUNCHING" = 1 ]; then EXISTING=placeholder
   else EXISTING=running; fi
 fi
@@ -328,7 +334,7 @@ unset TMUX TMUX_PANE
 # pane. The identity tags go on before anything else can observe the session, in one queue; they
 # are written by the creator only, so a resume never rewrites them. The placeholder exists so remain-on-exit is already set when the real command
 # starts and catches startup failures; its pane, which respawn-pane -k keeps, is @session-pane.
-CREATED=0; pane=""
+CREATED=0; LAUNCHED=0; pane=""
 if [ "$EXISTING" = none ]; then
   label="$name"
   while :; do
@@ -348,6 +354,11 @@ if [ "$EXISTING" = none ]; then
   done
   CREATED=1
   tt="$(tmux_target "$name")"
+  # From here until the harness is launched, any exit removes the half-made session: left behind it
+  # would hold the worktree's identity without a version, so nothing could list, kill or reuse it.
+  trap 'if [ "$LAUNCHED" = 0 ] && t has-session -t "=$name" 2>/dev/null; then
+          t kill-session -t "=$name" 2>/dev/null; t delete-buffer -b "${buf:-}" 2>/dev/null
+          echo "spawn.sh: session $name removed; the worktree is kept" >&2; fi' EXIT
   pane="${pane%%$nl*}"
   # The identity, in one queue. A required value the convention cannot carry (a path with a
   # control character, say) would leave a session no reader recognises: refuse it rather than
@@ -365,8 +376,7 @@ if [ "$EXISTING" = none ]; then
   tq_run "$ORCH_SOCK" ||
     { t kill-session -t "=$name" 2>/dev/null; echo "spawn.sh: could not tag session $name; removed" >&2; exit 1; }
 else
-  # An existing session is respawned in the pane =name: resolves to. Before its agent is
-  # replaced, any status a reporter published for the old one is withdrawn.
+  # An existing session is respawned in its agent's pane. Before its agent is replaced, any status a reporter published for the old one is withdrawn.
   tq_reset; tq_unset "$name" "$KEY_STATUS"; tq_unset "$name" "$KEY_STATUS_KIND"; tq_unset "$name" "$KEY_STATUS_AT"
   tq_run "$ORCH_SOCK" || { echo "spawn.sh: could not update the tags of $name; nothing was started" >&2; exit 1; }
 fi
@@ -374,11 +384,13 @@ buf="$(prompt_buffer_name "$name")"
 tag_set "$ORCH_SOCK" "$name" "$KEY_LAUNCHING" 1 || exit 1
 set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
 mark_orchestrator_session
-case "$HARNESS" in
-  auto) ;;
-  *) tag_set "$ORCH_SOCK" "$name" "$KEY_AGENT" "$HARNESS" && session_publish_version "$ORCH_SOCK" "$name" ||
-       echo "spawn.sh: could not record the agent on $name" >&2;;
-esac
+# auto is recorded as claude for now, the harness the launcher tries first (and a dir player's
+# only one); the launcher records codex if it falls back. So a player resumed with no known harness
+# (its session gone after a reboot, say) is registered, listed and reusable while it runs, and
+# after a failed start too.
+agent_now="$HARNESS"; [ "$HARNESS" = auto ] && agent_now=claude
+tag_set "$ORCH_SOCK" "$name" "$KEY_AGENT" "$agent_now" && session_publish_version "$ORCH_SOCK" "$name" ||
+  echo "spawn.sh: could not record the agent on $name" >&2
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on
 # The task body, from stdin. tmux never creates an empty buffer, so a newline is appended
@@ -392,7 +404,7 @@ printf '%s\n' "$PROMPT" | t load-buffer -b "$buf" - || { echo "spawn.sh: tmux co
 path_env=(); is_local_machine && path_env=(-e "PATH=$PATH" -e "HOME=$HOME")
 if is_local_machine; then for v in "${ACCOUNT_VARS[@]}"; do [ -z "${!v:-}" ] || path_env+=(-e "$v=${!v}"); done; fi
 # A session created here is respawned by its pane ID, the pane its record names.
-respawn_target="$tt"; [ $CREATED = 1 ] && [[ "$pane" =~ ^%[0-9]+$ ]] && respawn_target="$pane"
+respawn_target="${agent_pane:-$tt}"; [ $CREATED = 1 ] && [[ "$pane" =~ ^%[0-9]+$ ]] && respawn_target="$pane"
 if ! t respawn-pane -k -t "$respawn_target" -c "$workdir" \
   "${path_env[@]}" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
@@ -408,5 +420,6 @@ if ! t respawn-pane -k -t "$respawn_target" -c "$workdir" \
   fi
   exit 1
 fi
+LAUNCHED=1
 tag_unset "$ORCH_SOCK" "$name" "$KEY_LAUNCHING"
 echo "started   $name"

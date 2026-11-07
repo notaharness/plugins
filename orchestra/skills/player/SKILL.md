@@ -10,7 +10,9 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/report.sh *)
 
 You are a coding player in a dedicated tmux session, git worktree and branch — or, as a dir
 player, in an existing directory with no branch or worktree of your own (a reviewer, or work
-outside any repo). Your session's `@session-x-orchestra-session-type` tag says which: `worktree` or `dir`.
+outside any repo). Your session's tags say which: a dir player has `@session-x-orchestra-session-type`
+`dir` and no `@session-worktree`; a worktree player has `@session-worktree`, whichever tool created
+its session.
 Nobody necessarily watches the pane. Anything a human must know goes through
 the bundled `scripts/report.sh`. Invoke this skill explicitly with the assignment
 supplied by the orchestrator.

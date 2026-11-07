@@ -46,7 +46,9 @@ mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
 model="${ORCHESTRA_MODEL:-}"; effort="${ORCHESTRA_EFFORT:-}"; perm="${ORCHESTRA_PERMISSION_MODE:-}"
 session="${ORCHESTRA_SESSION:?ORCHESTRA_SESSION is required}"; sock="${ORCHESTRA_SOCKET:?ORCHESTRA_SOCKET is required}"
 NO_CONVERSATION='No conversation found to continue'
-session_record "$sock" "$session"; stype="$REC_TYPE"; recorded_claude_session="$REC_CLAUDE_SESSION"
+# The type comes from the record, else from Orchestra's own session-type extension as spawn.sh
+# wrote it: a session whose version was never published is still the dir player it was spawned as.
+session_record "$sock" "$session"; stype="${REC_TYPE:-$REC_ORCHESTRA_TYPE}"; recorded_claude_session="$REC_CLAUDE_SESSION"
 where=worktree; [ "$stype" = "$SESSION_TYPE_DIR" ] && where=directory
 RESTART_NOTE="Your session was restarted in this $where; files and commits are intact, so do not redo finished work."
 
