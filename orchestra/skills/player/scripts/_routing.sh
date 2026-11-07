@@ -2,27 +2,38 @@
 # + coreutils only. Owns the names of the tmux session user options ("tags") and the exact
 # targeting rules; every other script reads the names from here.
 
-# --- Session user options: the contract shared with Kirby ------------------------------------
+# --- Session user options ("tags") -----------------------------------------------------------
 # Every fact about a player session lives on the session itself, as a user option that dies with
-# the session and is readable by anyone who can reach the server: no files. Set with
-# `set-option -t '=name:' @orchestra-agent claude`; read with `show-options -qv` (empty when unset)
-# or as #{@orchestra-agent} in a format. Absent means unset; no sentinels. Values contain no
-# tabs or newlines.
-TAG_SPAWNER=@orchestra-spawner            # kirby | orchestra: whichever program created the session
-TAG_REPO=@orchestra-repo                  # main checkout, absolute and symlink-resolved; a dir player's directory
-TAG_SESSION_TYPE=@orchestra-session-type  # worktree | dir (players) | shell | agent (Kirby's terminal tabs)
-TAG_BRANCH=@orchestra-branch              # worktree sessions only: the branch spawned for, unsanitized (feature/x)
-TAG_WORKTREE_PATH=@orchestra-worktree-path  # worktree sessions only: the checkout, symlink-resolved; the identity
-TAG_ORCHESTRATOR=@orchestra-orchestrator  # reporting target: claude:<uuid> | codex:<uuid> | tmux:<session>
-TAG_ORCH_CONFIG=@orchestra-orchestrator-config    # claude:<uuid> targets only: the orchestrator's Claude config dir
-TAG_AGENT=@orchestra-agent                # claude | codex | gemini | copilot | opencode | custom
-TAG_LAUNCHING=@orchestra-launching        # 1 while the placeholder pane exists; unset once the harness started
-TAG_LAST_REPORT=@orchestra-last-report    # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
-TAG_CLAUDE_SESSION=@orchestra-claude-session  # dir players: the id of the Claude conversation the launcher started
-TAG_TARGET=@orchestra-target              # an orchestrator's OWN session: the claude:/codex: target its players carry
-SESSION_TYPE_WORKTREE=worktree            # a session's name is a label; spawner + session-type say whose it is
+# the session and is readable by anyone who can reach the server: no files. The keys are the
+# shared tmux agent-session convention (github.com/notaharness/tmux-agent-conventions, schema 1):
+# core keys @session-*, and Orchestra's registered extensions @session-x-orchestra-*, which n10
+# reads too. All are local session options. Absent means unset; empty is absent; no sentinels.
+# Values are single-line UTF-8 with no control characters (session_value_ok); readers go through
+# RECORD_AWK, and a session without a valid record is foreign, whatever else it carries.
+SESSION_SCHEMA=1
+KEY_VERSION=@session-version              # 1: written last, and only on a valid record of Orchestra's own
+KEY_AGENT=@session-agent                  # claude | codex | gemini | copilot | opencode | custom: the harness started
+KEY_LAUNCHER=@session-launcher            # orchestra | n10: whichever program created the session
+KEY_PANE=@session-pane                    # %N: the pane the harness runs in (respawn-pane keeps it)
+KEY_CWD=@session-cwd                      # the checkout (worktree player) or the directory (dir player), resolved
+KEY_WORKTREE=@session-worktree            # worktree sessions only: the checkout, symlink-resolved; the identity
+KEY_REPO=@session-repo                    # worktree sessions only: the main checkout, symlink-resolved
+KEY_STATUS=@session-status KEY_STATUS_KIND=@session-status-kind KEY_STATUS_AT=@session-status-at   # not published; withdrawn before a respawn
+# Orchestra's extensions.
+KEY_SESSION_TYPE=@session-x-orchestra-session-type  # worktree | dir
+KEY_BRANCH=@session-x-orchestra-branch    # worktree sessions only: the branch spawned for, unsanitized (feature/x)
+KEY_ORCHESTRATOR=@session-x-orchestra-orchestrator  # reporting target: claude:<uuid> | codex:<uuid> | tmux:<session>, maybe beam:<peer>/…
+KEY_ORCH_CONFIG=@session-x-orchestra-orchestrator-config  # claude:<uuid> targets only: the orchestrator's Claude config dir
+KEY_LAUNCHING=@session-x-orchestra-launching  # 1 while the placeholder pane exists; unset once the harness started
+KEY_LAST_REPORT=@session-x-orchestra-last-report  # "<KIND> <ISO-8601 UTC> <outcome>" of the last report a transport accepted
+KEY_CLAUDE_SESSION=@session-x-orchestra-claude-session  # dir players: the id of the Claude conversation the launcher started
+KEY_TARGET=@session-x-orchestra-target    # an orchestrator's OWN session: the claude:/codex: target its players carry
+KEY_AGENT_PROVISIONAL=@session-x-orchestra-agent-provisional  # 1 while @session-agent is spawn.sh's guess for --resume's auto
+KEY_N10_BRANCH=@session-x-n10-branch      # n10's extension, read only: the task branch of an n10 worktree session
+SESSION_TYPE_WORKTREE=worktree            # a session's name is a label; its record says whose it is
 SESSION_TYPE_DIR=dir                      # a player in an existing directory: no branch, no worktree, maybe no repo
 nl=$'\n'                                  # assigned once: ANSI-C quoting inside ${x:+...} is not portable
+TAB=$'\t'
 
 # Exact tmux targeting. `=name` is exact for has-session, but pane/window commands (send-keys,
 # display-message, respawn-pane, set-option, capture-pane) reject it; `=name:` is exact for all.
@@ -40,7 +51,7 @@ tmux_target() { printf '=%s:' "$1"; }
 # default is to export it. If a user's shell (or the tmux server's captured global environment;
 # see PARENT_SESSION_MARKERS in _lib.sh, which strips it from a spawned player's pane too) leaks
 # it in, ORCH_MACHINE must not pick it up there: the orchestrator's own reporting lookup would
-# silently go over beam instead of asking this machine, and tag_get's "never fails" swallows the
+# silently go over beam instead of asking this machine, and session_record's quiet failure swallows the
 # result into an opaque "orchestrator target is unset or unreachable". report.sh and relay.sh set
 # ORCHESTRA_FORCE_LOCAL=1 before sourcing this file, which pins ORCH_MACHINE to this machine
 # unconditionally — the player and the relay need no machine awareness at all beyond parsing a
@@ -268,10 +279,150 @@ tmux_on() {
 tmux_local() {
   if [ -n "${TMUX:-}" ]; then tmux -u -S "${TMUX%%,*}" "$@"; else tmux -u "$@"; fi
 }
-# tag_get <socket> <session> <tag>: the value, empty when unset or unreachable; never fails.
-tag_get()   { tmux_on "$1" show-options -qv -t "$(tmux_target "$2")" "$3" 2>/dev/null || :; }
-tag_set()   { tmux_on "$1" set-option -t "$(tmux_target "$2")" "$3" "$4"; }
-tag_unset() { tmux_on "$1" set-option -u -t "$(tmux_target "$2")" "$3"; }
+# --- Writing tags: one tmux command queue -----------------------------------------------------
+# A queue is built with tq_* and run with tq_run as ONE tmux invocation, commands separated by
+# a lone ";" argument. Within it core keys come first, then extensions, then @session-version,
+# whatever order they were added in. tmux stops a queue at the first failing command, so a
+# failure leaves the rest unwritten, the version included. An argument ending in ";" ends the
+# command there (tmux strips it), so such a value carries "\;" instead. An empty value unsets
+# the key: the convention reads empty as absent and allows no sentinels, so none is stored.
+TQ_CORE=(); TQ_EXT=(); TQ_VERSION=(); TQ_ALL=()
+tq_reset() { TQ_CORE=(); TQ_EXT=(); TQ_VERSION=(); }
+_tq_add() {
+  local key="$1"; shift
+  case "$key" in
+    "$KEY_VERSION") TQ_VERSION+=(';' "$@");;
+    @session-x-*)   TQ_EXT+=(';' "$@");;
+    *)              TQ_CORE+=(';' "$@");;
+  esac
+}
+tmux_value() { case "$1" in *';') printf '%s\\;' "${1%;}";; *) printf '%s' "$1";; esac; }
+# tq_set <session> <key> <value>: set the key when <value> may be published under it
+# (session_value_ok), else unset it, so an unpublishable value is omitted, never truncated.
+tq_set() {
+  if session_value_ok "$2" "$3"; then _tq_add "$2" set-option -t "$(tmux_target "$1")" "$2" "$(tmux_value "$3")"
+  else tq_unset "$1" "$2"; fi
+}
+tq_unset() { _tq_add "$2" set-option -u -t "$(tmux_target "$1")" "$2"; }
+# tq_build: the queue as one argv, in TQ_ALL (empty when nothing was queued).
+tq_build() {
+  TQ_ALL=(${TQ_CORE[@]+"${TQ_CORE[@]}"} ${TQ_EXT[@]+"${TQ_EXT[@]}"} ${TQ_VERSION[@]+"${TQ_VERSION[@]}"})
+  [ ${#TQ_ALL[@]} -eq 0 ] || TQ_ALL=("${TQ_ALL[@]:1}")          # drop the leading separator
+}
+# tq_run <socket>: run the queue on that server (tmux_on: honours ORCH_MACHINE), then clear it.
+tq_run() {
+  tq_build; tq_reset
+  [ ${#TQ_ALL[@]} -eq 0 ] || tmux_on "$1" "${TQ_ALL[@]}"
+}
+# tag_set <socket> <session> <key> <value>; tag_unset <socket> <session> <key>: one key, one call.
+tag_set()   { tq_reset; tq_set "$2" "$3" "$4"; tq_run "$1"; }
+tag_unset() { tq_reset; tq_unset "$2" "$3"; tq_run "$1"; }
+
+# --- Value encoding ---------------------------------------------------------------------------
+# session_value_ok <key> <value>: may <value> be published under <key>? Every value: valid UTF-8,
+# single line, no C0/C1 control characters, 1–4096 bytes. Agent and launcher: tokens,
+# [a-z][a-z0-9-]{0,63}. Paths (cwd, worktree, repo, the orchestrator's config dir): absolute, no
+# "." or ".." component, no empty component, no trailing "/" except "/" itself. Pane: %<digits>.
+# The 32 KiB total for a record is not checked: Orchestra's values stay far below it. Byte
+# semantics throughout (LC_ALL=C), whatever the caller's locale.
+_SESSION_TEXT_RE=$'^([\x20-\x7e]|\xc2[\xa0-\xbf]|[\xc3-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf])+$'
+session_value_ok() {
+  local key="$1" v="$2" LC_ALL=C
+  [ -n "$v" ] && [ "${#v}" -le 4096 ] && [[ "$v" =~ $_SESSION_TEXT_RE ]] || return 1
+  case "$key" in
+    "$KEY_AGENT"|"$KEY_LAUNCHER") [[ "$v" =~ ^[a-z][a-z0-9-]{0,63}$ ]];;
+    "$KEY_PANE") [[ "$v" =~ ^%[0-9]+$ ]];;
+    "$KEY_CWD"|"$KEY_WORKTREE"|"$KEY_REPO"|"$KEY_ORCH_CONFIG")
+      [ "$v" = / ] && return 0
+      case "$v" in /*) ;; *) return 1;; esac
+      case "$v/" in *//*|*/./*|*/../*) return 1;; esac;;
+    *) return 0;;
+  esac
+}
+
+# --- Reading tags: one normalized record per session --------------------------------------------
+# RECORD_FORMAT lists every key a reader needs, tab-separated, for a list-sessions/list-panes/
+# display-message -F format; RECORD_AWK (with -v at=<first record column>) replaces those
+# RECORD_KEYS columns with the RECORD_COLUMNS below, keeping any columns before and after:
+#   launcher repo session-type branch worktree agent orchestrator orchestrator-config last-report
+#   target launching claude-session ready pane orchestra-session-type agent-provisional
+# A record is valid when @session-version is 1, agent and launcher are tokens, the launcher is
+# orchestra or n10, and worktree/repo/cwd are absolute when present. A valid record with worktree
+# and repo is a worktree player; one with launcher orchestra, session-type dir and a cwd is a dir
+# player (its directory in the repo column); any other valid record (n10's agent tabs) has an
+# empty session-type, so it is no player. An invalid record, or none, is foreign: every column is
+# empty but the vendor extensions an orchestrator may still have put on it (orchestrator,
+# orchestrator-config, last-report, target), which report.sh needs on an adopted session and
+# which never make a session a player; so is orchestra-session-type, Orchestra's own extension as
+# written, which the launcher needs even before a record is registered, and agent-provisional,
+# which says the agent is only spawn.sh's guess (an unknown harness). branch is the launcher's
+# own task-branch extension; pane is @session-pane of a valid record.
+# ready is 1 when the record is Orchestra's own, unversioned and otherwise complete, i.e. when
+# session_publish_version may register it.
+RECORD_KEYS=("$KEY_VERSION" "$KEY_AGENT" "$KEY_LAUNCHER" "$KEY_CWD" "$KEY_WORKTREE" "$KEY_REPO"
+  "$KEY_SESSION_TYPE" "$KEY_BRANCH" "$KEY_N10_BRANCH"
+  "$KEY_ORCHESTRATOR" "$KEY_ORCH_CONFIG" "$KEY_LAST_REPORT" "$KEY_TARGET" "$KEY_LAUNCHING" "$KEY_CLAUDE_SESSION" "$KEY_PANE"
+  "$KEY_AGENT_PROVISIONAL")
+RECORD_FORMAT="$(k=""; for key in "${RECORD_KEYS[@]}"; do printf '%s#{%s}' "$k" "$key"; k="$TAB"; done)"
+RECORD_COLUMNS=16
+RECORD_AWK='
+function tok(v) { return v ~ /^[a-z][a-z0-9-]*$/ && length(v) <= 64 }
+function abs_or_unset(v) { return v == "" || v ~ /^\// }
+BEGIN { FS = OFS = "\t" }
+{
+  i = at
+  v = $(i); ag = $(i+1); la = $(i+2); cwd = $(i+3); wt = $(i+4); re = $(i+5); xty = $(i+6); xbr = $(i+7); nbr = $(i+8)
+  orch = $(i+9); conf = $(i+10); last = $(i+11); targ = $(i+12); lnch = $(i+13); csid = $(i+14); pa = $(i+15); prov = $(i+16)
+  shaped = tok(ag) && (la == "orchestra" || la == "n10") && abs_or_unset(wt) && abs_or_unset(re) && abs_or_unset(cwd)
+  ready = (v == "" && shaped && la == "orchestra" && ((xty == "worktree" && wt != "" && re != "") || (xty == "dir" && cwd != "" && wt == "" && re == ""))) ? 1 : ""
+  s_la = ""; s_rp = ""; s_ty = ""; s_br = ""; s_wt = ""; s_ag = ""; s_ln = ""; s_cs = ""; s_pa = ""
+  if (v == "1" && shaped) {
+    s_la = la; s_ag = ag; s_ln = lnch; s_cs = csid; s_br = (la == "n10" ? nbr : xbr); s_pa = (pa ~ /^%[0-9]+$/ ? pa : "")
+    if (wt != "" && re != "") { s_ty = "worktree"; s_rp = re; s_wt = wt }
+    else if (la == "orchestra" && xty == "dir" && cwd != "") { s_ty = "dir"; s_rp = cwd; s_br = "" }
+    else s_br = ""
+  }
+  out = ""
+  for (k = 1; k < at; k++) out = out $k OFS
+  out = out s_la OFS s_rp OFS s_ty OFS s_br OFS s_wt OFS s_ag OFS orch OFS conf OFS last OFS targ OFS s_ln OFS s_cs OFS ready OFS s_pa OFS xty OFS prov
+  for (k = at + nkeys; k <= NF; k++) out = out OFS $k
+  print out
+}'
+# normalize_records <at>: RECORD_AWK over stdin, the record starting at column <at>; bytes, not characters.
+normalize_records() { LC_ALL=C awk -v at="$1" -v nkeys="${#RECORD_KEYS[@]}" "$RECORD_AWK"; }
+# split_tabs <line>: the tab-separated fields of <line> into the array F, empty fields kept (a
+# whitespace IFS would make `read` collapse the empty fields of unset tags).
+split_tabs() {
+  local line="$1"; F=()
+  while case "$line" in *"$TAB"*) true;; *) false;; esac; do F+=("${line%%"$TAB"*}"); line="${line#*"$TAB"}"; done
+  F+=("$line")
+}
+# session_record <socket> <session>: that session's normalized record, from one display-message,
+# into REC_LAUNCHER REC_REPO REC_TYPE REC_BRANCH REC_WORKTREE REC_AGENT REC_ORCHESTRATOR
+# REC_ORCH_CONFIG REC_LAST_REPORT REC_TARGET REC_LAUNCHING REC_CLAUDE_SESSION REC_READY REC_PANE
+# REC_ORCHESTRA_TYPE REC_AGENT_PROVISIONAL (all empty, and a nonzero status, when the session cannot be read).
+session_record() {
+  local line
+  REC_LAUNCHER=""; REC_REPO=""; REC_TYPE=""; REC_BRANCH=""; REC_WORKTREE=""; REC_AGENT=""; REC_ORCHESTRATOR=""
+  REC_ORCH_CONFIG=""; REC_LAST_REPORT=""; REC_TARGET=""; REC_LAUNCHING=""; REC_CLAUDE_SESSION=""; REC_READY=""
+  REC_PANE=""; REC_ORCHESTRA_TYPE=""; REC_AGENT_PROVISIONAL=""
+  line="$(tmux_on "$1" display-message -p -t "$(tmux_target "$2")" "$RECORD_FORMAT" 2>/dev/null)" || return 1
+  line="$(printf '%s\n' "${line%%$nl*}" | normalize_records 1)"
+  split_tabs "$line"
+  REC_LAUNCHER="${F[0]:-}"; REC_REPO="${F[1]:-}"; REC_TYPE="${F[2]:-}"; REC_BRANCH="${F[3]:-}"; REC_WORKTREE="${F[4]:-}"
+  REC_AGENT="${F[5]:-}"; REC_ORCHESTRATOR="${F[6]:-}"; REC_ORCH_CONFIG="${F[7]:-}"; REC_LAST_REPORT="${F[8]:-}"
+  REC_TARGET="${F[9]:-}"; REC_LAUNCHING="${F[10]:-}"; REC_CLAUDE_SESSION="${F[11]:-}"; REC_READY="${F[12]:-}"
+  REC_PANE="${F[13]:-}"; REC_ORCHESTRA_TYPE="${F[14]:-}"; REC_AGENT_PROVISIONAL="${F[15]:-}"
+}
+# session_publish_version <socket> <session>: register the session (@session-version, last) when
+# its record is Orchestra's own, unversioned and otherwise complete; leave any other session as it
+# is, so Orchestra never publishes a version on another tool's record. Fails only when the
+# session cannot be read or the write fails.
+session_publish_version() {
+  session_record "$1" "$2" || return 1
+  [ "$REC_READY" = 1 ] || return 0
+  tag_set "$1" "$2" "$KEY_VERSION" "$SESSION_SCHEMA"
+}
 
 # player_session_context: the player's own session name and the socket of the server holding it,
 # into player_session and player_socket (lowercase: not environment). spawn.sh injects

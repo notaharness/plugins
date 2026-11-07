@@ -5,21 +5,21 @@
 # Usage: report.sh PROGRESS|QUESTION|BLOCKED|DONE <text…>
 #        report.sh --orchestrator          print the current reporting target
 #
-# The target is the @orchestra-orchestrator tag on this player's own tmux session, set by
-# spawn.sh and adopt.sh; a player cannot change it. claude:<session-id>, codex:<thread-id> or
+# The target is the @session-x-orchestra-orchestrator tag on this player's own tmux session, set
+# by spawn.sh and adopt.sh; a player cannot change it. claude:<session-id>, codex:<thread-id> or
 # tmux:<session> when the orchestrator is on this machine; beam:<orchestrator peerId>/<one of
 # those> when it is on another one, in which case delivery goes through `beam msg send` (see
 # beam/docs/05-mailbox.md). A claude: target gets the report on that session's inbox socket, found
-# in Claude's registry under the config dir in @orchestra-orchestrator-config (else
+# in Claude's registry under the config dir in @session-x-orchestra-orchestrator-config (else
 # $CLAUDE_CONFIG_DIR, else ~/.claude), and is never pasted anywhere. A tmux target running Claude
 # Code gets it on its inbox socket too (third field "inbox"); any other agent gets it pasted into
 # its pane ("paste"). The session and the socket of the server
 # holding it come from ORCHESTRA_SESSION and ORCHESTRA_SOCKET (injected by spawn.sh; the pane's own
 # tmux environment points at a scratch server, so every local call here passes -S), or from TMUX
-# in a pane spawn.sh did not start (a Kirby session adopted by adopt.sh). No file is read or
+# in a pane spawn.sh did not start (an n10 session adopted by adopt.sh). No file is read or
 # written. Delivery is reported only when the transport accepted the message; then
-# @orchestra-last-report is set to "<KIND> <ISO-8601 UTC> <outcome>" (a parser that reads only
-# the first two whitespace-separated fields still gets KIND and the timestamp). A beam send that
+# @session-x-orchestra-last-report is set to "<KIND> <ISO-8601 UTC> <outcome>" (a parser that
+# reads only the first two whitespace-separated fields still gets KIND and the timestamp). A beam send that
 # comes back "stored" is still success — the message is on disk and beam keeps delivering it —
 # and is worded to say so plainly, because the reader is a coding agent that would otherwise
 # conclude the report was lost. Failed delivery (a local target gone or unreachable, or beam's
@@ -28,15 +28,15 @@
 set -eu
 # A player always acts on its own machine: ORCHESTRA_FORCE_LOCAL pins ORCH_MACHINE to this
 # machine regardless of any --machine/$ORCHESTRA_MACHINE this process happens to inherit (see
-# _routing.sh) — report.sh's own @orchestra-orchestrator lookup must never go over beam.
+# _routing.sh) — report.sh's own orchestrator lookup must never go over beam.
 ORCHESTRA_FORCE_LOCAL=1
 . "$(dirname "$(realpath "$0")")/_routing.sh"
 player_session_context || { player_session=""; player_socket=""; }
 session="$player_session"; sock="$player_socket"; name="${session:-$(basename "$(pwd)")}"
 if [ "${1:-}" = "--orchestrator" ]; then
-  [ $# -eq 1 ] || { echo 'report.sh: the reporting target is the @orchestra-orchestrator tag on this session, set by spawn.sh and adopt.sh; a player cannot rebind itself' >&2; exit 2; }
+  [ $# -eq 1 ] || { echo 'report.sh: the reporting target is the @session-x-orchestra-orchestrator tag on this session, set by spawn.sh and adopt.sh; a player cannot rebind itself' >&2; exit 2; }
   [ -n "$session" ] || { echo 'report.sh: neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane' >&2; exit 2; }
-  target="$(tag_get "$sock" "$session" "$TAG_ORCHESTRATOR")"; printf '%s\n' "${target:-<unset>}"; exit
+  session_record "$sock" "$session" || :; printf '%s\n' "${REC_ORCHESTRATOR:-<unset>}"; exit
 fi
 [ $# -ge 2 ] || { sed -n '2,27p' "$0" >&2; exit 2; }
 kind="$1"; shift
@@ -50,13 +50,14 @@ delivery_failed() {
   exit 1
 }
 delivered() {
-  tag_set "$sock" "$session" "$TAG_LAST_REPORT" "$kind $(date -u +%Y-%m-%dT%H:%M:%SZ) $1" 2>/dev/null ||
-    echo "report.sh: delivered, but could not set $TAG_LAST_REPORT on $session" >&2
+  tag_set "$sock" "$session" "$KEY_LAST_REPORT" "$kind $(date -u +%Y-%m-%dT%H:%M:%SZ) $1" 2>/dev/null ||
+    echo "report.sh: delivered, but could not set $KEY_LAST_REPORT on $session" >&2
 }
 [ -n "$session" ] || delivery_failed 'neither ORCHESTRA_SESSION nor TMUX names a player session; not running in a player pane'
-destination="$(tag_get "$sock" "$session" "$TAG_ORCHESTRATOR")"
+session_record "$sock" "$session" || :
+destination="$REC_ORCHESTRATOR"
 # No fallback to CODEX_THREAD_ID: that is the player's own conversation, not its parent.
-[ -n "$destination" ] || delivery_failed "orchestrator target is unset or unreachable ($TAG_ORCHESTRATOR on $session)"
+[ -n "$destination" ] || delivery_failed "orchestrator target is unset or unreachable ($KEY_ORCHESTRATOR on $session)"
 normalize_target "$destination" >/dev/null 2>&1 || delivery_failed 'invalid orchestrator target'
 target="$destination"
 case "$target" in
@@ -64,7 +65,7 @@ case "$target" in
     deliver_to_local_target "$sock" "$target" "$msg" || delivery_failed "$DELIVER_REASON"
     delivered delivered; echo "queued for $target"; exit 0;;
   claude:*|tmux:*)
-    deliver_to_local_target "$sock" "$target" "$msg" "$(tag_get "$sock" "$session" "$TAG_ORCH_CONFIG")" ||
+    deliver_to_local_target "$sock" "$target" "$msg" "$REC_ORCH_CONFIG" ||
       delivery_failed "$DELIVER_REASON"
     delivered "$DELIVER_ROUTE"; echo "sent to ${target#*:} ($DELIVER_ROUTE)"; exit 0;;
   beam:*)

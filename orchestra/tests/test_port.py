@@ -29,9 +29,13 @@ UUID = '0199a000-1111-7000-8000-000000000042'
 PEER = '1234567890abcdef1234567890abcdef'
 RESTART = 'Your session was restarted in this worktree'
 STAMP = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ'
-TAGS = ['@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path', '@orchestra-orchestrator',
-        '@orchestra-agent', '@orchestra-launching', '@orchestra-last-report', '@orchestra-orchestrator-config',
-        '@orchestra-claude-session', '@orchestra-target']
+# Every @session-* key the scripts name: the convention's core keys Orchestra writes (the status
+# keys only to withdraw them), its own extensions, and n10's branch extension, which it reads.
+TAGS = ['@session-version', '@session-agent', '@session-launcher', '@session-pane', '@session-cwd', '@session-worktree', '@session-repo',
+        '@session-status', '@session-status-kind', '@session-status-at',
+        '@session-x-orchestra-session-type', '@session-x-orchestra-branch', '@session-x-orchestra-orchestrator',
+        '@session-x-orchestra-orchestrator-config', '@session-x-orchestra-launching', '@session-x-orchestra-last-report',
+        '@session-x-orchestra-claude-session', '@session-x-orchestra-target', '@session-x-orchestra-agent-provisional', '@session-x-n10-branch']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -57,11 +61,33 @@ TMUX_MOCK = r'''#!/usr/bin/env python3
 import os, sys, json, re, hashlib, subprocess
 from pathlib import Path
 b = Path(os.environ['ORCH_TEST_TMP']); a = sys.argv[1:]
-with (b/'tmux-log').open('a') as f: f.write(json.dumps(a)+'\n')
-sock = None
+queued = os.environ.pop('ORCH_TEST_TMUX_QUEUED', None)        # one command of a queue already split below
+if not queued:
+    with (b/'tmux-log').open('a') as f: f.write(json.dumps(a)+'\n')
+sock = None; prefix = []
 while a[:1] in (['-u'], ['-S']):                                          # -u: UTF-8 output; -S: server socket
-    if a[0] == '-u': a = a[1:]
-    else: sock, a = a[1], a[2:]
+    if a[0] == '-u': prefix, a = prefix + a[:1], a[1:]
+    else: sock, prefix, a = a[1], prefix + a[:2], a[2:]
+# A command queue, as tmux parses argv: an argument ending in ";" ends a command there (a lone ";"
+# is just the separator), unless it ends in "\;", which is a literal ";". Each command runs in turn
+# against the same server and the queue stops at the first one that fails, as in tmux.
+cmds, cur = [], []
+for x in ([] if queued else a):
+    if x.endswith(';'):
+        x = x[:-1]
+        if x.endswith('\\'): cur.append(x[:-1] + ';'); continue
+        if x: cur.append(x)
+        cmds.append(cur); cur = []
+    else: cur.append(x)
+if cur: cmds.append(cur)
+cmds = [a] if queued else [c for c in cmds if c]
+if len(cmds) > 1:
+    if sum(len(x)+1 for x in sys.argv) > 16384: sys.stderr.write('command too long\n'); sys.exit(1)
+    for c in cmds:
+        rc = subprocess.call([sys.argv[0], *prefix, *c], env=dict(os.environ, ORCH_TEST_TMUX_QUEUED='1'))
+        if rc: sys.exit(rc)
+    sys.exit(0)
+if cmds: a = cmds[0]
 # The socket IS the server: sessions, options and buffers belong to one socket path, and two
 # different -S paths are two different servers, as they would be on a real host. No -S means the
 # socket tmux itself picks ($TMUX_TMPDIR else /tmp, tmux(1) -L), which is the same server an
@@ -85,12 +111,18 @@ def target(i):
         name = t[1:].rstrip(':')
         if name in state: return name
         sys.stderr.write("can't find session: %s\n" % t); sys.exit(1)
+    if t.startswith('%'):                                                 # a pane ID is exact too
+        for name, s in state.items():
+            if s.get('pane') == t: return name
+        sys.stderr.write("can't find pane: %s\n" % t); sys.exit(1)
     sys.stderr.write('mock tmux: non-exact target %s\n' % t); sys.exit(3)   # prefix matching is a bug
 def buffer_name(): return a[a.index('-b')+1]
 def create(n, path):
-    state[n] = {'dead': 0, 'options': {}, 'path': path, 'created': 1 + max([s.get('created', 0) for s in state.values()] + [0])}
+    seq = 1 + max([s.get('created', 0) for s in state.values()] + [0])
+    state[n] = {'dead': 0, 'options': {}, 'path': path, 'created': seq, 'pane': '%%%d' % (seq + 40), 'id': '$%d' % seq}
 def expand(fmt, n, s):
     vals = {'session_name': n, 'session_created': str(s.get('created', 0)), 'session_path': s.get('path', ''),
+            'pane_id': s.get('pane', ''), 'session_id': s.get('id', ''),
             'pane_dead': str(s.get('dead', 1)), 'pane_current_command': os.environ.get('TEST_PANE_COMMAND', 'bash'), 'window_activity': '0',
             'pane_current_path': s.get('path', ''), 'pane_title': os.environ.get('TEST_PANE_TITLE', '')}
     return re.sub(r'#\{([^}]+)\}', lambda m: s['options'].get(m.group(1), '') if m.group(1).startswith('@') else vals.get(m.group(1), ''), fmt)
@@ -111,7 +143,9 @@ if c == 'new-session':
     if n in os.environ.get('TEST_NEW_SESSION_RACE', '').split(',') and n not in state: create(n, '/elsewhere'); save()
     if n in state: sys.stderr.write('duplicate session: %s\n' % n); sys.exit(1)
     if '-d' not in a: sys.stderr.write('open terminal failed: not a terminal\n'); sys.exit(1)
-    create(n, a[a.index('-c')+1] if '-c' in a else ''); save(); sys.exit(0)
+    create(n, a[a.index('-c')+1] if '-c' in a else ''); save()
+    if '-P' in a: print(expand(a[a.index('-F')+1] if '-F' in a else '#{session_name}:', n, state[n]))
+    sys.exit(0)
 if c == 'kill-session':
     n = target(a.index('-t')+1)
     if os.environ.get('TEST_KILL_FAIL'): sys.stderr.write('mock tmux: kill-session refused\n'); sys.exit(1)
@@ -119,9 +153,10 @@ if c == 'kill-session':
 if c == 'kill-server': state.clear(); buffers.clear(); save(); sys.exit(0)
 if c == 'display-message':
     n = target(a.index('-t')+1) if '-t' in a else None; key = a[-1]; s = state.get(n, {})
-    print({'#S': os.environ.get('TEST_TMUX_SESSION', 'parent'), '#{pane_dead}': str(s.get('dead', 1)), '#{pane_current_path}': s.get('path', ''),
-           '#{socket_path}': sock, '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
-           '#{pane_pid}': os.environ.get('TEST_PANE_PID', str(os.getpid()))}.get(key, '')); sys.exit(0)
+    known = {'#S': os.environ.get('TEST_TMUX_SESSION', 'parent'), '#{pane_dead}': str(s.get('dead', 1)), '#{pane_current_path}': s.get('path', ''),
+             '#{socket_path}': sock, '#{pane_current_command}': os.environ.get('TEST_PANE_COMMAND', 'claude'),
+             '#{pane_pid}': os.environ.get('TEST_PANE_PID', str(os.getpid()))}
+    print(known[key] if key in known else expand(key, n, s) if n else ''); sys.exit(0)
 if c == 'show-options':
     # Session user option: `show-options -qv -t =name: @tag`. Without -q an unset option is an error.
     n = target(a.index('-t')+1); v = state[n]['options'].get(a[-1])
@@ -334,6 +369,10 @@ class PortTests(unittest.TestCase):
                         ORCH_TEST_DEFAULT_SOCK='/tmp/tmux-%d/default' % os.getuid())
         self.git_init(self.repo)
         self.stub('tmux', TMUX_MOCK); self.stub('codex', CLI_MOCK); self.stub('claude', CLI_MOCK)
+        # A beam installed on the machine running the tests must not answer for the fake machines
+        # here (sessions.sh --all would list its real peers): by default beam is a stub that fails
+        # every command, which tests that need beam replace with BEAM_MOCK.
+        self.stub('beam', '#!/bin/sh\necho "beam: not available in this test" >&2\nexit 1\n')
         self.wt = self.repo/'.claude/worktrees/feature-test'
         self.session = 'repo-feature-test'                     # sanitize(basename(repo)) + "-" + sanitize(branch)
         self.sock = '/tmp/tmux-%d/default' % os.getuid()      # spawn.sh's default server when TMUX is unset
@@ -386,6 +425,22 @@ class PortTests(unittest.TestCase):
         f = self.base/'tmux-log'
         return f.read_text() if f.exists() else ''
     def tmux_calls(self): return [json.loads(l) for l in self.tmux_log().splitlines()]
+    # Each tmux call is a command queue: its commands, without the -u/-S prefix, split the way
+    # tmux splits argv (an element ending in ";" ends a command; "\\;" is a literal ";").
+    @staticmethod
+    def queue(call):
+        i = 0
+        while call[i:i+1] in (['-u'], ['-S']): i += 1 if call[i] == '-u' else 2
+        cmds, cur = [], []
+        for x in call[i:]:
+            if x.endswith(';') and not x.endswith('\\;'):
+                if x[:-1]: cur.append(x[:-1])
+                cmds.append(cur); cur = []
+            else: cur.append(x[:-2] + ';' if x.endswith('\\;') else x)
+        if cur: cmds.append(cur)
+        return [c for c in cmds if c]
+    def tmux_commands(self): return [c for call in self.tmux_calls() for c in self.queue(call)]
+    def pane(self, session=None, sock=None): return self.state(sock)[session or self.session]['pane']
     def clear_log(self): (self.base/'tmux-log').unlink()
     def beam_calls(self):
         f = self.base/'beam-log'
@@ -423,9 +478,11 @@ class PortTests(unittest.TestCase):
         return json.loads(f.read_text()) if f.exists() else {}
     def tag(self, name, session=None, sock=None): return self.state(sock)[session or self.session]['options'].get(name)
     def last_report(self, sock=None):
-        v = self.tag('@orchestra-last-report', sock=sock); self.assertIsNotNone(v, '@orchestra-last-report is unset'); return v
+        v = self.tag('@session-x-orchestra-last-report', sock=sock); self.assertIsNotNone(v, '@session-x-orchestra-last-report is unset'); return v
     def set_state(self, s, sock=None): self.state_file(sock).write_text(json.dumps(s))
     def drop_tag(self, name): self.drop_tag_of(self.session, name)
+    def set_tag(self, name, value, session=None):        # a value no resumable harness has, say
+        s = self.state(); s[session or self.session]['options'][name] = value; self.set_state(s)
     def drop_tag_of(self, session, name):
         s = self.state(); s[session]['options'].pop(name, None); self.set_state(s)
     def rename(self, old, new, sock=None):
@@ -437,10 +494,14 @@ class PortTests(unittest.TestCase):
         pre = [] if sock is None else ['-S', sock]
         self.run_cmd(['tmux', *pre, 'new-session', '-d', '-s', name])
         for k, v in (tags or {}).items(): self.run_cmd(['tmux', *pre, 'set-option', '-t', '='+name+':', k, v])
-    def player_tags(self, repo=None, branch='feature/test', spawner='kirby'):
-        root = (repo or self.repo).resolve()
-        return {'@orchestra-spawner': spawner, '@orchestra-repo': str(root), '@orchestra-session-type': 'worktree', '@orchestra-branch': branch,
-                '@orchestra-worktree-path': str(root/'.claude/worktrees'/branch.replace('/', '-'))}
+    # A worktree session's record as its launcher writes it (n10 by default), version last.
+    def player_tags(self, repo=None, branch='feature/test', launcher='n10', agent='claude'):
+        root = (repo or self.repo).resolve(); wt = str(root/'.claude/worktrees'/branch.replace('/', '-'))
+        return {'@session-agent': agent, '@session-launcher': launcher, '@session-pane': '%7', '@session-repo': str(root),
+                '@session-worktree': wt, '@session-cwd': wt, '@session-x-%s-branch' % launcher: branch,
+                '@session-x-%s-session-type' % launcher: 'worktree', '@session-version': '1'}
+    # An n10 terminal tab running a shell: vendor data only, no record.
+    def shell_tab_tags(self, d=None): return {'@session-x-n10-session-type': 'shell', '@session-x-n10-dir': str(d or self.repo.resolve())}
     def sessions(self, *args): return json.loads(self.orch('sessions.sh', '--json', *args).stdout)
     # Environment of a process inside the player's pane: what spawn.sh injects through respawn-pane -e.
     def player_env(self, **extra):
@@ -471,16 +532,18 @@ class PortTests(unittest.TestCase):
         self.assertNotIn('ORCHESTRA_PLAYER', c['env']); self.assertEqual(c['env']['ORCHESTRA_MODE'], 'fresh'); self.assertEqual(c['env']['ORCHESTRA_HARNESS'], 'codex')
         self.assertEqual(c['env']['TMUX_TMPDIR'], '/tmp/orchestra-agent-tmux'); self.assertIsNone(c['env']['TMUX'])
         self.assertEqual(self.state()[self.session]['options'], {
-            'status': 'off', 'remain-on-exit': 'on', '@orchestra-agent': 'codex', '@orchestra-spawner': 'orchestra', '@orchestra-session-type': 'worktree',
-            '@orchestra-repo': str(self.repo.resolve()), '@orchestra-branch': 'feature/test', '@orchestra-worktree-path': str(self.wt.resolve()),
-            '@orchestra-orchestrator': 'codex:'+ID})
+            'status': 'off', 'remain-on-exit': 'on', '@session-version': '1', '@session-agent': 'codex', '@session-launcher': 'orchestra', '@session-pane': self.pane(),
+            '@session-repo': str(self.repo.resolve()), '@session-worktree': str(self.wt.resolve()), '@session-cwd': str(self.wt.resolve()),
+            '@session-x-orchestra-session-type': 'worktree', '@session-x-orchestra-branch': 'feature/test',
+            '@session-x-orchestra-orchestrator': 'codex:'+ID})
+        self.assertRegex(self.pane(), r'^%\d+$')
         self.assertEqual(self.buffers(), {})            # the prompt buffer was consumed by the launcher
         self.assertIn('"orchestra-prompt-%s"' % self.session, self.tmux_log())
         self.assert_no_state_files()
     def test_claude_fable_and_explicit_tmux(self):
         self.spawn('--agent', 'claude', '--model', 'fable', '--orchestrator', 'tmux:parent')
         c = self.calls()[-1]; self.assertEqual(c['args'][:4], ['--model', 'fable', '--effort', 'high'])
-        self.assertTrue(c['args'][-1].startswith(INV+' Task with')); self.assertEqual(self.tag('@orchestra-orchestrator'), 'tmux:parent')
+        self.assertTrue(c['args'][-1].startswith(INV+' Task with')); self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'tmux:parent')
     def test_standalone_claude_override_spawn_resume_and_adopt(self):
         self.env['ORCHESTRA_CLAUDE_SKILL'] = '/player'
         self.spawn('--agent', 'claude')
@@ -531,7 +594,7 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'xhigh'); self.assertEqual(self.calls()[-1]['args'][3], 'model_reasoning_effort="xhigh"')
     def test_custom_harness_tag(self):
         self.spawn('--cmd', 'claude "$PROMPT"'); c = self.calls()[-1]
-        self.assertTrue(c['args'][-1].startswith(INV+' Task with')); self.assertEqual(self.tag('@orchestra-agent'), 'custom')
+        self.assertTrue(c['args'][-1].startswith(INV+' Task with')); self.assertEqual(self.tag('@session-agent'), 'custom')
     def test_env_markers_stripped_config_kept(self):
         self.env.update(CLAUDECODE='1', CLAUDE_CODE_CHILD_SESSION='1', ANTHROPIC_API_KEY='secret', TMUX='')
         self.spawn('--agent', 'claude', '--orchestrator', 'tmux:parent'); e = self.calls()[-1]['env']
@@ -593,8 +656,9 @@ class PortTests(unittest.TestCase):
         self.assertRegex(x.stdout, r'(?m)^started +notes-dir$'); self.assertEqual(c['cwd'], real); self.assertEqual(c['env']['ORCHESTRA_SESSION'], 'notes-dir')
         self.assertTrue(c['args'][-1].startswith('$player Tidy $(touch BAD) up')); self.assertFalse((d/'BAD').exists())
         self.assertEqual(self.state()['notes-dir']['options'], {
-            'status': 'off', 'remain-on-exit': 'on', '@orchestra-agent': 'codex', '@orchestra-spawner': 'orchestra',
-            '@orchestra-session-type': 'dir', '@orchestra-repo': real, '@orchestra-orchestrator': 'codex:'+ID})
+            'status': 'off', 'remain-on-exit': 'on', '@session-version': '1', '@session-agent': 'codex', '@session-launcher': 'orchestra',
+            '@session-pane': self.pane('notes-dir'), '@session-cwd': real, '@session-x-orchestra-session-type': 'dir',
+            '@session-x-orchestra-orchestrator': 'codex:'+ID})
         self.assertEqual(sorted(p.name for p in d.iterdir()), [])      # no worktree, no .claude, nothing written there
         s = self.state(); s['notes-dir']['dead'] = 0; self.set_state(s)
         self.assertIn('running: notes-dir', self.dir_spawn(d, ok=False).stderr)
@@ -608,7 +672,7 @@ class PortTests(unittest.TestCase):
         self.env['TEST_PANE_ALIVE'] = '1'
         self.spawn('--agent', 'codex')                                    # a worktree player, and a reviewer in its worktree
         self.dir_spawn(self.wt, '--agent', 'codex'); rev = 'feature-test-dir'
-        self.assertEqual(self.tag('@orchestra-session-type', rev), 'dir'); self.assertIsNone(self.tag('@orchestra-branch', rev)); self.assertIsNone(self.tag('@orchestra-worktree-path', rev))
+        self.assertEqual(self.tag('@session-x-orchestra-session-type', rev), 'dir'); self.assertIsNone(self.tag('@session-x-orchestra-branch', rev)); self.assertIsNone(self.tag('@session-worktree', rev))
         self.dir_spawn(self.repo, '--agent', 'codex', prompt='review')     # one at the repo root
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], 'repo-dir')
         rows = {r['session']: r for r in self.sessions('--all')}
@@ -620,10 +684,10 @@ class PortTests(unittest.TestCase):
         self.assertIn('"=%s:"' % self.session, self.tmux_log()); self.assertNotIn('"=%s:"' % rev, self.tmux_log())
         self.report('PROGRESS', 'reviewed', env=self.player_env(ORCHESTRA_SESSION=rev), cwd=self.base)
         self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player %s] PROGRESS: reviewed' % rev])
-        self.assertRegex(self.tag('@orchestra-last-report', rev), '^PROGRESS '+STAMP+' delivered$')
+        self.assertRegex(self.tag('@session-x-orchestra-last-report', rev), '^PROGRESS '+STAMP+' delivered$')
         for args in (('send.sh', rev, 'hi'), ('screen.sh', rev), ('adopt.sh', rev, '--orchestrator', 'tmux:new-parent')):
             self.clear_log(); self.orch(*args, cwd=self.base); self.assertIn('"=%s:"' % rev, self.tmux_log(), args)
-        self.assertEqual(self.tag('@orchestra-orchestrator', rev), 'tmux:new-parent')
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator', rev), 'tmux:new-parent')
         self.assertIn('running: %s' % rev, self.dir_spawn(self.wt, ok=False).stderr)                           # found by its tags
         self.assertIn('running: %s' % self.session, self.spawn(ok=False).stderr)
         self.orch('kill.sh', rev, cwd=self.base); self.assertEqual(sorted(self.state()), sorted([self.session, 'repo-dir']))
@@ -637,14 +701,14 @@ class PortTests(unittest.TestCase):
     def test_dir_player_resume_continues_its_own_claude_conversation(self):
         d = self.notes_dir(); real = str(d.resolve())
         self.dir_spawn(d, '--agent', 'claude'); c = self.calls()[-1]
-        pin = self.tag('@orchestra-claude-session', 'notes-dir'); self.assertRegex(pin or '', r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+        pin = self.tag('@session-x-orchestra-claude-session', 'notes-dir'); self.assertRegex(pin or '', r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
         self.assertEqual(c['args'][:2], ['--session-id', pin]); self.assertTrue(c['args'][-1].startswith(INV+' Tidy'))
         self.dir_spawn(d, '--resume', prompt=False); c = self.calls()[-1]
         self.assertEqual(c['args'][:2], ['--resume', pin]); self.assertNotIn('--continue', c['args'])       # never "the newest conversation here"
         self.assertTrue(c['args'][-1].startswith(INV+' Your session was restarted in this directory;'), c['args'][-1])
-        self.assertEqual(self.tag('@orchestra-claude-session', 'notes-dir'), pin)
+        self.assertEqual(self.tag('@session-x-orchestra-claude-session', 'notes-dir'), pin)
         # A dead pane whose record is gone (dropped here by hand) refuses in the launcher, pane kept.
-        self.drop_tag_of('notes-dir', '@orchestra-claude-session'); n = len(self.calls()); self.dir_spawn(d, '--resume', prompt=False)
+        self.drop_tag_of('notes-dir', '@session-x-orchestra-claude-session'); n = len(self.calls()); self.dir_spawn(d, '--resume', prompt=False)
         self.assertEqual(self.calls()[n:], []); self.assertEqual((self.state()['notes-dir']['dead'], self.state()['notes-dir']['status']), (1, 1))
         # kill.sh ends the session and the record of its conversation: a later Claude or auto --resume
         # refuses before creating anything, as a worktree resume does without its worktree.
@@ -656,9 +720,9 @@ class PortTests(unittest.TestCase):
         # Codex: the newest conversation recorded for that directory, even once the session is gone
         self.dir_spawn(d, '--agent', 'codex'); self.orch('kill.sh', 'notes-dir', cwd=self.base); self.rollout(real)
         self.dir_spawn(d, '--resume', '--agent', 'codex', prompt=False); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
-        self.assertEqual(self.tag('@orchestra-session-type', 'notes-dir'), 'dir')
+        self.assertEqual(self.tag('@session-x-orchestra-session-type', 'notes-dir'), 'dir')
     def test_dir_player_warns_when_its_claude_conversation_cannot_be_recorded(self):
-        self.env['TEST_SET_OPTION_FAIL'] = '@orchestra-claude-session'
+        self.env['TEST_SET_OPTION_FAIL'] = '@session-x-orchestra-claude-session'
         x = self.dir_spawn(self.notes_dir(), '--agent', 'claude')
         self.assertNotIn('--session-id', self.calls()[-1]['args']); self.assertIn('cannot be resumed', x.stderr)
 
@@ -674,11 +738,11 @@ class PortTests(unittest.TestCase):
         x = self.spawn('--agent', 'codex'); c = self.calls()[-1]
         self.assertEqual(c['env']['ORCHESTRA_SESSION'], self.session+'-2'); self.assertRegex(x.stdout, r'(?m)^started +repo-feature-test-2$')
         self.assertEqual(self.state()[self.session]['options'], {})      # never tagged, never touched
-        self.assertEqual(self.tag('@orchestra-branch', self.session+'-2'), 'feature/test')
+        self.assertEqual(self.tag('@session-x-orchestra-branch', self.session+'-2'), 'feature/test')
         self.assertIn('running', self.spawn(ok=False).stderr)            # the player exists: found by tags, not by name
         self.spawn('--prompt', 'p', prompt=False, branch='feature/test-2')   # its preferred label is now taken by our own -2: the suffix goes on the label
         self.assertEqual(sorted(self.state()), [self.session, self.session+'-2', self.session+'-2-2'])
-        self.assertEqual(self.tag('@orchestra-branch', self.session+'-2-2'), 'feature/test-2')
+        self.assertEqual(self.tag('@session-x-orchestra-branch', self.session+'-2-2'), 'feature/test-2')
         self.clear_log(); self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi')
         self.assertIn('"=%s-2:"' % self.session, self.tmux_log()); self.assertNotIn('"=%s:"' % self.session, self.tmux_log())
         self.clear_log(); self.orch('send.sh', 'feature/test-2', '--repo', str(self.repo), 'hi')
@@ -695,7 +759,7 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex')
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session+'-2')
         self.assertEqual(self.state()[self.session]['options'], {})      # the winner of the race is left alone
-        self.assertEqual(self.tag('@orchestra-session-type', self.session+'-2'), 'worktree')
+        self.assertEqual(self.tag('@session-x-orchestra-session-type', self.session+'-2'), 'worktree')
         self.assertEqual([c for c in self.tmux_calls() if 'kill-session' in c], [])
     def test_two_lost_races_count_from_the_preferred_label(self):
         self.env['TEST_NEW_SESSION_RACE'] = self.session+','+self.session+'-2'
@@ -707,18 +771,153 @@ class PortTests(unittest.TestCase):
         self.foreign(self.session); self.foreign(self.session+'-2')
         self.spawn('--agent', 'codex')
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session+'-3')
-        self.assertEqual(self.tag('@orchestra-branch', self.session+'-3'), 'feature/test')
+        self.assertEqual(self.tag('@session-x-orchestra-branch', self.session+'-3'), 'feature/test')
         self.assertEqual([n for n in self.state() if self.state()[n]['options']], [self.session+'-3'])
     def test_tags_are_set_before_anything_else_touches_the_session(self):
-        self.spawn('--agent', 'codex'); calls = self.tmux_calls()
+        self.spawn('--agent', 'codex'); calls = self.tmux_commands()
         i = next(i for i, c in enumerate(calls) if 'new-session' in c and self.session in c)
         self.assertIn('-d', calls[i])
-        required = {'@orchestra-spawner', '@orchestra-repo', '@orchestra-session-type', '@orchestra-branch', '@orchestra-worktree-path'}; seen = set()
+        required = {'@session-launcher', '@session-repo', '@session-worktree', '@session-cwd', '@session-pane',
+                    '@session-x-orchestra-session-type', '@session-x-orchestra-branch'}; seen = set()
         for c in calls[i+1:]:
             if not any(t in c for t in ('=%s' % self.session, '=%s:' % self.session)): continue
-            if 'set-option' in c and c[-2].startswith('@orchestra-'): seen.add(c[-2]); continue
+            if 'set-option' in c and c[-2].startswith('@session-'): seen.add(c[-2]); continue
             self.assertTrue(required <= seen, '%s ran before %s were set' % (c, sorted(required - seen))); break
         self.assertTrue(required <= seen, sorted(required - seen))
+        # The version comes last of all the tags spawn.sh writes, and only once the agent is recorded.
+        calls = calls[:next(i for i, c in enumerate(calls) if c[0] == 'respawn-pane')]
+        sets = [c[-2] for c in calls if c[:1] == ['set-option'] and '-u' not in c and c[-2].startswith('@session-')]
+        self.assertEqual(sets.count('@session-version'), 1)
+        self.assertLess(sets.index('@session-agent'), sets.index('@session-version'))
+        self.assertEqual([k for k in sets[sets.index('@session-version')+1:] if not k.endswith('launching')], [])
+    # --- the record: @session-* keys ------------------------------------------------------------
+    def options(self, session=None, sock=None): return self.state(sock)[session or self.session]['options']
+    def test_spawn_writes_identity_in_one_queue_and_the_version_last(self):
+        self.spawn('--agent', 'codex')
+        for call in self.tmux_calls():                                         # core keys, then extensions, then the version
+            keys = [c[-1] if '-u' in c else c[-2] for c in self.queue(call) if c[0] == 'set-option']
+            keys = [k for k in keys if k.startswith('@session-')]
+            rank = [2 if k == '@session-version' else 1 if k.startswith('@session-x-') else 0 for k in keys]
+            self.assertEqual(rank, sorted(rank), call)
+        identity = next(call for call in self.tmux_calls() if '@session-launcher' in call)
+        self.assertEqual(sorted(c[-2] for c in self.queue(identity)), sorted(['@session-launcher', '@session-x-orchestra-session-type', '@session-repo',
+                         '@session-worktree', '@session-cwd', '@session-x-orchestra-branch', '@session-pane']))
+        respawn = next(c for c in self.tmux_commands() if c[0] == 'respawn-pane')
+        self.assertEqual(respawn[respawn.index('-t')+1], self.pane())           # by the pane its record names
+        self.assertEqual(self.report('PROGRESS', 'recorded').stdout, 'queued for codex:%s\n' % ID)
+        self.assertRegex(self.options()['@session-x-orchestra-last-report'], '^PROGRESS '+STAMP+' delivered$')
+        self.assertFalse([k for k in self.options() if k.startswith('@orchestra-')])
+    def test_values_are_recorded_canonical_or_not_at_all(self):
+        real = self.base/'claude-config'; real.mkdir(); (self.base/'cfg-link').symlink_to(real)
+        self.env['CLAUDE_CONFIG_DIR'] = str(self.base/'cfg-link')+'/'; self.env['TEST_PANE_ALIVE'] = '1'
+        self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+ID)
+        self.assertEqual(self.options()['@session-x-orchestra-orchestrator-config'], str(real.resolve()))
+        self.env['CLAUDE_CONFIG_DIR'] = 'relative/config'
+        x = self.orch('adopt.sh', self.session, '--orchestrator', 'claude:'+ID, ok=False)
+        self.assertNotEqual(x.returncode, 0); self.assertIn('cannot be recorded in @session-x-orchestra-orchestrator-config', x.stderr)
+        # tmux ends a command at an argument ending in ";": such a value still arrives intact; a
+        # value the convention cannot carry is unset instead, never written half-right.
+        self.foreign('odd')
+        self.lib('tag_set "" odd "$KEY_BRANCH" "$1"; tag_set "" odd "$KEY_REPO" relative/path; tag_set "" odd "$KEY_AGENT" "Claude Code"', 'odd;branch\\;')
+        self.assertEqual(self.options('odd'), {'@session-x-orchestra-branch': 'odd;branch\\;'})
+        self.assertEqual(self.lib('for v in "$@"; do session_value_ok "$KEY_CWD" "$v" && echo "ok $v" || echo "no $v"; done',
+                                  '/a/b', '/', '/a/', '/a//b', '/a/./b', '/a/..', 'a', '/a\tb', '/café', '/x\u0085', '/' + 'x'*4096),
+                         'ok /a/b\nok /\nno /a/\nno /a//b\nno /a/./b\nno /a/..\nno a\nno /a\tb\nok /café\nno /x\u0085\nno /' + 'x'*4096 + '\n')
+    def test_records_from_n10_and_records_this_reader_does_not_understand(self):
+        self.env['TEST_PANE_ALIVE'] = '1'
+        self.foreign('n10-worktree', self.player_tags(branch='feature/conv', agent='codex'))
+        self.foreign('n10-agent-tab', {'@session-agent': 'claude', '@session-launcher': 'n10', '@session-pane': '%8', '@session-cwd': str(self.repo.resolve()),
+                                       '@session-x-n10-session-type': 'agent', '@session-x-n10-dir': str(self.repo.resolve()), '@session-version': '1'})
+        self.foreign('n10-shell-tab', self.shell_tab_tags())
+        self.foreign('next-major', dict(self.player_tags(branch='feature/a'), **{'@session-version': '2'}))
+        self.foreign('stranger', self.player_tags(branch='feature/b', launcher='other'))
+        self.foreign('bad-agent', self.player_tags(branch='feature/c', agent='Claude Code'))
+        self.foreign('relative', dict(self.player_tags(branch='feature/d'), **{'@session-repo': 'repo'}))
+        self.foreign('no-version', {k: v for k, v in self.player_tags(branch='feature/e').items() if k != '@session-version'})
+        rows = self.sessions('--all'); self.assertEqual([r['session'] for r in rows], ['n10-worktree'])
+        r = rows[0]
+        self.assertEqual((r['repo'], r['branch'], r['worktree'], r['agent']),
+                         (str(self.repo.resolve()), 'feature/conv', str(self.repo.resolve()/'.claude/worktrees/feature-conv'), 'codex'))
+        for name in ('n10-agent-tab', 'n10-shell-tab', 'next-major', 'stranger', 'bad-agent', 'relative', 'no-version'):
+            self.assertIn('no player session named '+name, self.orch('kill.sh', name, ok=False).stderr)
+        self.orch('adopt.sh', 'n10-worktree', '--orchestrator', 'tmux:parent')
+        o = self.options('n10-worktree')
+        self.assertEqual((o['@session-x-orchestra-orchestrator'], o['@session-launcher'], o['@session-version']), ('tmux:parent', 'n10', '1'))
+        self.assertEqual(self.sessions('--all')[0]['orchestrator'], 'tmux:parent')
+        self.orch('kill.sh', 'n10-worktree'); self.assertNotIn('n10-worktree', self.state())
+    def test_the_version_is_published_only_on_orchestras_own_complete_record(self):
+        own = {k: v for k, v in self.player_tags(launcher='orchestra').items() if k != '@session-version'}
+        self.foreign('own', own)
+        self.foreign('own-incomplete', {k: v for k, v in own.items() if k != '@session-worktree'})
+        n10 = {k: v for k, v in self.player_tags().items() if k != '@session-version'}
+        self.foreign('n10', dict(n10, **{'@session-x-orchestra-session-type': 'worktree'}))     # even one wearing Orchestra's extension
+        self.lib('for s in own own-incomplete n10; do session_publish_version "" "$s"; done')
+        self.assertEqual({n: self.options(n).get('@session-version') for n in ('own', 'own-incomplete', 'n10')}, {'own': '1', 'own-incomplete': None, 'n10': None})
+    def test_a_resume_with_no_known_harness_registers_the_session_before_it_starts(self):
+        # The session is gone (a reboot, say) and no --agent is given: auto. The session is recorded
+        # with the harness tried first, so it is listed while it runs and reused after a failed start.
+        self.spawn('--agent', 'claude'); self.orch('kill.sh', self.session)
+        self.env['TEST_CLAUDE_EXIT'] = '1'; self.spawn('--resume', prompt=False)
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        self.assertEqual([(r['session'], r['agent']) for r in self.sessions()], [(self.session, 'claude')])
+        self.assertEqual(self.options()['@session-version'], '1')
+        del self.env['TEST_CLAUDE_EXIT']; self.spawn('--resume', prompt=False)
+        self.assertEqual(sorted(self.state()), [self.session]); self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session)
+    def test_a_guessed_agent_never_decides_a_later_resume(self):
+        # A Codex player's session vanished. A bare --resume guesses claude; Claude finds no
+        # conversation and no Codex rollout is found either, so nothing starts. The next bare
+        # --resume must still try Claude then Codex, not settle on the guess.
+        self.spawn('--agent', 'codex'); self.orch('kill.sh', self.session)
+        self.env['TEST_CLAUDE_NOCONV'] = '1'; self.spawn('--resume', prompt=False)
+        o = self.options(); self.assertEqual((o['@session-agent'], o['@session-x-orchestra-agent-provisional'], o['@session-version']), ('claude', '1', '1'))
+        self.rollout(str(self.wt.resolve())); n = len(self.calls()); self.spawn('--resume', prompt=False)
+        self.assertEqual([c['cli'] for c in self.calls()[n:]], ['claude', 'codex']); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        o = self.options(); self.assertEqual(o['@session-agent'], 'codex'); self.assertNotIn('@session-x-orchestra-agent-provisional', o)
+        # A Claude probe that fails for another reason leaves the guess provisional too.
+        del self.env['TEST_CLAUDE_NOCONV']; self.orch('kill.sh', self.session); self.env['TEST_CLAUDE_EXIT'] = '1'
+        self.spawn('--resume', prompt=False); self.spawn('--resume', prompt=False)
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        self.assertEqual(self.options()['@session-x-orchestra-agent-provisional'], '1')
+        # An explicit harness is never provisional, even when the launcher never runs to record it.
+        del self.env['TEST_CLAUDE_EXIT']; self.kill_pane(); self.env['TEST_RESPAWN_FAIL'] = '1'
+        self.spawn('--resume', '--agent', 'codex', prompt=False, ok=False)
+        o = self.options(); self.assertEqual(o['@session-agent'], 'codex'); self.assertNotIn('@session-x-orchestra-agent-provisional', o)
+    def test_a_failed_spawn_leaves_no_session_behind(self):
+        # A config dir or target that cannot be recorded stops the spawn before anything exists.
+        mine = self.env['CLAUDE_CONFIG_DIR']
+        for config, target in (('relative/config', 'claude:'+ID), (mine, 'tmux:'+'a'*4100)):
+            self.env['CLAUDE_CONFIG_DIR'] = config
+            x = self.spawn('--agent', 'codex', '--orchestrator', target, ok=False)
+            self.assertEqual(x.returncode, 2, x.stderr); self.assertIn('cannot be recorded', x.stderr)
+            self.assertNotIn('new-session', self.tmux_log() if (self.base/'tmux-log').exists() else '')
+        self.env['CLAUDE_CONFIG_DIR'] = mine
+        # A write that fails after the session exists removes it, so a retry gets the same label.
+        self.env['TEST_SET_OPTION_FAIL'] = '@session-x-orchestra-launching'
+        x = self.spawn('--agent', 'codex', ok=False); self.assertIn('removed', x.stderr)
+        self.assertEqual(self.state(), {})
+        del self.env['TEST_SET_OPTION_FAIL']; self.spawn('--agent', 'codex')
+        self.assertEqual(sorted(self.state()), [self.session])
+    def test_a_dir_player_whose_version_was_not_written_still_launches_as_one(self):
+        self.env['TEST_SET_OPTION_FAIL'] = '@session-agent'
+        d = self.notes_dir(); self.dir_spawn(d, '--agent', 'claude')
+        self.assertNotIn('@session-version', self.options('notes-dir'))
+        args = self.calls()[-1]['args']; self.assertIn('--session-id', args)
+        self.assertEqual(args[args.index('--session-id')+1], self.options('notes-dir')['@session-x-orchestra-claude-session'])
+    def test_resume_respawns_the_recorded_pane_only_while_it_belongs_to_the_session(self):
+        self.spawn('--agent', 'codex'); self.foreign('elsewhere'); own = self.pane()
+        self.set_tag('@session-pane', self.pane('elsewhere')); self.kill_pane()
+        self.spawn('--resume', prompt=False)
+        respawn = [c for c in self.tmux_commands() if c[0] == 'respawn-pane'][-1]
+        self.assertEqual(respawn[respawn.index('-t')+1], '=%s:' % self.session)       # another session's pane: never touched
+        self.set_tag('@session-pane', own); self.kill_pane(); self.spawn('--resume', prompt=False)
+        respawn = [c for c in self.tmux_commands() if c[0] == 'respawn-pane'][-1]
+        self.assertEqual(respawn[respawn.index('-t')+1], own)
+    def test_status_keys_are_withdrawn_before_an_agent_is_replaced(self):
+        self.spawn('--agent', 'codex')
+        for k, v in (('@session-status', 'blocked'), ('@session-status-kind', 'question'), ('@session-status-at', '2026-01-01T00:00:00Z')): self.set_tag(k, v)
+        self.kill_pane(); self.spawn('--resume', prompt=False)
+        self.assertFalse([k for k in self.options() if k.startswith('@session-status')])
     def test_resolver_uses_tags_not_names(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         self.rename(self.session, 'some-label')                          # a label is never parsed
@@ -731,7 +930,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], 'some-label'); self.assertEqual(sorted(self.state()), [self.session, 'some-label'])
         rows = self.sessions('--repo', str(self.repo)); self.assertEqual([(r['session'], r['name'], r['branch']) for r in rows], [('some-label', 'some-label', 'feature/test')])
         # two sessions with one identity (should not happen): the oldest wins, the other is reported, nothing is killed
-        self.foreign('twin', self.player_tags(spawner='orchestra'))
+        self.foreign('twin', self.player_tags(launcher='orchestra'))
         x = self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assertIn('"=some-label:"', self.tmux_log()); self.assertIn('twin', x.stderr)
         s = self.state(); s['twin']['created'] = 0; self.set_state(s); self.clear_log()
         self.orch('screen.sh', 'feature/test', '--repo', str(self.repo)); self.assertIn('"=twin:"', self.tmux_log())
@@ -747,10 +946,10 @@ class PortTests(unittest.TestCase):
         self.assertIn('running', x.stderr); self.assertIn('which is now on feature/renamed', x.stderr)
         self.kill_pane(); self.spawn('--resume', '--agent', 'claude', prompt=False)   # and resumes it in the switched checkout
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session); self.assertEqual(sorted(self.state()), [self.session])
-        s = self.state(); s[self.session]['options']['@orchestra-launching'] = '1'; self.set_state(s)   # a placeholder never starts a fresh task in a switched checkout
+        s = self.state(); s[self.session]['options']['@session-x-orchestra-launching'] = '1'; self.set_state(s)   # a placeholder never starts a fresh task in a switched checkout
         x = self.spawn(ok=False); self.assertIn('does not match requested branch', x.stderr); self.assertIn('is on feature/renamed', x.stderr)
         self.orch('kill.sh', self.session); self.spawn('--resume', '--agent', 'claude', prompt=False)   # nor does a vanished session block resuming it
-        self.assertEqual(self.tag('@orchestra-worktree-path'), str(self.wt.resolve()))
+        self.assertEqual(self.tag('@session-worktree'), str(self.wt.resolve()))
         # another worktree on the original branch never claims the session
         self.run_cmd(['git', 'worktree', 'add', '-q', str(self.base/'elsewhere'), 'feature/test'], cwd=self.repo)
         x = self.orch('send.sh', 'feature/test', '--repo', str(self.repo), 'hi', ok=False); self.assertNotEqual(x.returncode, 0)
@@ -769,13 +968,16 @@ class PortTests(unittest.TestCase):
     def test_kill_and_adopt_refuse_untagged_sessions(self):
         self.env['TEST_PANE_ALIVE'] = '1'
         self.foreign(self.session)
-        half = dict(self.player_tags(spawner='orchestra')); del half['@orchestra-session-type']; self.foreign('half-tagged', half)
-        self.foreign('repo-shell', {'@orchestra-spawner': 'kirby', '@orchestra-repo': str(self.repo.resolve()), '@orchestra-session-type': 'shell'})   # fully tagged, not a player
-        norepo = self.player_tags(spawner='orchestra'); del norepo['@orchestra-repo']; self.foreign('no-repo-tag', norepo)
-        nopath = self.player_tags(spawner='orchestra'); del nopath['@orchestra-worktree-path']; self.foreign('no-checkout-tag', nopath)
+        half = dict(self.player_tags(launcher='orchestra')); del half['@session-version']; self.foreign('half-tagged', half)   # never registered
+        self.foreign('repo-shell', self.shell_tab_tags())                                                                    # n10's shell tab, not a player
+        # A session Orchestra or n10 tagged before the convention: its @orchestra-* tags mean nothing now.
+        self.foreign('legacy-only', {'@orchestra-spawner': 'orchestra', '@orchestra-repo': str(self.repo.resolve()), '@orchestra-session-type': 'worktree',
+                                     '@orchestra-branch': 'feature/test', '@orchestra-worktree-path': str(self.wt.resolve()), '@orchestra-agent': 'codex'})
+        norepo = self.player_tags(launcher='orchestra'); del norepo['@session-repo']; self.foreign('no-repo-tag', norepo)
+        nopath = self.player_tags(launcher='orchestra'); del nopath['@session-worktree']; self.foreign('no-checkout-tag', nopath)
         self.assertEqual(self.sessions('--all'), [])
         before = self.state()
-        for name in (self.session, 'half-tagged', 'repo-shell', 'no-repo-tag', 'no-checkout-tag'):
+        for name in (self.session, 'half-tagged', 'repo-shell', 'legacy-only', 'no-repo-tag', 'no-checkout-tag'):
             self.assertNotEqual(self.orch('kill.sh', name, ok=False).returncode, 0)
             self.assertNotEqual(self.orch('adopt.sh', name, '--orchestrator', 'tmux:p', ok=False).returncode, 0)
         self.assertNotIn('kill-session', self.tmux_log()); self.assertNotIn('send-keys', self.tmux_log()); self.assertEqual(self.state(), before)
@@ -796,9 +998,9 @@ class PortTests(unittest.TestCase):
     def test_sessions_scoped_by_repo_tag(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         repo2 = self.base/'other/repo'; self.git_init(repo2); self.spawn('--agent', 'codex', repo=repo2)
-        self.foreign('stray'); self.foreign('repo-shell', {'@orchestra-spawner': 'kirby', '@orchestra-repo': str(self.repo.resolve()), '@orchestra-session-type': 'shell'})
+        self.foreign('stray'); self.foreign('repo-shell', self.shell_tab_tags())
         self.foreign('tab-made-elsewhere', self.player_tags(branch='feature/other'))
-        norepo = self.player_tags(branch='feature/norepo'); del norepo['@orchestra-repo']; self.foreign('no-repo-tag', norepo)   # not ours without a repo tag
+        norepo = self.player_tags(branch='feature/norepo'); del norepo['@session-repo']; self.foreign('no-repo-tag', norepo)   # not ours without a repo tag
         names = lambda rows: sorted(r['session'] for r in rows)
         self.assertEqual(names(self.sessions('--repo', str(self.repo))), sorted([self.session, 'tab-made-elsewhere']))
         self.assertEqual(names(self.sessions()), sorted([self.session, 'tab-made-elsewhere']))                    # cwd's repo
@@ -890,20 +1092,20 @@ class PortTests(unittest.TestCase):
         self.spawn('--resume', prompt=False)
         self.assertEqual(len(self.calls()), n); self.assertEqual(self.state()[self.session]['dead'], 1); self.assertEqual(self.state()[self.session]['status'], 1)
     def test_resume_auto_chain(self):
-        self.spawn('--agent', 'claude'); self.kill_pane(); self.drop_tag('@orchestra-agent')
+        self.spawn('--agent', 'claude'); self.kill_pane(); self.set_tag('@session-agent', 'custom')
         self.rollout(str(self.wt.resolve()))
         self.env['TEST_CLAUDE_NOCONV'] = '1'; self.spawn('--resume', prompt=False)
         seq = [c['cli'] for c in self.calls()[1:]]; self.assertEqual(seq, ['claude', 'codex'])
-        self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID]); self.assertEqual(self.tag('@orchestra-agent'), 'codex')   # the launcher records what started
+        self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID]); self.assertEqual(self.tag('@session-agent'), 'codex')   # the launcher records what started
         self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
         del self.env['TEST_CLAUDE_NOCONV']
         for exit_code in ('1', '0'):     # other failures and successes never fall through to Codex
-            self.drop_tag('@orchestra-agent'); self.kill_pane()
+            self.set_tag('@session-agent', 'custom'); self.kill_pane()
             n = len(self.calls()); self.env['TEST_CLAUDE_EXIT'] = exit_code; self.spawn('--resume', prompt=False)
             self.assertEqual([c['cli'] for c in self.calls()[n:]], ['claude'])
-        self.assertEqual(self.tag('@orchestra-agent'), 'claude')
+        self.assertEqual(self.tag('@session-agent'), 'claude')
     def test_resume_with_no_conversation_names_the_config_dir(self):
-        self.spawn('--agent', 'claude'); self.kill_pane(); self.drop_tag('@orchestra-agent')
+        self.spawn('--agent', 'claude'); self.kill_pane(); self.set_tag('@session-agent', 'custom')
         self.env['TEST_CLAUDE_NOCONV'] = '1'
         for named in (str(self.base/'claude-config'), 'the default ~/.claude (CLAUDE_CONFIG_DIR unset)'):
             for agent in ((), ('--agent', 'claude')):      # auto mode, then the explicit harness
@@ -916,21 +1118,21 @@ class PortTests(unittest.TestCase):
         self.spawn('--agent', 'codex'); self.orch('kill.sh', self.session, '--repo', str(self.repo))
         self.spawn('--resume', '--agent', 'claude', prompt=False); c = self.calls()[-1]
         self.assertEqual(c['cli'], 'claude'); self.assertEqual(c['args'][0], '--continue'); self.assertIn(self.session, self.state())
-        self.assertEqual(self.tag('@orchestra-spawner'), 'orchestra'); self.assertEqual(self.tag('@orchestra-branch'), 'feature/test'); self.assertEqual(self.tag('@orchestra-session-type'), 'worktree')
+        self.assertEqual(self.tag('@session-launcher'), 'orchestra'); self.assertEqual(self.tag('@session-x-orchestra-branch'), 'feature/test'); self.assertEqual(self.tag('@session-x-orchestra-session-type'), 'worktree')
         # gone again, and a stranger has taken the label meanwhile: the recreated session gets the next one
         self.orch('kill.sh', 'feature/test', '--repo', str(self.repo)); self.foreign(self.session)
         self.spawn('--resume', '--agent', 'claude', prompt=False)
-        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session+'-2'); self.assertEqual(self.tag('@orchestra-branch', self.session+'-2'), 'feature/test')
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session+'-2'); self.assertEqual(self.tag('@session-x-orchestra-branch', self.session+'-2'), 'feature/test')
         self.assertEqual(self.state()[self.session]['options'], {})
 
-    def test_resume_keeps_kirby_identity_tags(self):
+    def test_resume_keeps_n10_identity_tags(self):
         self.spawn('--agent', 'codex'); self.orch('kill.sh', self.session)             # leaves the worktree behind
-        kirby = self.player_tags(spawner='kirby'); self.foreign('label-chosen-elsewhere', kirby); self.kill_pane('label-chosen-elsewhere')
+        n10 = self.player_tags(launcher='n10'); self.foreign('label-chosen-elsewhere', n10); self.kill_pane('label-chosen-elsewhere')
         self.spawn('--resume', '--agent', 'claude', prompt=False); c = self.calls()[-1]
         self.assertEqual(c['cli'], 'claude'); self.assertEqual(c['env']['ORCHESTRA_SESSION'], 'label-chosen-elsewhere')
         opts = self.state()['label-chosen-elsewhere']['options']
-        self.assertEqual({k: opts.get(k) for k in kirby}, kirby)                          # creator-only tags untouched
-        self.assertEqual(opts['@orchestra-agent'], 'claude'); self.assertEqual(opts['@orchestra-orchestrator'], 'codex:'+ID)
+        self.assertEqual({k: opts.get(k) for k in n10 if k != '@session-agent'}, {k: v for k, v in n10.items() if k != '@session-agent'})   # creator-only tags untouched
+        self.assertEqual(opts['@session-agent'], 'claude'); self.assertEqual(opts['@session-x-orchestra-orchestrator'], 'codex:'+ID)
         self.assertEqual(sorted(self.state()), ['label-chosen-elsewhere'])
     def assert_reads_pass_utf8(self):
         reads = [c for c in self.tmux_calls() if any(k in c for k in ('display-message', 'show-options', 'list-sessions', 'list-panes'))]
@@ -967,7 +1169,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(len(self.calls()), n); self.assertEqual(self.state(), before)
     def test_invalid_report_target_is_printed_intact(self):
         self.spawn('--agent', 'codex')
-        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'codex:not-a-thread'])
+        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@session-x-orchestra-orchestrator', 'codex:not-a-thread'])
         before = self.state(); n = len(self.calls())
         x = self.report('QUESTION', 'where next?', ok=False)
         self.assert_delivery_failed(x, 'codex:not-a-thread', 'invalid orchestrator target', 'QUESTION', 'where next?')
@@ -1000,7 +1202,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.report('--orchestrator', env=inside).stdout.strip(), 'codex:'+ID)
         self.clear_log(); x = self.report('PROGRESS', 'derived', env=inside); self.assertIn('queued for', x.stdout)
         self.assertEqual(self.calls()[-1]['args'][:5], ['queue', '--thread', ID, '--message', '[player label-chosen-elsewhere] PROGRESS: derived'])
-        self.assertRegex(self.tag('@orchestra-last-report', 'label-chosen-elsewhere', sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' delivered$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
+        self.assertRegex(self.tag('@session-x-orchestra-last-report', 'label-chosen-elsewhere', sock='/tmp/custom-socket'), '^PROGRESS '+STAMP+' delivered$'); self.assertIn('"-S", "/tmp/custom-socket", "set-option"', self.tmux_log())
         self.assertIn('["-u", "-S", "/tmp/custom-socket", "display-message"', self.tmux_log())        # the session lookup goes through tmux_on too
         x = self.report('DONE', 'derived fail', env=dict(inside, TEST_CLI_EXIT='1'), ok=False)
         self.assert_delivery_failed(x, 'codex:'+ID, 'Codex queue refused', 'DONE', 'derived fail', session='label-chosen-elsewhere')
@@ -1024,7 +1226,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.report('--orchestrator').stdout.strip(), 'codex:'+ID)
         x = self.report('--orchestrator', 'tmux:elsewhere', ok=False); self.assertEqual(x.returncode, 2)
         x = self.report('--orchestrator', 'tmux:elsewhere', '--socket', '/tmp/x', ok=False); self.assertEqual(x.returncode, 2)
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'codex:'+ID)
         x = self.report('--orchestrator', env=self.env, ok=False); self.assertNotEqual(x.returncode, 0)
     def test_tmux_delivery_uses_socket_and_sets_last_report(self):
         self.env['TMUX'] = '/tmp/custom-socket,1,1'
@@ -1124,8 +1326,8 @@ class PortTests(unittest.TestCase):
         cfg = self.base/'orchestrator-claude-config'; player_cfg = self.env['CLAUDE_CONFIG_DIR']
         self.env['CLAUDE_CONFIG_DIR'] = str(cfg); self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+self.SID)
         self.env['CLAUDE_CONFIG_DIR'] = player_cfg                # the player runs with a different config dir
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID)
-        self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'claude:'+self.SID)
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator-config'), str(cfg))
         return cfg
     def test_report_to_a_claude_session_goes_to_its_inbox_by_session_id(self):
         cfg = self.spawn_for_claude_session()
@@ -1138,12 +1340,13 @@ class PortTests(unittest.TestCase):
         self.wait_for(received); self.assertEqual(len(received), 1)
         self.assertEqual(json.loads(received[0]), {'type': 'user', 'message': {'role': 'user', 'content': '[player %s] DONE: %s' % (self.session, text)}})
         # no pane lookup of any kind: only the player's own tags are read and written
-        commands = {(d[2] if d[0] == '-S' else d[0]) for d in ([a for a in c if a != '-u'] for c in self.tmux_calls())}
-        self.assertEqual(sorted(commands), ['set-option', 'show-options'])
+        commands = {c[0] for c in self.tmux_commands()}
+        self.assertEqual(sorted(commands), ['display-message', 'set-option'])
+        self.assertEqual(self.pane_lookups(), [])
         self.assertFalse((self.wt/'BAD').exists())
     def test_claude_session_config_dir_comes_from_the_tag_then_the_environment_then_home(self):
         cfg = self.spawn_for_claude_session(); self.fake_claude(config=cfg, session=self.SID)
-        self.drop_tag('@orchestra-orchestrator-config')
+        self.drop_tag('@session-x-orchestra-orchestrator-config')
         x = self.report('PROGRESS', 'player config dir', ok=False)        # the player's own dir has no such session
         self.assert_delivery_failed(x, 'claude:'+self.SID, 'no live Claude session %s is registered in %s/sessions' % (self.SID, self.env['CLAUDE_CONFIG_DIR']), 'PROGRESS', 'player config dir')
         self.assertEqual(self.report('PROGRESS', 'env', env=self.player_env(CLAUDE_CONFIG_DIR=str(cfg))).stdout, 'sent to %s (inbox)\n' % self.SID)
@@ -1164,8 +1367,12 @@ class PortTests(unittest.TestCase):
                 received = self.fake_claude(config=cfg, session=self.SID, **kwargs); self.clear_log(); before = self.state()
                 x = self.report('DONE', case, ok=False)
                 self.assert_delivery_failed(x, 'claude:'+self.SID, reason, 'DONE', case)
-                for cmd in ('load-buffer', 'paste-buffer', 'send-keys', 'display-message'): self.assertNotIn(cmd, self.tmux_log())
+                for cmd in ('load-buffer', 'paste-buffer', 'send-keys'): self.assertNotIn(cmd, self.tmux_log())
+                self.assertEqual(self.pane_lookups(), [])
                 self.assertEqual(self.state(), before); self.assertEqual(received, [])
+    # display-message calls that ask about anything but the session's own tags.
+    def pane_lookups(self):
+        return [c for c in self.tmux_commands() if c[0] == 'display-message' and re.sub(r'#\{@[^}]*\}|\t', '', c[-1])]
     def own_claude_session(self, session=None):
         # The environment a Claude Code session gives the commands it runs: its session id, its pid
         # (registered under its config dir) and CLAUDECODE; here also a tmux pane that is not its own.
@@ -1186,15 +1393,15 @@ class PortTests(unittest.TestCase):
     def test_spawn_and_adopt_from_a_claude_orchestrator_record_its_session_and_config(self):
         cfg = self.own_claude_session(); self.env['TEST_PANE_ALIVE'] = '1'
         self.spawn('--agent', 'codex')
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@session-x-orchestra-orchestrator-config'), str(cfg))
         e = self.calls()[-1]['env']; self.assertIsNone(e['CLAUDECODE'])                 # nothing of the orchestrator's session reaches the player
         self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p')
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'tmux:p'); self.assertIsNone(self.tag('@orchestra-orchestrator-config'))
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'tmux:p'); self.assertIsNone(self.tag('@session-x-orchestra-orchestrator-config'))
         self.orch('adopt.sh', self.session)
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@orchestra-orchestrator-config'), str(cfg))
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'claude:'+self.SID); self.assertEqual(self.tag('@session-x-orchestra-orchestrator-config'), str(cfg))
         self.env['CLAUDE_CODE_SESSION_ID'] = '0199a000-1111-7000-8000-00000000beef'     # unverifiable: nothing is changed or created
         x = self.orch('adopt.sh', self.session, ok=False); self.assertEqual(x.returncode, 2)
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'claude:'+self.SID)
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'claude:'+self.SID)
         x = self.spawn('--agent', 'codex', branch='feature/other', ok=False); self.assertEqual(x.returncode, 2)
         self.assertEqual(sorted(self.state()), [self.session])
     def test_spawn_and_adopt_mark_the_orchestrators_own_session_with_its_target(self):
@@ -1203,54 +1410,54 @@ class PortTests(unittest.TestCase):
         sock = '/tmp/orchestrator-sock'; self.foreign('kirby-shell-2', sock=sock)
         self.own_claude_session(); self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='kirby-shell-2')
         self.spawn('--agent', 'codex')
-        self.assertEqual(self.tag('@orchestra-target', 'kirby-shell-2', sock=sock), 'claude:'+self.SID)
-        self.assertIsNone(self.tag('@orchestra-target', sock=sock))                     # never on the player itself
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'kirby-shell-2', sock=sock), 'claude:'+self.SID)
+        self.assertIsNone(self.tag('@session-x-orchestra-target', sock=sock))                     # never on the player itself
     def test_adopt_marks_the_orchestrators_own_session_unless_handing_off(self):
         self.own_claude_session(); self.env['TEST_PANE_ALIVE'] = '1'
         self.spawn('--agent', 'codex')                                                   # outside tmux: nothing to mark
         self.foreign('claude-tab', sock='/tmp/orchestrator-sock')
         self.env.update(TMUX='/tmp/orchestrator-sock,1,1', TEST_TMUX_SESSION='claude-tab')
         self.orch('adopt.sh', self.session, '--orchestrator', 'claude:'+UUID)             # a handoff to another conversation
-        self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'))
+        self.assertIsNone(self.tag('@session-x-orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'))
         self.orch('adopt.sh', self.session)
-        self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'), 'claude:'+self.SID)
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'claude-tab', sock='/tmp/orchestrator-sock'), 'claude:'+self.SID)
     def test_a_codex_orchestrator_in_tmux_is_marked_and_another_or_a_tmux_target_is_not(self):
         sock = '/tmp/orchestrator-sock'; self.foreign('codex-tab', sock=sock)
         self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='codex-tab')
         self.spawn('--agent', 'codex')
-        self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
-        self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
+        self.drop_tag_of_on(sock, 'codex-tab', '@session-x-orchestra-target')
         self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+UUID, branch='feature/someone-else')   # a handoff
-        self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+        self.assertIsNone(self.tag('@session-x-orchestra-target', 'codex-tab', sock=sock))
         self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/explicit-self')    # its own id, given explicitly
-        self.assertEqual(self.tag('@orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
-        self.drop_tag_of_on(sock, 'codex-tab', '@orchestra-target')
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'codex-tab', sock=sock), 'codex:'+ID)
+        self.drop_tag_of_on(sock, 'codex-tab', '@session-x-orchestra-target')
         self.env.pop('CODEX_THREAD_ID'); self.env.pop('CODEX_SESSION_ID')               # resolves to tmux:codex-tab, which names itself
         self.spawn('--agent', 'codex', branch='feature/tmux')
-        self.assertEqual(self.tag('@orchestra-orchestrator', 'repo-feature-tmux', sock=sock), 'tmux:codex-tab')
-        self.assertIsNone(self.tag('@orchestra-target', 'codex-tab', sock=sock))
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator', 'repo-feature-tmux', sock=sock), 'tmux:codex-tab')
+        self.assertIsNone(self.tag('@session-x-orchestra-target', 'codex-tab', sock=sock))
     def test_a_claude_orchestrator_giving_its_own_id_explicitly_is_marked(self):
         sock = '/tmp/orchestrator-sock'; self.foreign('claude-tab', sock=sock)
         self.own_claude_session(); self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='claude-tab')
         self.spawn('--agent', 'codex', '--orchestrator', 'claude:'+self.SID)
-        self.assertEqual(self.tag('@orchestra-target', 'claude-tab', sock=sock), 'claude:'+self.SID)
-        self.drop_tag_of_on(sock, 'claude-tab', '@orchestra-target')
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'claude-tab', sock=sock), 'claude:'+self.SID)
+        self.drop_tag_of_on(sock, 'claude-tab', '@session-x-orchestra-target')
         self.spawn('--agent', 'codex', '--orchestrator', 'codex:'+ID, branch='feature/inherited')   # an inherited Codex id is not Claude's own
-        self.assertIsNone(self.tag('@orchestra-target', 'claude-tab', sock=sock))
+        self.assertIsNone(self.tag('@session-x-orchestra-target', 'claude-tab', sock=sock))
     def test_a_conversation_resumed_in_another_session_leaves_one_claimant(self):
         sock = '/tmp/orchestrator-sock'
-        self.foreign('first-tab', {'@orchestra-target': 'codex:'+ID}, sock=sock)     # where the conversation ran before
-        self.foreign('unrelated', {'@orchestra-target': 'codex:'+UUID}, sock=sock)
+        self.foreign('first-tab', {'@session-x-orchestra-target': 'codex:'+ID}, sock=sock)     # where the conversation ran before
+        self.foreign('unrelated', {'@session-x-orchestra-target': 'codex:'+UUID}, sock=sock)
         self.foreign('resumed-tab', sock=sock)
         self.env.update(TMUX=sock+',1,1', TEST_TMUX_SESSION='resumed-tab')
         self.spawn('--agent', 'codex')
-        self.assertEqual(self.tag('@orchestra-target', 'resumed-tab', sock=sock), 'codex:'+ID)
-        self.assertIsNone(self.tag('@orchestra-target', 'first-tab', sock=sock))
-        self.assertEqual(self.tag('@orchestra-target', 'unrelated', sock=sock), 'codex:'+UUID)
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'resumed-tab', sock=sock), 'codex:'+ID)
+        self.assertIsNone(self.tag('@session-x-orchestra-target', 'first-tab', sock=sock))
+        self.assertEqual(self.tag('@session-x-orchestra-target', 'unrelated', sock=sock), 'codex:'+UUID)
     def test_an_orchestrator_outside_tmux_marks_nothing(self):
         self.spawn('--agent', 'codex')
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)
-        self.assertNotIn('@orchestra-target', self.tmux_log())
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'codex:'+ID)
+        self.assertEqual([c for c in self.tmux_commands() if c[0] == 'set-option' and (c[-1] if '-u' in c else c[-2]).endswith('-target')], [])
     def drop_tag_of_on(self, sock, session, name):
         s = self.state(sock); s[session]['options'].pop(name, None); self.set_state(s, sock)
     def test_relay_delivers_to_a_claude_session_by_id(self):
@@ -1271,7 +1478,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.settled(log, 'msg.defer'), ['e11']); self.assertEqual(self.settled(log, 'msg.ack'), ['e12'])
     def test_report_beam_target_carries_a_claude_session(self):
         self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK); self.env['TEST_BEAM_OUTCOME'] = 'delivered'
-        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'beam:%s/claude:%s' % (PEER, self.SID)])
+        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@session-x-orchestra-orchestrator', 'beam:%s/claude:%s' % (PEER, self.SID)])
         self.assertEqual(self.report('DONE', 'far').stdout, 'sent to %s\n' % PEER)
         self.assertEqual(self.beam_sent()[-1]['payload'], 'target: claude:%s\n\n[player %s] DONE: far' % (self.SID, self.session))
     def test_send_to_a_claude_player_goes_to_its_inbox(self):
@@ -1367,7 +1574,7 @@ class PortTests(unittest.TestCase):
         self.assertNotEqual(x.returncode, 0); self.assertNotIn('paste-buffer', self.tmux_log()); self.assertIn('a shell owns', x.stderr)
         self.assert_delivery_failed(x, 'tmux:parent', 'a shell owns', 'QUESTION', 'decision')
     def test_no_parent_never_uses_player_id(self):
-        self.spawn('--agent', 'claude'); self.drop_tag('@orchestra-orchestrator'); n = len(self.calls())
+        self.spawn('--agent', 'claude'); self.drop_tag('@session-x-orchestra-orchestrator'); n = len(self.calls())
         x = self.report('DONE', 'no parent', ok=False); self.assertNotEqual(x.returncode, 0); self.assertEqual(len(self.calls()), n)
         self.assert_delivery_failed(x, '<unknown>', 'orchestrator target is unset or unreachable', 'DONE', 'no parent')
 
@@ -1385,7 +1592,7 @@ class PortTests(unittest.TestCase):
     def test_adopt_codex_player_with_and_without_text(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:new-parent')
-        self.assertIn('"-l", "$player"]', self.tmux_log()); self.assertEqual(self.tag('@orchestra-orchestrator'), 'tmux:new-parent')
+        self.assertIn('"-l", "$player"]', self.tmux_log()); self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'tmux:new-parent')
         self.assertEqual(self.report('--orchestrator').stdout.strip(), 'tmux:new-parent')
         self.orch('adopt.sh', 'feature/test', '--repo', str(self.repo), '--orchestrator', 'tmux:new-parent', 'Now', 'do', 'this')
         self.assertIn('"-l", "$player Now do this"]', self.tmux_log()); self.assert_no_state_files(); self.assert_reads_pass_utf8()
@@ -1394,7 +1601,7 @@ class PortTests(unittest.TestCase):
         x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p', ok=False); self.assertIn('dead', x.stderr)
         self.env['TEST_PANE_ALIVE'] = '1'; self.env['TEST_PANE_COMMAND'] = 'bash'; self.kill_pane(); self.spawn('--resume', prompt=False)
         self.clear_log(); x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:p', ok=False)
-        self.assertIn('shell owns', x.stderr); self.assertNotIn('send-keys', self.tmux_log()); self.assertEqual(self.tag('@orchestra-orchestrator'), 'codex:'+ID)
+        self.assertIn('shell owns', x.stderr); self.assertNotIn('send-keys', self.tmux_log()); self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'codex:'+ID)
     def test_sessions_lists_tags(self):
         self.env['TEST_PANE_ALIVE'] = '1'; self.spawn('--agent', 'codex')
         for extra in ([], ['--all']):
@@ -1434,7 +1641,7 @@ class PortTests(unittest.TestCase):
     LOCAL_TMUX_ARGV = {
         'capture-pane':   [('-u',)],
         'delete-buffer':  [('-u',), ('-S', 'SOCK')],
-        'display-message': [('-u',)],
+        'display-message': [('-u',), ('-u', '-S', 'SOCK')],    # the launcher reads its session's record
         'has-session':    [('-u',), ('-u', '-S', 'SOCK')],
         'kill-session':   [('-u',)],
         'list-panes':     [('-u',)],
@@ -1446,7 +1653,6 @@ class PortTests(unittest.TestCase):
         'send-keys':      [('-u',)],
         'set-option':     [('-u',), ('-u', '-S', 'SOCK')],
         'show-buffer':    [('-S', 'SOCK')],
-        'show-options':   [('-u',), ('-u', '-S', 'SOCK')],     # the launcher reads its session type
     }
     def test_local_tmux_argv_is_pinned_at_every_call_site(self):
         # The machine dimension moved call sites that used a bare `tmux` — kill-session and
@@ -1492,7 +1698,7 @@ class PortTests(unittest.TestCase):
         calls_before = len(self.tmux_calls())
         # Only the stubs and the system directories: a beam installed on the host running the
         # suite must not resolve here, and neither may an n10 binary stand in for it.
-        self.stub('n10', CLI_MOCK); env = dict(self.env, PATH=str(self.bin)+':/usr/bin:/bin')
+        (self.bin/'beam').unlink(); self.stub('n10', CLI_MOCK); env = dict(self.env, PATH=str(self.bin)+':/usr/bin:/bin')
         x = self.run_cmd(['bash', '-c', '. "$0"; ORCH_MACHINE=ghost tmux_on "" list-sessions', self.script('_lib.sh')], cwd=self.base, ok=False, env=env)
         self.assertNotEqual(x.returncode, 0)
         self.assertIn('$ORCHESTRA_BEAM', x.stderr); self.assertIn("'beam' on PATH", x.stderr); self.assertNotIn('n10', x.stderr)
@@ -1507,7 +1713,7 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.beam_calls(), [])          # rejected before anything reached the executor
     def test_report_beam_target_delivered_stored_rejected(self):
         self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
-        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@orchestra-orchestrator', 'beam:%s/tmux:controller' % PEER])
+        self.run_cmd(['tmux', 'set-option', '-t', '='+self.session+':', '@session-x-orchestra-orchestrator', 'beam:%s/tmux:controller' % PEER])
         self.env['TEST_BEAM_OUTCOME'] = 'delivered'
         x = self.report('DONE', 'finished work')
         self.assertEqual(x.returncode, 0); self.assertEqual(x.stdout, 'sent to %s\n' % PEER)
@@ -1625,10 +1831,10 @@ class PortTests(unittest.TestCase):
         self.env['TEST_BEAM_PEER_ID'] = PEER
         x = self.orch('adopt.sh', self.session, '--orchestrator', 'tmux:new-parent', '--machine', 'workbox')
         self.assertEqual(x.returncode, 0, x.stderr)
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:%s/tmux:new-parent' % PEER)
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'beam:%s/tmux:new-parent' % PEER)
         # an already beam-qualified --orchestrator is left exactly as given
         self.orch('adopt.sh', self.session, '--orchestrator', 'beam:deadbeefcafef00ddeadbeefcafef00d/tmux:elsewhere', '--machine', 'workbox')
-        self.assertEqual(self.tag('@orchestra-orchestrator'), 'beam:deadbeefcafef00ddeadbeefcafef00d/tmux:elsewhere')
+        self.assertEqual(self.tag('@session-x-orchestra-orchestrator'), 'beam:deadbeefcafef00ddeadbeefcafef00d/tmux:elsewhere')
     def test_repo_root_resolves_remotely(self):
         self.stub('beam', BEAM_MOCK)
         out = self.lib('ORCH_MACHINE=workbox; ORCH_REPO="$1"; repo_root', str(self.repo))
@@ -1654,9 +1860,9 @@ class PortTests(unittest.TestCase):
         rname = 'remote-repo-feature-remote'
         rstate = self.remote_state()
         self.assertEqual(sorted(rstate), [rname], rstate)
-        self.assertEqual(rstate[rname]['options']['@orchestra-branch'], 'feature/remote')
-        self.assertEqual(rstate[rname]['options']['@orchestra-worktree-path'], str((remote_repo/'.claude/worktrees/feature-remote').resolve()))
-        self.assertEqual(rstate[rname]['options']['@orchestra-repo'], str(remote_repo.resolve()))
+        self.assertEqual(rstate[rname]['options']['@session-x-orchestra-branch'], 'feature/remote')
+        self.assertEqual(rstate[rname]['options']['@session-worktree'], str((remote_repo/'.claude/worktrees/feature-remote').resolve()))
+        self.assertEqual(rstate[rname]['options']['@session-repo'], str(remote_repo.resolve()))
         self.assertTrue((remote_repo/'.claude/worktrees/feature-remote').is_dir())
         self.assertEqual(self.remote_calls()[-1]['cli'], 'codex')
         self.assertTrue(any(c[:2] == ['exec', 'workbox'] and 'new-session' in c for c in self.beam_calls()), self.beam_calls())
@@ -1669,7 +1875,7 @@ class PortTests(unittest.TestCase):
         self.run_cmd(['bash', self.script('spawn.sh'), '--machine', 'workbox', '--dir', str(d), '--prompt', 'p', '--agent', 'codex'])
         self.assertFalse((self.base/'tmux-state.json').exists(), 'a local tmux server was started')
         opts = self.remote_state()['scratch-dir']['options']
-        self.assertEqual((opts['@orchestra-session-type'], opts['@orchestra-repo'], opts['@orchestra-orchestrator']), ('dir', str(d.resolve()), 'beam:%s/codex:%s' % ('a'*32, ID)))
+        self.assertEqual((opts['@session-x-orchestra-session-type'], opts['@session-cwd'], opts['@session-x-orchestra-orchestrator']), ('dir', str(d.resolve()), 'beam:%s/codex:%s' % ('a'*32, ID)))
         self.assertEqual(self.remote_calls()[-1]['cwd'], str(d.resolve()))
         self.assertEqual([r['session'] for r in self.sessions('--all', '--machine', 'workbox')], ['scratch-dir'])
         self.orch('kill.sh', 'scratch-dir', '--machine', 'workbox'); self.assertEqual(self.remote_state(), {})
@@ -1711,7 +1917,7 @@ class PortTests(unittest.TestCase):
         # a remote adoption is beam-qualified with this (the orchestrator's) machine's own peerId,
         # learned locally (beam_own_peer_id never goes through the executor) — see spawn.sh's
         # identical treatment and D2's "who am I" rule.
-        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.assertEqual(self.remote_state()[rname]['options']['@session-x-orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
         self.assertFalse((self.base/'tmux-state.json').exists())
         x = self.orch('send.sh', rname, '--repo', str(remote_repo), '--machine', 'workbox', '--raw', 'ping')
         self.assertEqual(x.returncode, 0, x.stderr)
@@ -1753,7 +1959,7 @@ class PortTests(unittest.TestCase):
         rows = json.loads(self.orch('sessions.sh', *args, '--all', '--json').stdout)
         self.assertEqual([r['session'] for r in rows], [rname], rows)
         self.orch('adopt.sh', rname, *args, '--orchestrator', 'tmux:new-parent')
-        self.assertEqual(self.remote_state()[rname]['options']['@orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
+        self.assertEqual(self.remote_state()[rname]['options']['@session-x-orchestra-orchestrator'], 'beam:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/tmux:new-parent')
         self.orch('send.sh', rname, *args, '--raw', 'ping')
         self.orch('screen.sh', rname, *args)
         self.orch('kill.sh', rname, *args)
@@ -1823,8 +2029,8 @@ class PortTests(unittest.TestCase):
     def test_report_ignores_inherited_orchestra_machine(self):
         # B5, half 2: even if ORCHESTRA_MACHINE reaches report.sh's environment some other way
         # (a user's shell exported it; the strip above is defence, not the only layer), report.sh
-        # must still act on this machine — never silently send its own @orchestra-orchestrator
-        # lookup over beam, which tag_get's "never fails" would turn into a bare "unset or
+        # must still act on this machine — never silently send its own orchestrator
+        # lookup over beam, which session_record's quiet failure would turn into a bare "unset or
         # unreachable" with no sign anything went over the network.
         self.spawn('--agent', 'codex'); self.stub('beam', BEAM_MOCK)
         x = self.report('PROGRESS', 'still local', env=self.player_env(ORCHESTRA_MACHINE='workbox'))
@@ -1868,7 +2074,8 @@ class PortTests(unittest.TestCase):
         # Internal shell variables may keep the PLAYER_ prefix; nothing environment-shaped may.
         self.assertEqual(sorted(set(re.findall(r'\bPLAYER_[A-Z_]+', text))), ['PLAYER_SCRIPTS'])
         for tag in TAGS: self.assertIn(tag, text, tag)
-        self.assertEqual(sorted(set(re.findall(r'@orchestra-[a-z-]+', text))), sorted(TAGS))
+        self.assertEqual(sorted(set(re.findall(r'@session-[a-z0-9-]+[a-z0-9]', text)) - {'@session-x-orchestra', '@session-x-n10'}), sorted(TAGS))
+        self.assertEqual(re.findall(r'@orchestra-[a-z-]+', text), [])               # the legacy tags are gone, comments included
         self.assertEqual(sorted(set(re.findall(r'\bORCHESTRA_[A-Z_]+', text))),
                          ['ORCHESTRA_BEAM', 'ORCHESTRA_CLAUDE_SKILL', 'ORCHESTRA_COMMAND', 'ORCHESTRA_EFFORT', 'ORCHESTRA_FORCE_LOCAL',
                           'ORCHESTRA_HARNESS', 'ORCHESTRA_MACHINE', 'ORCHESTRA_MODE', 'ORCHESTRA_MODEL',

@@ -15,8 +15,10 @@
 #   ORCHESTRA_CLAUDE_SKILL Claude player invocation (defaults to /orchestra:player)
 #
 # The task body is the paste buffer orchestra-prompt-<session>, deleted once read. The harness
-# that actually starts is recorded in the session's @orchestra-agent tag. The orchestrator target
-# is not part of the prompt: report.sh reads @orchestra-orchestrator from the session.
+# that actually starts is recorded in the session's @session-agent tag, after which a session
+# Orchestra created that is not registered yet gets @session-version (session_publish_version:
+# only Orchestra's own, otherwise complete record). The orchestrator target is not part of the
+# prompt: report.sh reads @session-x-orchestra-orchestrator from the session.
 #
 # Resume never starts a fresh conversation: a harness that cannot find one exits nonzero and the
 # pane stays for inspection (spawn.sh sets remain-on-exit). A worktree player's Claude resume runs
@@ -32,10 +34,10 @@
 # (claude_trust_here). Players load the same MCP servers as a normal session; a .mcp.json server
 # not yet approved for the worktree raises its own dialog (see the orchestrator SKILL.md).
 #
-# A dir player (@orchestra-session-type dir) may share its directory with other conversations, the
+# A dir player (session-type dir) may share its directory with other conversations, the
 # orchestrator's own included, so Claude's "newest conversation here" is not necessarily its own: a
 # fresh Claude launch picks the conversation id itself (--session-id), records it in
-# @orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
+# @session-x-orchestra-claude-session, and a resume continues that id. Without the tag (kill.sh removed it
 # with the session) a Claude resume refuses rather than guess; so does auto mode, which for a dir
 # player means Claude only.
 set -u
@@ -44,7 +46,9 @@ mode="${ORCHESTRA_MODE:-fresh}"; harness="${ORCHESTRA_HARNESS:-claude}"
 model="${ORCHESTRA_MODEL:-}"; effort="${ORCHESTRA_EFFORT:-}"; perm="${ORCHESTRA_PERMISSION_MODE:-}"
 session="${ORCHESTRA_SESSION:?ORCHESTRA_SESSION is required}"; sock="${ORCHESTRA_SOCKET:?ORCHESTRA_SOCKET is required}"
 NO_CONVERSATION='No conversation found to continue'
-stype="$(tag_get "$sock" "$session" "$TAG_SESSION_TYPE")"
+# The type comes from the record, else from Orchestra's own session-type extension as spawn.sh
+# wrote it: a session whose version was never published is still the dir player it was spawned as.
+session_record "$sock" "$session"; stype="${REC_TYPE:-$REC_ORCHESTRA_TYPE}"; recorded_claude_session="$REC_CLAUDE_SESSION"
 where=worktree; [ "$stype" = "$SESSION_TYPE_DIR" ] && where=directory
 RESTART_NOTE="Your session was restarted in this $where; files and commits are intact, so do not redo finished work."
 
@@ -54,7 +58,10 @@ buf="$(prompt_buffer_name "$session")"
 # spawn.sh adds (tmux never creates an empty buffer, and an empty body is allowed).
 body="$(tmux -S "$sock" show-buffer -b "$buf" 2>/dev/null)" || fail "no task buffer $buf on $sock (rerun spawn.sh)"
 tmux -S "$sock" delete-buffer -b "$buf" 2>/dev/null
-remember() { tag_set "$sock" "$session" "$TAG_AGENT" "$1" 2>/dev/null; true; }
+remember() {
+  tq_reset; tq_set "$session" "$KEY_AGENT" "$1"; tq_unset "$session" "$KEY_AGENT_PROVISIONAL"
+  tq_run "$sock" 2>/dev/null && session_publish_version "$sock" "$session" 2>/dev/null; true
+}
 # <invocation> [restart note] <body>
 preamble() {
   local inv; case "$1" in codex) inv='$player';; *) inv="${ORCHESTRA_CLAUDE_SKILL:-/orchestra:player}";; esac
@@ -71,13 +78,13 @@ claude_conversation_args() {
   local id=""
   if [ "$stype" != "$SESSION_TYPE_DIR" ]; then [ "$mode" = resume ] && printf '%s\n' --continue; return 0; fi
   if [ "$mode" = resume ]; then
-    id="$(tag_get "$sock" "$session" "$TAG_CLAUDE_SESSION")"
+    id="$recorded_claude_session"
     [ -n "$id" ] && printf '%s\n' --resume "$id"
     return
   fi
   id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null)" || :
   id="$(printf %s "$id" | tr A-F a-f)"
-  if [ -n "$id" ] && tag_set "$sock" "$session" "$TAG_CLAUDE_SESSION" "$id"; then printf '%s\n' --session-id "$id"
+  if [ -n "$id" ] && tag_set "$sock" "$session" "$KEY_CLAUDE_SESSION" "$id"; then printf '%s\n' --session-id "$id"
   else echo "player launch: could not record a Claude conversation id on $session; this dir player cannot be resumed" >&2; fi
   return 0
 }

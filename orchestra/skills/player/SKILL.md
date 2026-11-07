@@ -10,7 +10,9 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/report.sh *)
 
 You are a coding player in a dedicated tmux session, git worktree and branch — or, as a dir
 player, in an existing directory with no branch or worktree of your own (a reviewer, or work
-outside any repo). Your session's `@orchestra-session-type` tag says which: `worktree` or `dir`.
+outside any repo). Your session's tags say which: a dir player has `@session-x-orchestra-session-type`
+`dir` and no `@session-worktree`; a worktree player has `@session-worktree`, whichever tool created
+its session.
 Nobody necessarily watches the pane. Anything a human must know goes through
 the bundled `scripts/report.sh`. Invoke this skill explicitly with the assignment
 supplied by the orchestrator.
@@ -28,12 +30,12 @@ Every `report.sh` call below uses the command resolved above.
 ## Reporting target
 
 Your orchestrator is recorded on your own tmux session as the session user option (tag)
-`@orchestra-orchestrator`: `claude:<session-id>` (a Claude Code or Claude Desktop session, found
+`@session-x-orchestra-orchestrator`: `claude:<session-id>` (a Claude Code or Claude Desktop session, found
 by its id whether or not it runs in tmux), `codex:<thread-id>` or `tmux:<session>`, or, when your
 orchestrator is on a different machine than you, `beam:<orchestrator peerId>/` followed by one of
 those three (a peerId is beam's 32-character lowercase hex machine identity). The
 scripts that spawn or adopt you set it, with the orchestrator's Claude config directory beside a
-`claude:` target in `@orchestra-orchestrator-config`. `report.sh` finds your own session through
+`claude:` target in `@session-x-orchestra-orchestrator-config`. `report.sh` finds your own session through
 `ORCHESTRA_SESSION` and `ORCHESTRA_SOCKET` (the tmux server socket that holds it), which
 `spawn.sh` injects; in a pane `spawn.sh` did not start (a session another tool created that an
 orchestrator adopted) it derives them from tmux's own `TMUX` variable instead. You cannot change
@@ -79,8 +81,8 @@ between tool calls, and `report.sh` prints `sent to <session-id> (inbox)`; it is
 anywhere. A tmux orchestrator running Claude Code gets it the same way (`sent to <session>
 (inbox)`); a Codex TUI gets it through `codex queue` (`(queue)`); any other orchestrator gets it
 pasted into its pane (`(paste)`). It then
-records `<KIND> <timestamp> <delivered|stored|inbox|queue|paste>` in your session's `@orchestra-last-report`
-tag — a third field beyond the kind and timestamp.
+records `<KIND> <timestamp> <delivered|stored|inbox|queue|paste>` in your session's
+`@session-x-orchestra-last-report` tag — a third field beyond the kind and timestamp.
 
 When your orchestrator is on another machine and beam cannot hand the report over right away —
 that machine is offline, or has not acknowledged it yet — beam keeps the report on disk and goes
@@ -90,7 +92,7 @@ on delivering it, and `report.sh` prints beam's own sentence for that case, for 
 stored for <peerId>; delivery pending (<peerId> is offline). beam will deliver it when <peerId> connects. Do not send it again.
 ```
 
-This exits 0 and sets `@orchestra-last-report`'s third field to `stored`. Treat it exactly like
+This exits 0 and sets `@session-x-orchestra-last-report`'s third field to `stored`. Treat it exactly like
 `sent to …`: the report is done, nothing was lost, and sending it again would deliver it twice.
 
 On failure — a local target gone or unreachable, a Claude session that is no longer running, a

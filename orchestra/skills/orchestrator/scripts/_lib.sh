@@ -65,7 +65,7 @@ r() {
 # Root of the MAIN checkout, even when run from inside a linked worktree: the common git dir
 # lives in the main checkout, so its parent is the main root. Falling back to --show-toplevel
 # covers repos too old for --path-format. Symlink-resolved: the string is compared for equality
-# with the @orchestra-repo tag, which the contract defines as the resolved path — on a remote
+# with the @session-repo tag, which the convention defines as the resolved path — on a remote
 # machine that means resolved there, since that is the machine the worktree lives on.
 repo_root() {
   local common root
@@ -145,15 +145,16 @@ free_session_name() {
 
 # --- Resolver: identity is the tags ------------------------------------------------------------
 # One list-sessions call gives every session with the fields the resolver needs, tab-separated:
-# name, session_created, session_path, spawner, repo, session-type, branch, worktree path (tags expand to ""
-# when unset; values never contain tabs). No tmux-side (-f) filter: matching is done here so the
-# same rules work on every tmux Kirby supports.
+# name, session_created, session_path, then the normalized record (RECORD_AWK, _routing.sh):
+# launcher, repo, session-type, branch, worktree path, …, all empty for a session without a valid
+# record. Tags expand to "" when unset; values never contain tabs. No tmux-side (-f) filter:
+# matching is done here so the same rules work on every tmux n10 supports.
 TAB=$'\t'
 list_sessions_tagged() {
-  tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}#{$TAG_SPAWNER}${TAB}#{$TAG_REPO}${TAB}#{$TAG_SESSION_TYPE}${TAB}#{$TAG_BRANCH}${TAB}#{$TAG_WORKTREE_PATH}" 2>/dev/null || true
+  { tmux_on "" list-sessions -F "#{session_name}${TAB}#{session_created}${TAB}#{session_path}${TAB}$RECORD_FORMAT" 2>/dev/null || true; } | normalize_records 4
 }
-# Player sessions = spawner set, repo set AND session-type dir, or worktree with the checkout set,
-# whoever created them (Kirby's worktree sessions included). Same tab-separated fields as above.
+# Player sessions = a valid record that is a worktree player (launcher, repo and checkout set) or
+# a dir player, whoever created them (n10's worktree sessions included). Same fields as above.
 # This is the one definition of "ours" for listing, resolving, killing and adopting: a session whose
 # name we would have chosen but that lacks any of these tags is foreign, never attached, killed,
 # adopted or listed.
@@ -164,7 +165,7 @@ all_player_sessions() { player_sessions | cut -f1; }
 is_player_session() { player_sessions | cut -f1 | grep -qxF -- "$1"; }
 # find_player_session <repo> <checkout>: the worktree session whose tags equal (repo, checkout),
 # the checkout canonical as spawn.sh tags it; with an empty checkout, the dir player of <repo> (its
-# directory). @orchestra-branch is never consulted: the checkout may have switched branch since.
+# directory). The branch tag is never consulted: the checkout may have switched branch since.
 # With several (should not happen) the one created first, the others named on stderr and left alone.
 find_player_session() {
   local matches
@@ -240,17 +241,39 @@ PARENT_SESSION_MARKERS=(CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION
   CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_EXECPATH
   CLAUDE_CODE_NO_FLICKER CLAUDE_PID CLAUDE_EFFORT CODEX_THREAD_ID CODEX_SESSION_ID ORCHESTRA_MACHINE)
 
+# orchestrator_recordable <target>: can the target, and for a local claude: target this process's
+# Claude config dir, be recorded on a session? The config dir is taken canonical
+# (symlink-resolved, as the convention requires of a path) into ORCH_CONFIG_DIR, empty for any
+# other target. Says why not and fails otherwise, so a caller can stop before it changes anything:
+# a target that cannot be recorded would leave a player whose reports go nowhere, and a config
+# dir that cannot be recorded would leave report.sh looking in the wrong place.
+ORCH_CONFIG_DIR=""
+orchestrator_recordable() {
+  local cfg
+  ORCH_CONFIG_DIR=""
+  session_value_ok "$KEY_ORCHESTRATOR" "$1" ||
+    { echo "orchestra: the orchestrator target '$1' cannot be recorded in $KEY_ORCHESTRATOR (not a single-line UTF-8 value of at most 4096 bytes)" >&2; return 1; }
+  case "$1" in
+    claude:*)
+      cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; cfg="$(cd "$cfg" 2>/dev/null && pwd -P)" || cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      session_value_ok "$KEY_ORCH_CONFIG" "$cfg" ||
+        { echo "orchestra: the Claude config dir '$cfg' cannot be recorded in $KEY_ORCH_CONFIG (not an absolute, canonical path)" >&2; return 1; }
+      ORCH_CONFIG_DIR="$cfg";;
+  esac
+}
 # set_orchestrator <socket> <session> <target>: point a player's reports at <target>. A local
 # claude: target is found through the orchestrator's Claude config dir, which the player's own
 # environment need not share, so it goes on beside the target (first: report.sh never sees the
 # target without it); every other target drops it. A beam-qualified one leaves the lookup to the
 # far side's relay, with its own environment.
+# Both keys travel in one queue, the config dir ahead of the target; nothing is written when
+# either cannot be recorded.
 set_orchestrator() {
-  case "$3" in
-    claude:*) tag_set "$1" "$2" "$TAG_ORCH_CONFIG" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" || return 1;;
-    *) tag_unset "$1" "$2" "$TAG_ORCH_CONFIG" 2>/dev/null || :;;
-  esac
-  tag_set "$1" "$2" "$TAG_ORCHESTRATOR" "$3"
+  orchestrator_recordable "$3" || return 1
+  tq_reset
+  if [ -n "$ORCH_CONFIG_DIR" ]; then tq_set "$2" "$KEY_ORCH_CONFIG" "$ORCH_CONFIG_DIR"; else tq_unset "$2" "$KEY_ORCH_CONFIG"; fi
+  tq_set "$2" "$KEY_ORCHESTRATOR" "$3"
+  tq_run "$1"
 }
 
 # Marking an orchestrator's own session: a tool reading the server (n10's tab strip) can tell
@@ -284,20 +307,21 @@ orchestrator_home() {
   ORCH_HOME_SOCK="${TMUX%%,*}"; ORCH_HOME_TARGET="$2"
 }
 # mark_orchestrator_session: write the remembered local target (never beam-qualified: the session
-# is on this machine) as the home session's @orchestra-target. One value: a later orchestrator in
-# the same session replaces it. Any other session on that server holding the same value gives it up
-# first — the conversation was resumed here — so one server never has two claimants (another
-# server, or another machine, can still hold a stale one). Best effort — the player already points
+# is on this machine) as the home session's @session-x-orchestra-target. The mark is vendor data:
+# it never makes that session participate in the convention, and its owner's record is left as it
+# is. One value: a later orchestrator in the same session replaces it. Any other session on that
+# server holding the same value gives it up first — the conversation was resumed here — so one
+# server never has two claimants (another server, or another machine, can still hold a stale one). Best effort — the player already points
 # at its target, so a failure warns and spawning carries on.
 mark_orchestrator_session() {
   [ -n "$ORCH_HOME_SESSION" ] || return 0
   local name value
   while IFS="$TAB" read -r name value; do
     [ "$value" = "$ORCH_HOME_TARGET" ] && [ "$name" != "$ORCH_HOME_SESSION" ] || continue
-    tmux -u -S "$ORCH_HOME_SOCK" set-option -u -t "$(tmux_target "$name")" "$TAG_TARGET" 2>/dev/null || :
-  done < <(tmux -u -S "$ORCH_HOME_SOCK" list-sessions -F "#{session_name}$TAB#{$TAG_TARGET}" 2>/dev/null)
-  tmux -u -S "$ORCH_HOME_SOCK" set-option -t "$(tmux_target "$ORCH_HOME_SESSION")" "$TAG_TARGET" "$ORCH_HOME_TARGET" 2>/dev/null ||
-    echo "warning: could not set $TAG_TARGET on this orchestrator's session $ORCH_HOME_SESSION" >&2
+    tmux -u -S "$ORCH_HOME_SOCK" set-option -u -t "$(tmux_target "$name")" "$KEY_TARGET" 2>/dev/null || :
+  done < <(tmux -u -S "$ORCH_HOME_SOCK" list-sessions -F "#{session_name}$TAB#{$KEY_TARGET}" 2>/dev/null)
+  tmux -u -S "$ORCH_HOME_SOCK" set-option -t "$(tmux_target "$ORCH_HOME_SESSION")" "$KEY_TARGET" "$ORCH_HOME_TARGET" 2>/dev/null ||
+    echo "warning: could not set $KEY_TARGET on this orchestrator's session $ORCH_HOME_SESSION" >&2
 }
 
 # Deliver multi-line text to a pane as one bracketed paste on the default/current server, like
