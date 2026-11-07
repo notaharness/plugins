@@ -26,7 +26,7 @@
 # --resume restarts the player's conversation in its existing worktree; the session may be
 # a dead pane or gone entirely. The launcher adds a restart note; give --prompt for a new
 # assignment. The original task is never replayed. Harness: --agent, else the session's
-# @orchestra-agent tag, else Claude --continue and, only when Claude reports "No conversation
+# @session-agent tag, else Claude --continue and, only when Claude reports "No conversation
 # found to continue", Codex (the newest recorded Codex conversation whose cwd is this
 # worktree). Any other failure stops with a dead pane for inspection; nothing starts a fresh
 # conversation silently. --model/--effort are applied on resume only when given; otherwise the
@@ -34,8 +34,8 @@
 #
 # --dir starts a dir player in an existing directory (a reviewer, or work outside any repo) instead
 # of a worktree; it takes no --branch, --repo or --from and creates nothing on disk. It is a player
-# in every other respect, tagged @orchestra-session-type dir with its directory (resolved) in
-# @orchestra-repo and no @orchestra-branch, labelled <basename of the directory>-dir, and addressed
+# in every other respect, tagged session-type dir with its directory (resolved) in @session-cwd
+# and no branch, worktree or repo key, labelled <basename of the directory>-dir, and addressed
 # by that session name everywhere; --dir <path> --resume finds it again by its directory (see
 # _launch.sh for which conversation it continues).
 #
@@ -52,11 +52,13 @@
 # whatever the label. Worktrees always land under the MAIN checkout, even when spawn.sh is
 # invoked from inside another worktree.
 #
-# Session state lives on the tmux session as user options (see _routing.sh for the names):
-# @orchestra-spawner/-repo/-session-type/-branch (identity, written once at creation),
-# @orchestra-orchestrator (reporting target, with @orchestra-orchestrator-config for a Claude
-# session), @orchestra-agent (harness) and
-# @orchestra-launching (placeholder marker), all set before anything else sees the session. The task body is
+# Session state lives on the tmux session as user options, the shared convention's @session-*
+# keys and Orchestra's @session-x-orchestra-* extensions (see _routing.sh for the names). In
+# order, before the harness starts: identity (launcher, repo or cwd, session-type, branch,
+# worktree, pane; written once at creation, in one tmux command queue), the launching marker, the
+# reporting target (with the orchestrator's Claude config dir for a Claude session), the
+# orchestrator's own session mark, the agent and, last, @session-version 1, which registers the
+# session. The task body is
 # loaded into the paste buffer orchestra-prompt-<session> from stdin and read by _launch.sh
 # inside the pane, so prompt size is not bounded by tmux's ~16 KiB command limit and nothing
 # is written to disk. The launcher prefixes it with the player invocation: $player for Codex,
@@ -75,7 +77,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --agent) AGENT="$2"; shift;; --model) MODEL="$2"; shift;; --effort) EFFORT="$2"; shift;; --permission-mode) PERM="$2"; shift;;
   --cmd) CMD="$2"; shift;; --from) FROM="$2"; shift;; --no-node-modules) LINK_NM=0;;
   --orchestrator) ORCH="$2"; shift;; --repo) ORCH_REPO="$2"; shift;; --machine) ORCH_MACHINE="$2"; shift;;
-  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,70p' "$0"; exit 0;;
+  --dry-run) DRY=1;; --resume) RESUME=1;; -h|--help) sed -n '2,72p' "$0"; exit 0;;
   *) echo "spawn.sh: unknown argument $1" >&2; exit 2;; esac; shift; done
 if [ -n "$DIR" ]; then
   [ -z "$BRANCH$ORCH_REPO$FROM" ] || { echo "spawn.sh: --dir starts a player without a worktree; it takes no --branch, --repo or --from" >&2; exit 2; }
@@ -123,7 +125,6 @@ else
   ORCH_SOCK="$MACHINE_SOCKET"
 fi
 t() { tmux_on "$ORCH_SOCK" "$@"; }        # -u -S: reads are exact in any locale
-tag() { tag_set "$ORCH_SOCK" "$name" "$@"; }
 
 LAUNCHER="$(realpath "$ORCH_SCRIPTS/_launch.sh")"
 # The launcher runs inside the pane, so on ORCH_MACHINE, where this machine's absolute path
@@ -141,7 +142,7 @@ if ! is_local_machine; then
   LAUNCHER="$remote_launcher"
 fi
 CLAUDE_INVOCATION="$(claude_player_invocation)"
-# root is what @orchestra-repo holds and workdir where the pane runs: the main checkout and its
+# root is what @session-repo (a dir player's @session-cwd) holds and workdir where the pane runs: the main checkout and its
 # worktree, or for a dir player its directory, both times (resolved on ORCH_MACHINE, which also
 # proves it exists there; r's --cwd expands a remote "~/").
 if [ -n "$DIR" ]; then
@@ -183,8 +184,9 @@ if [ -z "$DIR" ]; then checkout="$workdir"; ! dir_exists || resolve_checkout; fi
 EXISTING=none
 if name="$(find_player_session "$root" "$checkout")"; then      # before TMUX is unset: the same server ORCH_SOCK names
   tt="$(tmux_target "$name")"
+  session_record "$ORCH_SOCK" "$name"      # the record the placeholder marker and the harness come from
   if [ "$(t display-message -p -t "$tt" '#{pane_dead}')" = 1 ]; then EXISTING=dead
-  elif [ "$(tag_get "$ORCH_SOCK" "$name" "$TAG_LAUNCHING")" = 1 ]; then EXISTING=placeholder
+  elif [ "$REC_LAUNCHING" = 1 ]; then EXISTING=placeholder
   else EXISTING=running; fi
 fi
 # The session owns the checkout whichever branch it is on; say so when that is not --branch, or a
@@ -215,7 +217,7 @@ fi
 MODE=fresh; [ $RESUME = 1 ] && MODE=resume
 HARNESS="$AGENT"
 if [ $RESUME = 1 ] && [ -z "$HARNESS" ]; then
-  [ "$EXISTING" = none ] || HARNESS="$(tag_get "$ORCH_SOCK" "$name" "$TAG_AGENT")"
+  [ "$EXISTING" = none ] || HARNESS="$REC_AGENT"
   case "$HARNESS" in claude|codex|gemini|copilot|opencode) ;; *) HARNESS=auto;; esac
 fi
 [ $RESUME = 1 ] || HARNESS="${HARNESS:-claude}"
@@ -323,10 +325,10 @@ unset TMUX TMUX_PANE
 # Created DETACHED under the first free label. 220x50 is only the initial size; whatever
 # attaches later resizes the pane. If no server is running, this call starts one — with the
 # markers stripped, so nothing of the orchestrator's own agent session leaks into every future
-# pane. The identity tags go on before anything else can observe the session; they are written
-# by the creator only, so a resume never rewrites them. The placeholder exists so remain-on-exit
-# is already set when the real command starts and catches startup failures.
-CREATED=0
+# pane. The identity tags go on before anything else can observe the session, in one queue; they
+# are written by the creator only, so a resume never rewrites them. The placeholder exists so remain-on-exit is already set when the real command
+# starts and catches startup failures; its pane, which respawn-pane -k keeps, is @session-pane.
+CREATED=0; pane=""
 if [ "$EXISTING" = none ]; then
   label="$name"
   while :; do
@@ -336,9 +338,9 @@ if [ "$EXISTING" = none ]; then
     # inherited orchestrator session to leak markers from in the first place, but the same strip
     # travels with it for consistency; -u matches every other tmux_on call there.
     if is_local_machine; then
-      env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -s "$name" -c "$workdir" -x 220 -y 50 && break
+      pane="$(env "${strip[@]}" tmux -S "$ORCH_SOCK" new-session -d -P -F '#{pane_id}' -s "$name" -c "$workdir" -x 220 -y 50)" && break
     else
-      beam_exec "$ORCH_MACHINE" env "${strip[@]}" tmux -u -S "$ORCH_SOCK" new-session -d -s "$name" -c "$workdir" -x 220 -y 50 && break
+      pane="$(beam_exec "$ORCH_MACHINE" env "${strip[@]}" tmux -u -S "$ORCH_SOCK" new-session -d -P -F '#{pane_id}' -s "$name" -c "$workdir" -x 220 -y 50)" && break
     fi
     # Lost a race for the name (it exists now): probe again from the preferred label, so a second
     # lost race yields -3, not -2-2. Anything else is fatal.
@@ -346,14 +348,37 @@ if [ "$EXISTING" = none ]; then
   done
   CREATED=1
   tt="$(tmux_target "$name")"
-  tag "$TAG_SPAWNER" orchestra && tag "$TAG_REPO" "$root" && tag "$TAG_SESSION_TYPE" "$TYPE" && { [ -n "$DIR" ] || { tag "$TAG_BRANCH" "$BRANCH" && tag "$TAG_WORKTREE_PATH" "$checkout"; }; } ||
+  pane="${pane%%$nl*}"
+  # The identity, in one queue. A required value the convention cannot carry (a path with a
+  # control character, say) would leave a session no reader recognises: refuse it rather than
+  # strand it.
+  identity=("$KEY_LAUNCHER=orchestra" "$KEY_SESSION_TYPE=$TYPE")
+  if [ -n "$DIR" ]; then identity+=("$KEY_CWD=$root")
+  else identity+=("$KEY_REPO=$root" "$KEY_WORKTREE=$checkout" "$KEY_CWD=$checkout" "$KEY_BRANCH=$BRANCH"); fi
+  tq_reset
+  for kv in "${identity[@]}"; do
+    session_value_ok "${kv%%=*}" "${kv#*=}" ||
+      { t kill-session -t "=$name" 2>/dev/null; echo "spawn.sh: '${kv#*=}' cannot be recorded as ${kv%%=*} (not a single-line UTF-8 value, or not a canonical path); session $name removed" >&2; exit 1; }
+    tq_set "$name" "${kv%%=*}" "${kv#*=}"
+  done
+  tq_set "$name" "$KEY_PANE" "$pane"
+  tq_run "$ORCH_SOCK" ||
     { t kill-session -t "=$name" 2>/dev/null; echo "spawn.sh: could not tag session $name; removed" >&2; exit 1; }
+else
+  # An existing session is respawned in the pane =name: resolves to. Before its agent is
+  # replaced, any status a reporter published for the old one is withdrawn.
+  tq_reset; tq_unset "$name" "$KEY_STATUS"; tq_unset "$name" "$KEY_STATUS_KIND"; tq_unset "$name" "$KEY_STATUS_AT"
+  tq_run "$ORCH_SOCK" || { echo "spawn.sh: could not update the tags of $name; nothing was started" >&2; exit 1; }
 fi
 buf="$(prompt_buffer_name "$name")"
-tag "$TAG_LAUNCHING" 1 || exit 1
+tag_set "$ORCH_SOCK" "$name" "$KEY_LAUNCHING" 1 || exit 1
 set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
 mark_orchestrator_session
-case "$HARNESS" in auto) ;; *) tag "$TAG_AGENT" "$HARNESS";; esac
+case "$HARNESS" in
+  auto) ;;
+  *) tag_set "$ORCH_SOCK" "$name" "$KEY_AGENT" "$HARNESS" && session_publish_version "$ORCH_SOCK" "$name" ||
+       echo "spawn.sh: could not record the agent on $name" >&2;;
+esac
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on
 # The task body, from stdin. tmux never creates an empty buffer, so a newline is appended
@@ -366,7 +391,9 @@ printf '%s\n' "$PROMPT" | t load-buffer -b "$buf" - || { echo "spawn.sh: tmux co
 # keeps what its own server gave it, same as every other user option this call does not name.
 path_env=(); is_local_machine && path_env=(-e "PATH=$PATH" -e "HOME=$HOME")
 if is_local_machine; then for v in "${ACCOUNT_VARS[@]}"; do [ -z "${!v:-}" ] || path_env+=(-e "$v=${!v}"); done; fi
-if ! t respawn-pane -k -t "$tt" -c "$workdir" \
+# A session created here is respawned by its pane ID, the pane its record names.
+respawn_target="$tt"; [ $CREATED = 1 ] && [[ "$pane" =~ ^%[0-9]+$ ]] && respawn_target="$pane"
+if ! t respawn-pane -k -t "$respawn_target" -c "$workdir" \
   "${path_env[@]}" \
   -e "ORCHESTRA_SESSION=$name" -e "ORCHESTRA_SOCKET=$ORCH_SOCK" \
   -e "ORCHESTRA_MODE=$MODE" -e "ORCHESTRA_HARNESS=$HARNESS" -e "ORCHESTRA_MODEL=$MODEL" -e "ORCHESTRA_EFFORT=$EFFORT" \
@@ -381,5 +408,5 @@ if ! t respawn-pane -k -t "$tt" -c "$workdir" \
   fi
   exit 1
 fi
-tag_unset "$ORCH_SOCK" "$name" "$TAG_LAUNCHING"
+tag_unset "$ORCH_SOCK" "$name" "$KEY_LAUNCHING"
 echo "started   $name"

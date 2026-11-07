@@ -86,10 +86,10 @@ checks after adequate evidence unless a new change or unresolved concern warrant
 Spawn/adopt chooses the reporting target: explicit `--orchestrator`, then a verified live Claude
 session with an inbox, else Codex thread/session ID, else current tmux session. Claude ignores
 inherited Codex IDs. Missing or stale identity is an error; do not guess a destination or use a
-player's ID as its parent. The target lives in `@orchestra-orchestrator`, with the config directory
+player's ID as its parent. The target lives in `@session-x-orchestra-orchestrator`, with the config directory
 beside local Claude targets; players do not change it. When that target is the orchestrator's
 own `claude:` or `codex:` identity and it runs inside tmux, spawn/adopt also write it as
-`@orchestra-target` on the orchestrator's own session, so n10 can group the players under that
+`@session-x-orchestra-target` on the orchestrator's own session, so n10 can group the players under that
 session's tab. An explicit `--orchestrator` naming another orchestrator leaves it alone.
 
 Local players inherit the launching process's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly,
@@ -123,7 +123,7 @@ Harness selection is explicit `--agent`, then the session tag, else Claude `--co
 Claude's "No conversation found to continue" permits fallback to the newest Codex conversation
 for that worktree; other failures leave a dead pane to inspect, not a fresh task.
 
-`spawn.sh --dir PATH --resume` uses the exact `@orchestra-claude-session` for a Claude dir player,
+`spawn.sh --dir PATH --resume` uses the exact `@session-x-orchestra-claude-session` for a Claude dir player,
 so it cannot resume after that session/tag is lost; Codex uses the directory's newest conversation.
 For reboot, power loss or tmux-server failure, read [Recovering after a crash](references/operations.md#recovering-after-a-crash)
 before resuming: worktrees survive, but tags, in-flight work and scheduled check-ins do not.

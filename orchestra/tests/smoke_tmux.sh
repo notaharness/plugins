@@ -14,12 +14,13 @@ ROOT="${1:-$(dirname "$(realpath "$0")")/../skills}"
 O="$ROOT/orchestrator/scripts"; P="$ROOT/player/scripts"
 INV=/orchestra:player
 [ -f "$ROOT/../.claude-plugin/plugin.json" ] && INV="/$(sed -nE 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$ROOT/../.claude-plugin/plugin.json" | head -n1):player"
-T="$(mktemp -d /tmp/orch-smoke.XXXXXX)"; SOCK="$T/tmux.sock"
+T="$(mktemp -d /tmp/orch-smoke.XXXXXX)"; mkdir -p "$T/home/tmux"; SOCK="$T/home/tmux/smoke.sock"   # inside the fixture HOME
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  ok   $1"; }
 bad() { fail=$((fail+1)); echo "  FAIL $1"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-cleanup() { tmux -S "$SOCK" kill-server 2>/dev/null; rm -rf "$T"; }
+# The scratch server goes away with its last session; it is never sent kill-server.
+cleanup() { local s; for s in $(tmux -S "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null); do tmux -S "$SOCK" kill-session -t "$s" 2>/dev/null; done; rm -rf "$T"; }
 trap cleanup EXIT
 tm() { tmux -S "$SOCK" "$@"; }
 tag() { tm show-options -qv -t "=$1:" "$2"; }
@@ -41,6 +42,7 @@ export PATH="$T/bin:$PATH"
 export CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CODEX_THREAD_ID=11111111-2222-3333-4444-555555555555
 unset CLAUDE_CODE_SESSION_ID CLAUDE_PID     # the session running this script is not the orchestrator under test
 export CLAUDE_CONFIG_DIR="$T/claude-config" ANTHROPIC_API_KEY=fake-key CODEX_HOME="$T/codex-home"
+export HOME="$T/home"                                     # a fixture HOME: nothing of the user's is read or written
 for v in $(env | grep -oE '^(ORCHESTRA_|ORCHESTRATOR_|PLAYER_)[A-Z_]+'); do unset "$v"; done
 
 # Temporary repository and an orchestrator session on the scratch server.
@@ -77,10 +79,11 @@ check "config/auth preserved" "grep -q 'CLAUDE_CONFIG_DIR=$T/claude-config' '$T/
 check "tmux isolated" "grep -q 'TMUX= TMUX_TMPDIR=/tmp/orchestra-agent-tmux' '$T/last-claude'"
 check "ORCHESTRA_* environment injected" "grep -qx 'env ORCHESTRA_SESSION=$S1' '$T/last-claude' && grep -qx 'env ORCHESTRA_SOCKET=$SOCK' '$T/last-claude' && grep -qx 'env ORCHESTRA_MODE=fresh' '$T/last-claude'"
 check "no PLAYER_/ORCHESTRATOR_/ORCHESTRA_PLAYER environment" "! grep -qE '^env (PLAYER_|ORCHESTRATOR_|ORCHESTRA_PLAYER)' '$T/last-claude'"
-check "identity tags" "[ \"\$(tag $S1 @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $S1 @orchestra-repo)\" = '$REPO' ] && [ \"\$(tag $S1 @orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @orchestra-branch)\" = feature/x ] && [ \"\$(tag $S1 @orchestra-worktree-path)\" = \"\$(cd '$W1' && pwd -P)\" ]"
-check "orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
-check "harness tag" "[ \"\$(tag $S1 @orchestra-agent)\" = claude ]"
-check "launching flag cleared" "[ -z \"\$(tag $S1 @orchestra-launching)\" ]"
+check "identity tags" "[ \"\$(tag $S1 @session-launcher)\" = orchestra ] && [ \"\$(tag $S1 @session-repo)\" = '$REPO' ] && [ \"\$(tag $S1 @session-x-orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @session-x-orchestra-branch)\" = feature/x ] && [ \"\$(tag $S1 @session-worktree)\" = \"\$(cd '$W1' && pwd -P)\" ]"
+check "the record: version, pane, cwd, no legacy tags" "[ \"\$(tag $S1 @session-version)\" = 1 ] && [ \"\$(tag $S1 @session-pane)\" = \"\$(tm display-message -p -t '=$S1:' '#{pane_id}')\" ] && [ \"\$(tag $S1 @session-cwd)\" = \"\$(cd '$W1' && pwd -P)\" ] && ! tm show-options -t '=$S1:' | grep -q '^@orchestra-'"
+check "orchestrator tag" "[ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ]"
+check "harness tag" "[ \"\$(tag $S1 @session-agent)\" = claude ]"
+check "launching flag cleared" "[ -z \"\$(tag $S1 @session-x-orchestra-launching)\" ]"
 check "prompt buffer consumed" "! tm list-buffers -F '#{buffer_name}' | grep -q '^orchestra-prompt-'"
 check "no state files in the worktree git dir" "[ -z \"\$(ls \"\$(GITDIR1)\" | grep -E '^player-')\" ]"
 check "spawn refuses running session" "! bash '$O/spawn.sh' --repo '$T/repo' --branch feature/x --prompt x --no-node-modules 2>/dev/null"
@@ -93,9 +96,9 @@ echo "# report.sh from the player to tmux:parent"
 check "report exits 0; a pane without a Claude inbox gets a paste" "[ $? = 0 ] && grep -qx 'sent to parent (paste)' '$T/report.out'"
 sleep 0.5
 check "parent received report under the session name" "grep -q '\[player $S1\] PROGRESS: hello from smoke' '$T/received-claude'"
-check "last-report tag set" "tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP paste\$'"
+check "last-report tag set" "tag $S1 @session-x-orchestra-last-report | grep -Eq '^PROGRESS $STAMP paste\$'"
 check "--orchestrator prints the tag" "[ \"\$(player --orchestrator)\" = tmux:parent ]"
-(cd "$W1" && player --orchestrator tmux:other >/dev/null 2>&1); check "player cannot rebind itself" "[ $? = 2 ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
+(cd "$W1" && player --orchestrator tmux:other >/dev/null 2>&1); check "player cannot rebind itself" "[ $? = 2 ] && [ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 (unset TMUX; tm kill-session -t "=parent")
 tm show-options -t "=$S1:" > "$T/options-before-report"
 (cd "$W1" && player DONE "gone parent") >"$T/report2.out" 2>"$T/report2.err"
@@ -103,7 +106,7 @@ check "gone parent -> nonzero, error on stderr" "[ $? = 1 ] && grep -qx 'report.
 check "error includes target, reason and report" "grep -qx 'Target: tmux:parent' '$T/report2.err' && grep -q '^Reason: orchestrator session parent is gone' '$T/report2.err' && grep -qF 'Report: [player $S1] DONE: gone parent' '$T/report2.err'"
 (cd "$W1" && player BLOCKED "second"$'\n'"line") >"$T/report-multiline.out" 2>"$T/report-multiline.err"
 check "failed report preserves multiple lines" "[ $? = 1 ] && grep -qF 'Report: [player $S1] BLOCKED: second' '$T/report-multiline.err' && grep -qx 'line' '$T/report-multiline.err'"
-check "last-report unchanged by refused reports" "tag $S1 @orchestra-last-report | grep -q '^PROGRESS '"
+check "last-report unchanged by refused reports" "tag $S1 @session-x-orchestra-last-report | grep -q '^PROGRESS '"
 tm show-options -t "=$S1:" > "$T/options-after-report"
 check "failed deliveries do not change session options" "cmp -s '$T/options-before-report' '$T/options-after-report'"
 (cd "$W1" && unset TMUX TMUX_PANE && ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" DONE "no session") >"$T/report3.out" 2>"$T/report3.err"   # neither ORCHESTRA_SESSION nor TMUX
@@ -129,18 +132,18 @@ printf '{"pid":%s,"procStart":"%s","messagingSocketPath":"%s","kind":"interactiv
   "$(sed 's/.*) //' "/proc/$cpid/stat" | awk '{print $20}')" "$T/inbox.sock" > "$CLAUDE_CONFIG_DIR/sessions/$cpid.json"
 socat -u UNIX-LISTEN:"$T/inbox.sock" OPEN:"$T/inbox-received",creat,trunc & inbox_pid=$!
 for _ in $(seq 50); do [ -S "$T/inbox.sock" ] && break; sleep 0.1; done
-tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:claude-orch"
+tm set-option -t "=$S1:" @session-x-orchestra-orchestrator "tmux:claude-orch"
 (cd "$W1" && player DONE "to the inbox"$'\n'"second \"line\"") >"$T/inbox.out" 2>&1; irc=$?
 wait "$inbox_pid"
 check "claude orchestrator: sent to its inbox, tag says inbox" \
-  "[ $irc = 0 ] && grep -qx 'sent to claude-orch (inbox)' '$T/inbox.out' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
+  "[ $irc = 0 ] && grep -qx 'sent to claude-orch (inbox)' '$T/inbox.out' && tag $S1 @session-x-orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
 check "the inbox got exactly one NDJSON user frame with the report" \
   "[ \"\$(wc -l < '$T/inbox-received')\" = 1 ] && python3 -c 'import json,sys; m=json.loads(open(sys.argv[1]).read()); assert m == {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"[player '$S1'] DONE: to the inbox\\nsecond \\\"line\\\"\"}}, m' '$T/inbox-received'"
 check "nothing was typed into the claude pane" "! tm capture-pane -p -t '=claude-orch:' | grep -q 'to the inbox'"
 rm -f "$T/inbox.sock"
 (cd "$W1" && player PROGRESS "socket gone") >"$T/inbox-gone.out" 2>&1
 check "no live inbox socket: falls back to a paste" "grep -qx 'sent to claude-orch (paste)' '$T/inbox-gone.out'"
-tm kill-session -t '=claude-orch'; tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
+tm kill-session -t '=claude-orch'; tm set-option -t "=$S1:" @session-x-orchestra-orchestrator "tmux:parent"
 
 echo "# a Claude orchestrator outside tmux is addressed by session id: no pane, never a paste"
 # A Claude Code process with no pane, registered under its OWN config dir (not the player's) the
@@ -158,13 +161,13 @@ register "$ostart"; listen
 (export CLAUDE_CODE_SESSION_ID="$SID" CLAUDE_PID="$opid" CLAUDE_CONFIG_DIR="$OCFG"   # $TMUX still names parent's pane
  bash "$O/spawn.sh" --repo "$T/repo" --branch feature/c --from HEAD --prompt c --no-node-modules --agent claude) >"$T/spawn-c.out" 2>&1
 check "spawned from Claude inside tmux: the target is its session id, beside its config dir" \
-  "[ \"\$(tag $SC @orchestra-orchestrator)\" = 'claude:$SID' ] && [ \"\$(tag $SC @orchestra-orchestrator-config)\" = '$OCFG' ]"
+  "[ \"\$(tag $SC @session-x-orchestra-orchestrator)\" = 'claude:$SID' ] && [ \"\$(tag $SC @session-x-orchestra-orchestrator-config)\" = '$OCFG' ]"
 sleep 1                                                              # the server started under $T/claude-config
 check "the player runs on the orchestrator's Claude config dir, not the tmux server's" "grep -q 'CLAUDE_CONFIG_DIR=$OCFG ' '$T/last-claude'"
 sc() { (cd "$T/repo/.claude/worktrees/feature-c" && ORCHESTRA_SESSION="$SC" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" "$@"); }
 sc DONE "by session id"$'\n'"second \"line\"" >"$T/sid.out" 2>&1; src=$?; unlisten
 check "report reached the session registered under the orchestrator's config dir" \
-  "[ $src = 0 ] && grep -qx 'sent to $SID (inbox)' '$T/sid.out' && tag $SC @orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
+  "[ $src = 0 ] && grep -qx 'sent to $SID (inbox)' '$T/sid.out' && tag $SC @session-x-orchestra-last-report | grep -Eq '^DONE $STAMP inbox\$'"
 check "its inbox got exactly one NDJSON user frame with the report" \
   "python3 -c 'import json,sys; m=json.loads(open(sys.argv[1]).read()); assert m == {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"[player '$SC'] DONE: by session id\\nsecond \\\"line\\\"\"}}, m' '$T/sid-received'"
 register 1; listen                                                   # a recycled pid: the entry is stale
@@ -197,8 +200,8 @@ check "report.sh usage prints comments only" "bash '$P/report.sh' 2>&1 | grep -q
 echo "# labels collide, tags decide"
 foreign repo-feature-y                                             # a stranger already wears the label feature/y would get
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/y --from HEAD --prompt "collide" --no-node-modules --agent claude >"$T/spawn-y.out" 2>&1; sleep 1
-check "spawn takes the next free suffix" "grep -q '^started *repo-feature-y-2\$' '$T/spawn-y.out' && [ \"\$(tag repo-feature-y-2 @orchestra-branch)\" = feature/y ] && grep -qx 'env ORCHESTRA_SESSION=repo-feature-y-2' '$T/last-claude'"
-check "stranger left untagged" "[ -z \"\$(tag repo-feature-y @orchestra-spawner)\" ] && [ -z \"\$(tag repo-feature-y @orchestra-session-type)\" ]"
+check "spawn takes the next free suffix" "grep -q '^started *repo-feature-y-2\$' '$T/spawn-y.out' && [ \"\$(tag repo-feature-y-2 @session-x-orchestra-branch)\" = feature/y ] && grep -qx 'env ORCHESTRA_SESSION=repo-feature-y-2' '$T/last-claude'"
+check "stranger left untagged" "[ -z \"\$(tag repo-feature-y @session-launcher)\" ] && [ -z \"\$(tag repo-feature-y @session-x-orchestra-session-type)\" ]"
 check "spawn again sees the player, not the label" "bash '$O/spawn.sh' --repo '$T/repo' --branch feature/y --prompt x --no-node-modules 2>&1 | grep -q 'running: repo-feature-y-2'"
 bash "$O/send.sh" feature/y --repo "$T/repo" --raw "ping-y" >/dev/null && sleep 0.6
 check "branch resolves to the suffixed session" "grep -q ping-y '$T/received-claude'"
@@ -207,7 +210,7 @@ check "send.sh and screen.sh refuse the stranger" "! bash '$O/send.sh' repo-feat
 bash "$O/sessions.sh" --all --json > "$T/sessions-y.json" 2>/dev/null
 check "listing shows the player by tags and not the stranger" "jq -e '(map(.session) | index(\"repo-feature-y-2\")) and (map(.session) | index(\"repo-feature-y\") | not)' '$T/sessions-y.json' >/dev/null"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/y-2 --from HEAD --prompt "collide-2" --no-node-modules --agent claude >"$T/spawn-y2.out" 2>&1; sleep 1
-check "suffix goes on the preferred label" "grep -q '^started *repo-feature-y-2-2\$' '$T/spawn-y2.out' && [ \"\$(tag repo-feature-y-2-2 @orchestra-branch)\" = feature/y-2 ]"
+check "suffix goes on the preferred label" "grep -q '^started *repo-feature-y-2-2\$' '$T/spawn-y2.out' && [ \"\$(tag repo-feature-y-2-2 @session-x-orchestra-branch)\" = feature/y-2 ]"
 bash "$O/kill.sh" feature/y --repo "$T/repo" >/dev/null; bash "$O/kill.sh" feature/y-2 --repo "$T/repo" >/dev/null
 check "kills by branch hit only the tagged sessions" "! tm has-session -t '=repo-feature-y-2' 2>/dev/null && ! tm has-session -t '=repo-feature-y-2-2' 2>/dev/null && tm has-session -t '=repo-feature-y'"
 tm kill-session -t '=repo-feature-y'
@@ -215,32 +218,38 @@ tm kill-session -t '=repo-feature-y'
 echo "# adopt"
 bash "$O/adopt.sh" feature/x --repo "$T/repo" --orchestrator tmux:parent "new assignment text" >"$T/adopt.out" 2>&1
 check "adopt with text" "[ $? = 0 ] && sleep 0.6 && grep -q -F '$INV new assignment text' '$T/received-claude' && ! grep -q -F '$INV tmux:parent' '$T/received-claude'"
-check "adopt set the orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ] && [ \"\$(player --orchestrator)\" = tmux:parent ]"
+check "adopt set the orchestrator tag" "[ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ] && [ \"\$(player --orchestrator)\" = tmux:parent ]"
 # A plain shell at its prompt inside a player worktree, tagged as a player. /bin/sh has no startup
 # files, so the pane is settled before adopt.sh inspects it.
 (unset TMUX TMUX_PANE; tm new-session -d -s repo-shellonly -c "$W1" -x 80 -y 20 -- /bin/sh)
-for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch shellonly" "@orchestra-worktree-path $W1"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
+for kv in "@session-agent claude" "@session-launcher orchestra" "@session-repo $REPO" "@session-x-orchestra-session-type worktree" "@session-x-orchestra-branch shellonly" "@session-worktree $W1" "@session-cwd $W1" "@session-version 1"; do tm set-option -t '=repo-shellonly:' $kv; done; sleep 0.5
 check "adopt refuses shell pane" "! bash '$O/adopt.sh' repo-shellonly --repo '$T/repo' --orchestrator tmux:other 2>/dev/null"
-check "refused adopt left the tag alone" "[ -z \"\$(tag repo-shellonly @orchestra-orchestrator)\" ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
+check "refused adopt left the tag alone" "[ -z \"\$(tag repo-shellonly @session-x-orchestra-orchestrator)\" ] && [ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 tm kill-session -t "=repo-shellonly"
 # An agent-like pane (awk, not a shell) that nobody tagged: not ours, whatever its name says.
 (unset TMUX TMUX_PANE; tm new-session -d -s repo-untagged -c "$W1" -x 80 -y 20 -- awk '{ print }'); sleep 0.5
-check "adopt refuses an untagged session" "! bash '$O/adopt.sh' repo-untagged --repo '$T/repo' --orchestrator tmux:other 2>/dev/null && [ -z \"\$(tag repo-untagged @orchestra-orchestrator)\" ]"
+# A session Orchestra tagged before the convention: its @orchestra-* tags make it no player.
+(unset TMUX TMUX_PANE; tm new-session -d -s repo-legacy -c "$W1" -x 80 -y 20 -- awk '{ print }'); sleep 0.3
+for kv in "@orchestra-spawner orchestra" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch legacy" "@orchestra-worktree-path $W1" "@orchestra-agent claude"; do tm set-option -t '=repo-legacy:' $kv; done
+check "a legacy-only session is foreign to sessions, adopt and kill" "! bash '$O/sessions.sh' --all --json | jq -e '.[] | select(.session == \"repo-legacy\")' >/dev/null && ! bash '$O/adopt.sh' repo-legacy --orchestrator tmux:other 2>/dev/null && ! bash '$O/kill.sh' repo-legacy 2>/dev/null && tm has-session -t '=repo-legacy' && [ -z \"\$(tag repo-legacy @session-x-orchestra-orchestrator)\" ]"
+tm kill-session -t "=repo-legacy"
+check "adopt refuses an untagged session" "! bash '$O/adopt.sh' repo-untagged --repo '$T/repo' --orchestrator tmux:other 2>/dev/null && [ -z \"\$(tag repo-untagged @session-x-orchestra-orchestrator)\" ]"
 check "kill refuses an untagged session" "! bash '$O/kill.sh' repo-untagged --repo '$T/repo' 2>/dev/null && tm has-session -t '=repo-untagged'"
 tm kill-session -t "=repo-untagged"
 
-echo "# adopt a pane Kirby created; report.sh inside it resolves the session from TMUX"
-# Kirby tags its worktree sessions with spawner/repo/session-type/branch under its own label. The
+echo "# adopt a pane n10 created; report.sh inside it resolves the session from TMUX"
+# n10 records its worktree sessions under its own label, with its own branch and session-type
+# extensions. The
 # pane leader is awk (not a shell), so adopt.sh treats it as an agent; a REPORT line makes it run
 # report.sh from inside the pane, where only TMUX/TMUX_PANE identify the session.
 SA="repo-adopted"; WA="$REPO/.claude/worktrees/adopted"; git -C "$REPO" worktree add -q -b adopted "$WA"
 (unset TMUX TMUX_PANE; tm new-session -d -s "$SA" -c "$WA" -x 100 -y 20 -- awk -v P="$P" -v T="$T" '/REPORT/ { system("bash \"" P "/report.sh\" DONE \"from inside\" > \"" T "/inside.out\" 2>&1"); next } { print >> (T "/received-inside") }')
-for kv in "@orchestra-spawner kirby" "@orchestra-repo $REPO" "@orchestra-session-type worktree" "@orchestra-branch adopted" "@orchestra-worktree-path $WA"; do tm set-option -t "=$SA:" $kv; done
+for kv in "@session-agent claude" "@session-launcher n10" "@session-repo $REPO" "@session-x-n10-session-type worktree" "@session-x-n10-branch adopted" "@session-worktree $WA" "@session-cwd $WA" "@session-version 1"; do tm set-option -t "=$SA:" $kv; done
 sleep 0.5
-bash "$O/adopt.sh" adopted --repo "$T/repo" --orchestrator tmux:parent >/dev/null 2>&1; check "adopt of a Kirby pane by branch" "[ $? = 0 ] && [ \"\$(tag $SA @orchestra-orchestrator)\" = tmux:parent ]"
+bash "$O/adopt.sh" adopted --repo "$T/repo" --orchestrator tmux:parent >/dev/null 2>&1; check "adopt of an n10 pane by branch" "[ $? = 0 ] && [ \"\$(tag $SA @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 bash "$O/send.sh" adopted --repo "$T/repo" --raw "REPORT" >/dev/null 2>&1; sleep 1.5
 check "report.sh inside the pane delivered under the session name" "grep -q 'sent to parent' '$T/inside.out' && grep -q '\[player $SA\] DONE: from inside' '$T/received-claude'"
-check "last-report on the adopted session" "tag $SA @orchestra-last-report | grep -Eq '^DONE $STAMP paste\$'"
+check "last-report on the adopted session" "tag $SA @session-x-orchestra-last-report | grep -Eq '^DONE $STAMP paste\$'"
 tm kill-session -t "=$SA"
 
 echo "# resume: dead pane, restart note only, no task replay"
@@ -252,7 +261,7 @@ check "resume exits 0" "[ $rc = 0 ]"
 check "claude --continue with the restart note only" "grep -q '^arg=--continue' '$T/last-claude' && grep -q \"^arg=$INV Your session was restarted\" '$T/last-claude' && grep -q 'finished work\\.\$' '$T/last-claude' && ! grep -q 'END-OF-TASK' '$T/last-claude'"
 check "no model/effort on plain resume" "! grep -q '^arg=--model' '$T/last-claude' && ! grep -q '^arg=--effort' '$T/last-claude'"
 check "resume does not name the target" "! grep -q 'reporting target' '$T/last-claude' && grep -qx 'env ORCHESTRA_MODE=resume' '$T/last-claude'"
-check "resume keeps the orchestrator tag" "[ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
+check "resume keeps the orchestrator tag" "[ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 
 echo "# resume with a new assignment and explicit overrides"
 tm send-keys -t "=$S1:" C-d; sleep 0.8
@@ -261,9 +270,9 @@ sleep 1
 check "new assignment sent" "grep -q 'Now do the follow-up' '$T/last-claude' && ! grep -q 'END-OF-TASK' '$T/last-claude'"
 check "explicit overrides applied" "grep -q '^arg=opus' '$T/last-claude' && grep -q '^arg=max' '$T/last-claude'"
 
-echo "# resume: auto chain (no agent tag) -> claude says no conversation -> codex by cwd"
+echo "# resume: auto chain (no resumable agent recorded) -> claude says no conversation -> codex by cwd"
 tm send-keys -t "=$S1:" C-d; sleep 0.8
-tm set-option -u -t "=$S1:" @orchestra-agent
+tm set-option -t "=$S1:" @session-agent custom      # no resumable harness recorded
 touch "$T/fake-claude-noconv"; rm -f "$T/last-call"
 uuid=0199a000-1111-7000-8000-000000000042
 printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$uuid" "$(cd "$W1" && pwd -P)" > "$T/codex-home/sessions/2026/09/13/rollout-2026-09-13T10-00-00-$uuid.jsonl"
@@ -272,18 +281,18 @@ bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume >"$T/auto.out" 2
 sleep 2.5
 [ -n "${SMOKE_DEBUG:-}" ] && { echo "--- auto.out ---"; cat "$T/auto.out"; echo "--- screen ---"; bash "$O/screen.sh" "$S1" --lines 12 | cut -c1-160; echo "--- last-call ---"; cat "$T/last-call" 2>/dev/null | head -5; }
 check "codex resume with worktree uuid and prompt" "grep -q '^cli=codex' '$T/last-call' && grep -q '^arg=resume' '$T/last-call' && grep -q \"^arg=$uuid\" '$T/last-call' && grep -q '^arg=\$player Your session was restarted' '$T/last-call'"
-check "codex harness recorded in the agent tag" "[ \"\$(tag $S1 @orchestra-agent)\" = codex ]"
+check "codex harness recorded in the agent tag" "[ \"\$(tag $S1 @session-agent)\" = codex ]"
 rm -f "$T/fake-claude-noconv"
 
 echo "# resume: claude fails for another reason -> no codex fallback"
 tm send-keys -t "=$S1:" C-d; sleep 0.8
-tm set-option -u -t "=$S1:" @orchestra-agent
+tm set-option -t "=$S1:" @session-agent custom      # no resumable harness recorded
 echo 1 > "$T/fake-claude-exit"; rm -f "$T/last-call"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume >/dev/null 2>&1
 sleep 2
 check "claude ran, codex did not" "grep -q '^cli=claude' '$T/last-call' && ! grep -q '^cli=codex' '$T/last-call'"
 check "pane left dead for inspection" "[ \"\$(tm display-message -p -t '=$S1:' '#{pane_dead}')\" = 1 ]"
-check "failed launch leaves no agent tag" "[ -z \"\$(tag $S1 @orchestra-agent)\" ]"
+check "failed launch records no harness: the agent tag is unchanged" "[ \"\$(tag $S1 @session-agent)\" = custom ]"
 rm -f "$T/fake-claude-exit"
 
 echo "# resume: explicit --agent codex without any recorded conversation -> refuses, no fresh start"
@@ -298,35 +307,35 @@ tm kill-session -t "=$S1"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume --agent claude >/dev/null 2>&1; rc=$?
 sleep 1
 check "resume recreates session" "[ $rc = 0 ] && tm has-session -t '=$S1' && grep -q '^arg=--continue' '$T/last-claude'"
-check "recreated session carries the tags" "[ \"\$(tag $S1 @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $S1 @orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @orchestra-branch)\" = feature/x ] && [ \"\$(tag $S1 @orchestra-orchestrator)\" = tmux:parent ]"
+check "recreated session carries the tags" "[ \"\$(tag $S1 @session-launcher)\" = orchestra ] && [ \"\$(tag $S1 @session-x-orchestra-session-type)\" = worktree ] && [ \"\$(tag $S1 @session-x-orchestra-branch)\" = feature/x ] && [ \"\$(tag $S1 @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 check "still no state files" "[ -z \"\$(ls \"\$(GITDIR1)\" | grep -E '^player-')\" ]"
 
 echo "# resume when a stranger has taken the label meanwhile"
 tm kill-session -t "=$S1"; foreign "$S1"
 bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume --agent claude >"$T/resume2.out" 2>&1; rc=$?
 sleep 1
-check "resume recreates under the next label" "[ $rc = 0 ] && grep -q '^started *$S2\$' '$T/resume2.out' && grep -qx 'env ORCHESTRA_SESSION=$S2' '$T/last-claude' && [ \"\$(tag $S2 @orchestra-branch)\" = feature/x ]"
-check "stranger untouched" "tm has-session -t '=$S1' && [ -z \"\$(tag $S1 @orchestra-spawner)\" ]"
+check "resume recreates under the next label" "[ $rc = 0 ] && grep -q '^started *$S2\$' '$T/resume2.out' && grep -qx 'env ORCHESTRA_SESSION=$S2' '$T/last-claude' && [ \"\$(tag $S2 @session-x-orchestra-branch)\" = feature/x ]"
+check "stranger untouched" "tm has-session -t '=$S1' && [ -z \"\$(tag $S1 @session-launcher)\" ]"
 
 echo "# dir player: no branch, no worktree, addressed by its session name"
 DP="$T/loose"; mkdir -p "$DP"; SD=loose-dir; DPR="$(cd "$DP" && pwd -P)"
 bash "$O/spawn.sh" --dir "$DP" --prompt "tidy up" --agent claude --orchestrator tmux:parent >"$T/spawn-dir.out" 2>&1; rc=$?
 sleep 1.5
 check "dir spawn starts under the directory's name" "[ $rc = 0 ] && grep -q '^started *$SD\$' '$T/spawn-dir.out' && [ \"\$(tm display-message -p -t '=$SD:' '#{pane_current_path}')\" = '$DPR' ]"
-check "dir player tags: type dir, its directory as repo, no branch" \
-  "[ \"\$(tag $SD @orchestra-spawner)\" = orchestra ] && [ \"\$(tag $SD @orchestra-session-type)\" = dir ] && [ \"\$(tag $SD @orchestra-repo)\" = '$DPR' ] && [ -z \"\$(tag $SD @orchestra-branch)\" ]"
-check "claude starts a conversation with the id recorded on the session" "[ -n \"\$(tag $SD @orchestra-claude-session)\" ] && grep -qx 'arg=--session-id' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude'"
+check "dir player tags: type dir, its directory as cwd, no branch, worktree or repo" \
+  "[ \"\$(tag $SD @session-launcher)\" = orchestra ] && [ \"\$(tag $SD @session-x-orchestra-session-type)\" = dir ] && [ \"\$(tag $SD @session-cwd)\" = '$DPR' ] && [ -z \"\$(tag $SD @session-x-orchestra-branch)\$(tag $SD @session-worktree)\$(tag $SD @session-repo)\" ] && [ \"\$(tag $SD @session-version)\" = 1 ]"
+check "claude starts a conversation with the id recorded on the session" "[ -n \"\$(tag $SD @session-x-orchestra-claude-session)\" ] && grep -qx 'arg=--session-id' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @session-x-orchestra-claude-session)\" '$T/last-claude'"
 check "nothing was created in the directory" "[ -z \"\$(ls -A '$DP')\" ]"
 bash "$O/sessions.sh" --all --json > "$T/sessions-dir.json" 2>/dev/null
 check "sessions.sh lists it with its directory and no branch" "jq -e '.[] | select(.session == \"$SD\") | .repo == \"$DPR\" and .branch == \"\" and .agent == \"claude\"' '$T/sessions-dir.json' >/dev/null"
 (cd "$DP" && ORCHESTRA_SESSION="$SD" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" PROGRESS "from the dir") >"$T/report-dir.out" 2>&1; sleep 0.5
-check "its report reaches the orchestrator under its session name" "grep -q '\[player $SD\] PROGRESS: from the dir' '$T/received-claude' && tag $SD @orchestra-last-report | grep -q '^PROGRESS '"
+check "its report reaches the orchestrator under its session name" "grep -q '\[player $SD\] PROGRESS: from the dir' '$T/received-claude' && tag $SD @session-x-orchestra-last-report | grep -q '^PROGRESS '"
 bash "$O/send.sh" "$SD" --raw "ping-dir" >/dev/null && sleep 0.6
 check "send.sh and screen.sh by session name" "grep -q ping-dir '$T/received-claude' && bash '$O/screen.sh' '$SD' >/dev/null"
-check "adopt.sh by session name" "bash '$O/adopt.sh' '$SD' --orchestrator tmux:parent >/dev/null 2>&1 && [ \"\$(tag $SD @orchestra-orchestrator)\" = tmux:parent ]"
+check "adopt.sh by session name" "bash '$O/adopt.sh' '$SD' --orchestrator tmux:parent >/dev/null 2>&1 && [ \"\$(tag $SD @session-x-orchestra-orchestrator)\" = tmux:parent ]"
 tm send-keys -t "=$SD:" C-d; sleep 0.8
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>&1; rc=$?; sleep 1
-check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
+check "resume continues exactly its own conversation" "[ $rc = 0 ] && grep -qx 'arg=--resume' '$T/last-claude' && grep -qx \"arg=\$(tag $SD @session-x-orchestra-claude-session)\" '$T/last-claude' && ! grep -qx 'arg=--continue' '$T/last-claude' && grep -q 'restarted in this directory' '$T/last-claude'"
 bash "$O/kill.sh" "$SD" >/dev/null
 check "kill.sh by session name" "! tm has-session -t '=$SD' 2>/dev/null"
 bash "$O/spawn.sh" --dir "$DP" --resume >/dev/null 2>"$T/resume-gone.err"; rc=$?
@@ -418,28 +427,28 @@ echo "# B4/B5: report.sh ignores an inherited ORCHESTRA_MACHINE; resolve_orchest
 # $S1 is a stranger by this point (the "resume when a stranger has taken the label" section
 # above); $S2 is the actual current player, still reporting to tmux:parent.
 rm -f "$T/beam-log"
-tm set-option -t "=$S2:" @orchestra-orchestrator "tmux:parent"    # pin it: no dependency on tmux's "current session" fallback drifting by this point in the run
+tm set-option -t "=$S2:" @session-x-orchestra-orchestrator "tmux:parent"    # pin it: no dependency on tmux's "current session" fallback drifting by this point in the run
 (cd "$W1" && ORCHESTRA_MACHINE=workbox ORCHESTRA_SESSION="$S2" ORCHESTRA_SOCKET="$SOCK" bash "$P/report.sh" PROGRESS "still local") >"$T/b5.out" 2>"$T/b5.err"
 check "report.sh never asks 'workbox' about anything, even with ORCHESTRA_MACHINE set" \
   "grep -q 'sent to parent' '$T/b5.out' && [ ! -s '$T/beam-log' ]"
 
 echo "# report.sh over beam: delivered, stored, rejected"
-tm set-option -t "=$S1:" @orchestra-orchestrator "beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent"
+tm set-option -t "=$S1:" @session-x-orchestra-orchestrator "beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent"
 export FAKE_BEAM_OUTCOME=delivered
 (cd "$W1" && player DONE "over beam") >"$T/beam-report.out" 2>&1; brc=$?
 check "beam delivered: 'sent to', payload on stdin, tag carries a third field" \
-  "[ $brc = 0 ] && grep -qx 'sent to deadbeefcafef00ddeadbeefcafef00d' '$T/beam-report.out' && grep -q '^msg send deadbeefcafef00ddeadbeefcafef00d --topic orchestra -\$' '$T/beam-log' && grep -q 'target: tmux:parent' '$T/beam-sent-payload' && tag $S1 @orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
+  "[ $brc = 0 ] && grep -qx 'sent to deadbeefcafef00ddeadbeefcafef00d' '$T/beam-report.out' && grep -q '^msg send deadbeefcafef00ddeadbeefcafef00d --topic orchestra -\$' '$T/beam-log' && grep -q 'target: tmux:parent' '$T/beam-sent-payload' && tag $S1 @session-x-orchestra-last-report | grep -Eq '^DONE $STAMP delivered\$'"
 export FAKE_BEAM_OUTCOME=stored
 (cd "$W1" && player PROGRESS "still working") >"$T/beam-stored.out" 2>&1; brc=$?
 check "beam stored: success, exact wording, tag says stored" \
-  "[ $brc = 0 ] && grep -qxF 'stored for deadbeefcafef00ddeadbeefcafef00d; delivery pending (deadbeefcafef00ddeadbeefcafef00d is offline). beam will deliver it when deadbeefcafef00ddeadbeefcafef00d connects. Do not send it again.' '$T/beam-stored.out' && tag $S1 @orchestra-last-report | grep -Eq '^PROGRESS $STAMP stored\$'"
+  "[ $brc = 0 ] && grep -qxF 'stored for deadbeefcafef00ddeadbeefcafef00d; delivery pending (deadbeefcafef00ddeadbeefcafef00d is offline). beam will deliver it when deadbeefcafef00ddeadbeefcafef00d connects. Do not send it again.' '$T/beam-stored.out' && tag $S1 @session-x-orchestra-last-report | grep -Eq '^PROGRESS $STAMP stored\$'"
 export FAKE_BEAM_OUTCOME=rejected FAKE_BEAM_REJECT_REASON="unknown-peer"
 before_opts="$(tm show-options -t "=$S1:")"
 (cd "$W1" && player BLOCKED "need help") >"$T/beam-rejected.out" 2>"$T/beam-rejected.err"; brc=$?
 check "beam rejected: delivery failed with beam's reason, no session write" \
   "[ $brc = 1 ] && grep -qx 'report.sh: delivery failed' '$T/beam-rejected.err' && grep -q 'Target: beam:deadbeefcafef00ddeadbeefcafef00d/tmux:parent' '$T/beam-rejected.err' && grep -q 'Reason: beam rejected the message (exit 1): unknown-peer' '$T/beam-rejected.err' && grep -qF 'Report: [player $S1] BLOCKED: need help' '$T/beam-rejected.err' && [ \"\$(tm show-options -t "=$S1:")\" = \"\$before_opts\" ]"
 unset FAKE_BEAM_OUTCOME FAKE_BEAM_REJECT_REASON
-tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
+tm set-option -t "=$S1:" @session-x-orchestra-orchestrator "tmux:parent"
 
 echo "# relay.sh delivers a beamed-in envelope to a real local pane"
 # Without a real attached client, tmux resolves an untargeted "current session" (what
@@ -450,7 +459,7 @@ echo "# relay.sh delivers a beamed-in envelope to a real local pane"
 # the "report.sh from the player" section above already resets it after killing it.
 tm kill-session -t '=parent' 2>/dev/null
 (unset TMUX TMUX_PANE; tm new-session -d -s parent -x 120 -y 30 -- "$T/bin/claude")
-tm set-option -t "=$S1:" @orchestra-orchestrator "tmux:parent"
+tm set-option -t "=$S1:" @session-x-orchestra-orchestrator "tmux:parent"
 printf '{"id":"e1","from":"p","to":"q","seq":1,"topic":"orchestra","encoding":"utf8","payload":"target: tmux:parent\\n\\n[player relayed] DONE: via relay"}\n' > "$T/beam-inbox"
 relay_with_daemon >"$T/relay.out" 2>"$T/relay.err"      # $TMUX is already exported above, as it would be from an orchestrator's own pane
 check "relay.sh subscribes on the control socket with flat parameters" \

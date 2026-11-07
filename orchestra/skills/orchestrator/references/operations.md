@@ -25,7 +25,7 @@ which would create or act on a player on the wrong machine.
   peers are registered, every peer's players too — one listing call per machine. Rows then carry
   a MACHINE column (`--json`: a `"machine"` field); with no beam or no peers this is unchanged.
 - A player spawned or adopted onto a remote machine reports back through beam: its
-  `@orchestra-orchestrator` tag holds `beam:<this orchestrator's peerId>/claude:<session-id>` (or
+  `@session-x-orchestra-orchestrator` tag holds `beam:<this orchestrator's peerId>/claude:<session-id>` (or
   `codex:<thread-id>`, `tmux:<session>`) instead of the plain local form, learned from `beam status --json` run on
   this machine at spawn/adopt time. `report.sh`'s player-facing behavior for this is documented
   in the player `SKILL.md`.
@@ -64,31 +64,60 @@ else already relaying that topic; N10 Desktop runs its own relay, so do not run 
 
 Everything the scripts know about a player is stored on its tmux session as session user
 options (tags), never in files. Tags die with the session and are readable by anyone who can
-reach the tmux server; Kirby reads and writes the same names. `sessions.sh` shows them;
-`tmux show-options -qv -t '=SESSION:' @orchestra-agent` reads one directly.
+reach the tmux server. The keys follow the shared
+[tmux agent-session convention](https://github.com/notaharness/tmux-agent-conventions), schema
+`1`: core keys `@session-*`, plus Orchestra's registered extensions `@session-x-orchestra-*`.
+n10 writes and reads the same record. `sessions.sh` shows it;
+`tmux show-options -qv -t '=SESSION:' @session-agent` reads one key directly.
 
-| Tag | Value |
+A session's record is valid when `@session-version` is `1`, `@session-agent` and
+`@session-launcher` are tokens, the launcher is `orchestra` or `n10`, and every path present is
+absolute. A valid record with `@session-worktree` and `@session-repo` is a worktree player; one
+with launcher `orchestra`, session-type `dir` and `@session-cwd` is a dir player. Anything else is
+not a player: no valid record, another launcher, n10's terminal tabs, and sessions tagged only
+with the `@orchestra-*` names of earlier releases. Those are never listed, adopted or killed.
+
+Core keys:
+
+| Key | Value |
 | --- | --- |
-| `@orchestra-spawner` | `orchestra` or `kirby`: which program created the session |
-| `@orchestra-repo` | absolute, symlink-resolved path of the main checkout; for a dir player, of its directory, which need not be a repo |
-| `@orchestra-session-type` | `worktree` or `dir` for a player; `shell`/`agent` are Kirby terminal tabs, never players |
-| `@orchestra-branch` | worktree players only: the branch the session was spawned under, unsanitized (`feature/x`) |
-| `@orchestra-worktree-path` | worktree players only: the checkout's canonical (symlink-resolved) path. A worktree player is found by this path, not by its branch, so it stays the same player after a `git switch` |
-| `@orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
-| `@orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
-| `@orchestra-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
-| `@orchestra-target` | on the session an orchestrator runs in (which may itself be a player's, for nested orchestration): the local `claude:<session-id>` or `codex:<thread-id>` target its players carry, written by `spawn.sh`/`adopt.sh` inside tmux when the target is their own identity, resolved or given explicitly; never for an explicit target naming another orchestrator. A `tmux:` target needs none: it names the session. The latest orchestrator in the session replaces it, and any other session on that tmux server holding the same value gives it up; a session on another server or machine can still hold a stale copy |
-| `@orchestra-launching` | `1` only while the placeholder pane exists |
-| `@orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
-| `@orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted — a third field appended to the older two-field form; a reader that splits on whitespace and takes only the first two still gets KIND and the timestamp |
+| `@session-version` | `1`, written after every other key of the record; Orchestra writes it only on a record it created itself |
+| `@session-agent` | harness in the pane: `claude`, `codex`, `gemini`, `copilot`, `opencode` or `custom` |
+| `@session-launcher` | `orchestra` or `n10`: which program created the session |
+| `@session-pane` | `%N`, the pane the harness runs in (`respawn-pane` keeps it) |
+| `@session-cwd` | a worktree player's checkout; a dir player's directory, which need not be a repo |
+| `@session-worktree` | worktree players only: the checkout. A worktree player is found by this path, not by its branch, so it stays the same player after a `git switch` |
+| `@session-repo` | worktree players only: the main checkout |
 
-The first five tags (three for a dir player, which has no branch or worktree) are a session's identity,
-written once when it is created; the name is only a label. The pane environment carries
-`ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET` (the tmux server socket that holds the
-session; the player's own tmux environment is redirected to a scratch server), `ORCHESTRA_MODE`,
-`ORCHESTRA_HARNESS`, `ORCHESTRA_MODEL`, `ORCHESTRA_EFFORT`, `ORCHESTRA_PERMISSION_MODE`,
-`ORCHESTRA_COMMAND` and `ORCHESTRA_CLAUDE_SKILL`. The orchestrator target is not an environment variable: the player
-reads the tag. Sessions created by earlier versions of these scripts are not recognised.
+Orchestra's extensions (its contract for other readers; n10 reads them):
+
+| Key | Value |
+| --- | --- |
+| `@session-x-orchestra-session-type` | `worktree` or `dir` |
+| `@session-x-orchestra-branch` | worktree players only: the branch the session was spawned under, unsanitized (`feature/x`); task context, never a lookup key. On an n10 session Orchestra shows `@session-x-n10-branch` instead |
+| `@session-x-orchestra-orchestrator` | reporting target: `claude:<session-id>`, `codex:<thread-id>` or `tmux:<session>`, or, when the orchestrator is on another machine, `beam:<orchestrator peerId>/` followed by one of those three |
+| `@session-x-orchestra-orchestrator-config` | local `claude:` targets only: the orchestrator's Claude config directory, where `report.sh` looks the session up; unset for every other target |
+| `@session-x-orchestra-target` | on the session an orchestrator runs in (which may itself be a player's, for nested orchestration): the local `claude:<session-id>` or `codex:<thread-id>` target its players carry, written by `spawn.sh`/`adopt.sh` inside tmux when the target is their own identity, resolved or given explicitly; never for an explicit target naming another orchestrator. A `tmux:` target needs none: it names the session. The latest orchestrator in the session replaces it, and any other session on that tmux server holding the same value gives it up; a session on another server or machine can still hold a stale copy. It never makes that session participate in the convention |
+| `@session-x-orchestra-launching` | `1` only while the placeholder pane exists |
+| `@session-x-orchestra-claude-session` | dir players running Claude: the id of the conversation the launcher started, which `--resume` continues |
+| `@session-x-orchestra-last-report` | `<KIND> <ISO-8601 UTC> <delivered\|stored\|inbox\|queue\|paste>` of the last report a transport accepted. Not agent status: a reader that splits on whitespace and takes only the first two fields still gets KIND and the timestamp |
+
+A tool that replaces a player's agent in a fresh conversation may clear the routing extensions
+(`-orchestrator`, `-orchestrator-config`, `-last-report`, `-target`); the player's reports then
+fail as undeliverable rather than reach the previous orchestrator. Orchestra does not publish
+`@session-status*`; it withdraws any such keys before it respawns an agent, and `sessions.sh`
+keeps its own busy/idle/dead observation.
+
+The identity (launcher, session-type, cwd, worktree, repo, branch and pane; launcher,
+session-type, cwd and pane for a dir player) is written once when the session is created, in one
+tmux command queue, before anything starts in the pane; the name is only a label. Values are
+single-line UTF-8 without control characters, paths absolute and symlink-resolved: a required
+value that cannot be recorded stops the spawn, and any other is left unset rather than altered.
+The pane environment carries `ORCHESTRA_SESSION` (that label), `ORCHESTRA_SOCKET` (the tmux
+server socket that holds the session; the player's own tmux environment is redirected to a
+scratch server), `ORCHESTRA_MODE`, `ORCHESTRA_HARNESS`, `ORCHESTRA_MODEL`, `ORCHESTRA_EFFORT`,
+`ORCHESTRA_PERMISSION_MODE`, `ORCHESTRA_COMMAND` and `ORCHESTRA_CLAUDE_SKILL`. The orchestrator
+target is not an environment variable: the player reads the tag.
 
 ## Reporting destination
 
@@ -109,10 +138,10 @@ resolved destination is then qualified with this machine's own peerId (from `bea
 run here) into `beam:<peerId>/<destination>`, since a bare `claude:`/`codex:`/`tmux:` target is
 only meaningful on the machine that wrote it.
 
-The destination is written to the player session's `@orchestra-orchestrator` tag at spawn
+The destination is written to the player session's `@session-x-orchestra-orchestrator` tag at spawn
 and adopt; a player cannot change it and never uses its own Codex ID as parent. A local `claude:`
 destination also records this process's Claude config directory (`$CLAUDE_CONFIG_DIR`, else
-`~/.claude`) in `@orchestra-orchestrator-config`, since the player may run with a different one.
+`~/.claude`) in `@session-x-orchestra-orchestrator-config`, since the player may run with a different one.
 A pane gets the tmux server's environment, not the orchestrator's, so a local player is given
 this process's `CLAUDE_CONFIG_DIR` and `CODEX_HOME` explicitly (unset when they are unset) and runs
 on the same Claude and Codex accounts; `ANTHROPIC_API_KEY` and the rest are whatever the tmux
@@ -121,14 +150,14 @@ known parent-session markers (`CLAUDECODE`, `CLAUDE_CODE_*` session variables,
 `CODEX_THREAD_ID`, …) are removed from it.
 
 Player `report.sh` routes `claude:` to that session's inbox socket, found in Claude's registry
-under `@orchestra-orchestrator-config` (else the player's `$CLAUDE_CONFIG_DIR`, else `~/.claude`)
+under `@session-x-orchestra-orchestrator-config` (else the player's `$CLAUDE_CONFIG_DIR`, else `~/.claude`)
 and never pasted anywhere: a session that is not running, or a stale registry entry, is a delivery
 failure. `codex:` goes via `codex queue`, `tmux:` via `ORCHESTRA_SOCKET` — to a Claude Code
 session's inbox socket or a Codex TUI's queue when the pane has one, else as a paste — and
 `beam:<peer>/…` via `beam msg send`. A Claude session in `bypassPermissions` mode holds inbox
 messages for approval unless its settings set `"crossSessionInbound": "accept"`. It prints `queued for …` (Codex) or `sent to …` (Claude, tmux, or a
 beam delivery the far side acknowledged) only when the transport accepted the message, and then
-sets `@orchestra-last-report`. A beam send that comes back `stored` — the far machine is offline or
+sets `@session-x-orchestra-last-report`. A beam send that comes back `stored` — the far machine is offline or
 has not acknowledged it yet, and beam keeps delivering it — is also success and is worded to say so
 plainly; see the player `SKILL.md` for the exact wording.
 Otherwise it exits nonzero and prints `delivery failed`

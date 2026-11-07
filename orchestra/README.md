@@ -262,8 +262,11 @@ its next queued turn, and anything else by being pasted into its tmux pane. `spa
 An accepted report has not necessarily been read. A failed report is not retried: if a player
 looks finished but nothing arrived, ask the orchestrator to check its screen.
 
-Orchestra stores each player's state in `@orchestra-*` tmux session options; the full list is
-in [the orchestrator skill](skills/orchestrator/SKILL.md).
+Orchestra stores each player's state in tmux session options that follow the shared
+[tmux agent-session convention](https://github.com/notaharness/tmux-agent-conventions):
+`@session-*` core keys plus its own `@session-x-orchestra-*` extensions, which n10 reads too.
+Sessions tagged only with the `@orchestra-*` names of earlier releases are not recognised. The
+full list is in [the orchestrator skill's operations reference](skills/orchestrator/references/operations.md#session-tags).
 
 ## Recover after a crash
 

@@ -77,8 +77,10 @@ install would use:
   guidance clearly labeled and Codex metadata in `agents/openai.yaml`. Do not create
   client-specific copies of the instructions.
 - Session names are labels (`<repo dir>-<branch>`, with a numeric suffix on collision);
-  identity lives in the `@orchestra-*` tmux session options. Those options and the
-  worktree location (`.claude/worktrees/`) are shared with n10; do not change them.
+  identity lives in the session's `@session-*` record (the tmux agent-session convention,
+  with Orchestra's `@session-x-orchestra-*` extensions), whose names `_routing.sh` alone
+  owns. The record and the worktree location (`.claude/worktrees/`) are shared with n10;
+  change them only together with n10.
 - Tests (no model calls, isolated tmux socket):
   ```bash
   python3 orchestra/tests/test_port.py
