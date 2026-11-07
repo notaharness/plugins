@@ -35,7 +35,7 @@ TAGS = ['@session-version', '@session-agent', '@session-launcher', '@session-pan
         '@session-status', '@session-status-kind', '@session-status-at',
         '@session-x-orchestra-session-type', '@session-x-orchestra-branch', '@session-x-orchestra-orchestrator',
         '@session-x-orchestra-orchestrator-config', '@session-x-orchestra-launching', '@session-x-orchestra-last-report',
-        '@session-x-orchestra-claude-session', '@session-x-orchestra-target', '@session-x-n10-branch']
+        '@session-x-orchestra-claude-session', '@session-x-orchestra-target', '@session-x-orchestra-agent-provisional', '@session-x-n10-branch']
 # Pinned with Kirby (CLAUDE.md carries the same table): sanitize() and the session labels built
 # from it must agree byte for byte in both implementations.
 SANITIZE = [('feature/x', 'feature-x'), ('release/v1.0:rc1', 'release-v1-0-rc1'), ('a/b_c-d', 'a-b_c-d'), ('plain', 'plain')]
@@ -364,14 +364,15 @@ class PortTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix='orch-test.')
         self.base = Path(self.tmp.name); self.repo = self.base/'repo'; self.repo.mkdir(); self.bin = self.base/'bin'; self.bin.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('CLAUDE', 'CODEX', 'ORCHESTRA', 'TMUX', 'ANTHROPIC', 'PLAYER'))}
-        # A beam installed on the machine running the tests must not answer for the fake machines
-        # here (sessions.sh --all would list its real peers): only a test's own stub is beam.
-        path = ':'.join(d for d in self.env['PATH'].split(':') if not os.access(os.path.join(d, 'beam'), os.X_OK))
-        self.env.update(PATH=str(self.bin)+':'+path, CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
+        self.env.update(PATH=str(self.bin)+':'+self.env['PATH'], CODEX_THREAD_ID=ID, CODEX_SESSION_ID=ID, ORCH_TEST_TMP=str(self.base),
                         CODEX_HOME=str(self.base/'codex-home'), CLAUDE_CONFIG_DIR=str(self.base/'claude-config'),
                         ORCH_TEST_DEFAULT_SOCK='/tmp/tmux-%d/default' % os.getuid())
         self.git_init(self.repo)
         self.stub('tmux', TMUX_MOCK); self.stub('codex', CLI_MOCK); self.stub('claude', CLI_MOCK)
+        # A beam installed on the machine running the tests must not answer for the fake machines
+        # here (sessions.sh --all would list its real peers): by default beam is a stub that fails
+        # every command, which tests that need beam replace with BEAM_MOCK.
+        self.stub('beam', '#!/bin/sh\necho "beam: not available in this test" >&2\nexit 1\n')
         self.wt = self.repo/'.claude/worktrees/feature-test'
         self.session = 'repo-feature-test'                     # sanitize(basename(repo)) + "-" + sanitize(branch)
         self.sock = '/tmp/tmux-%d/default' % os.getuid()      # spawn.sh's default server when TMUX is unset
@@ -862,6 +863,26 @@ class PortTests(unittest.TestCase):
         self.assertEqual(self.options()['@session-version'], '1')
         del self.env['TEST_CLAUDE_EXIT']; self.spawn('--resume', prompt=False)
         self.assertEqual(sorted(self.state()), [self.session]); self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_SESSION'], self.session)
+    def test_a_guessed_agent_never_decides_a_later_resume(self):
+        # A Codex player's session vanished. A bare --resume guesses claude; Claude finds no
+        # conversation and no Codex rollout is found either, so nothing starts. The next bare
+        # --resume must still try Claude then Codex, not settle on the guess.
+        self.spawn('--agent', 'codex'); self.orch('kill.sh', self.session)
+        self.env['TEST_CLAUDE_NOCONV'] = '1'; self.spawn('--resume', prompt=False)
+        o = self.options(); self.assertEqual((o['@session-agent'], o['@session-x-orchestra-agent-provisional'], o['@session-version']), ('claude', '1', '1'))
+        self.rollout(str(self.wt.resolve())); n = len(self.calls()); self.spawn('--resume', prompt=False)
+        self.assertEqual([c['cli'] for c in self.calls()[n:]], ['claude', 'codex']); self.assertEqual(self.calls()[-1]['args'][:2], ['resume', UUID])
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        o = self.options(); self.assertEqual(o['@session-agent'], 'codex'); self.assertNotIn('@session-x-orchestra-agent-provisional', o)
+        # A Claude probe that fails for another reason leaves the guess provisional too.
+        del self.env['TEST_CLAUDE_NOCONV']; self.orch('kill.sh', self.session); self.env['TEST_CLAUDE_EXIT'] = '1'
+        self.spawn('--resume', prompt=False); self.spawn('--resume', prompt=False)
+        self.assertEqual(self.calls()[-1]['env']['ORCHESTRA_HARNESS'], 'auto')
+        self.assertEqual(self.options()['@session-x-orchestra-agent-provisional'], '1')
+        # An explicit harness is never provisional, even when the launcher never runs to record it.
+        del self.env['TEST_CLAUDE_EXIT']; self.kill_pane(); self.env['TEST_RESPAWN_FAIL'] = '1'
+        self.spawn('--resume', '--agent', 'codex', prompt=False, ok=False)
+        o = self.options(); self.assertEqual(o['@session-agent'], 'codex'); self.assertNotIn('@session-x-orchestra-agent-provisional', o)
     def test_a_failed_spawn_leaves_no_session_behind(self):
         # A config dir or target that cannot be recorded stops the spawn before anything exists.
         mine = self.env['CLAUDE_CONFIG_DIR']
@@ -1677,7 +1698,7 @@ class PortTests(unittest.TestCase):
         calls_before = len(self.tmux_calls())
         # Only the stubs and the system directories: a beam installed on the host running the
         # suite must not resolve here, and neither may an n10 binary stand in for it.
-        self.stub('n10', CLI_MOCK); env = dict(self.env, PATH=str(self.bin)+':/usr/bin:/bin')
+        (self.bin/'beam').unlink(); self.stub('n10', CLI_MOCK); env = dict(self.env, PATH=str(self.bin)+':/usr/bin:/bin')
         x = self.run_cmd(['bash', '-c', '. "$0"; ORCH_MACHINE=ghost tmux_on "" list-sessions', self.script('_lib.sh')], cwd=self.base, ok=False, env=env)
         self.assertNotEqual(x.returncode, 0)
         self.assertIn('$ORCHESTRA_BEAM', x.stderr); self.assertIn("'beam' on PATH", x.stderr); self.assertNotIn('n10', x.stderr)

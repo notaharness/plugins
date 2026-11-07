@@ -292,7 +292,7 @@ bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume >/dev/null 2>&1
 sleep 2
 check "claude ran, codex did not" "grep -q '^cli=claude' '$T/last-call' && ! grep -q '^cli=codex' '$T/last-call'"
 check "pane left dead for inspection" "[ \"\$(tm display-message -p -t '=$S1:' '#{pane_dead}')\" = 1 ]"
-check "a failed auto start keeps the provisional agent, so the session stays registered" "[ \"\$(tag $S1 @session-agent)\" = claude ] && [ \"\$(tag $S1 @session-version)\" = 1 ]"
+check "a failed auto start keeps the provisional agent, so the session stays registered" "[ \"\$(tag $S1 @session-agent)\" = claude ] && [ \"\$(tag $S1 @session-x-orchestra-agent-provisional)\" = 1 ] && [ \"\$(tag $S1 @session-version)\" = 1 ]"
 rm -f "$T/fake-claude-exit"
 
 echo "# resume: explicit --agent codex without any recorded conversation -> refuses, no fresh start"

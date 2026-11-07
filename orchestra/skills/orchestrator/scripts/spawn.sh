@@ -223,7 +223,8 @@ fi
 MODE=fresh; [ $RESUME = 1 ] && MODE=resume
 HARNESS="$AGENT"
 if [ $RESUME = 1 ] && [ -z "$HARNESS" ]; then
-  [ "$EXISTING" = none ] || HARNESS="$REC_AGENT"
+  # A provisional agent is a guess an earlier auto resume recorded and no harness confirmed: unknown.
+  [ "$EXISTING" = none ] || [ "$REC_AGENT_PROVISIONAL" = 1 ] || HARNESS="$REC_AGENT"
   case "$HARNESS" in claude|codex|gemini|copilot|opencode) ;; *) HARNESS=auto;; esac
 fi
 [ $RESUME = 1 ] || HARNESS="${HARNESS:-claude}"
@@ -385,11 +386,14 @@ tag_set "$ORCH_SOCK" "$name" "$KEY_LAUNCHING" 1 || exit 1
 set_orchestrator "$ORCH_SOCK" "$name" "$ORCH" || exit 1
 mark_orchestrator_session
 # auto is recorded as claude for now, the harness the launcher tries first (and a dir player's
-# only one); the launcher records codex if it falls back. So a player resumed with no known harness
-# (its session gone after a reboot, say) is registered, listed and reusable while it runs, and
-# after a failed start too.
-agent_now="$HARNESS"; [ "$HARNESS" = auto ] && agent_now=claude
-tag_set "$ORCH_SOCK" "$name" "$KEY_AGENT" "$agent_now" && session_publish_version "$ORCH_SOCK" "$name" ||
+# only one), and marked provisional; the launcher records the harness that actually starts and
+# clears the mark. So a player resumed with no known harness (its session gone after a reboot,
+# say) is registered, listed and reusable while it runs and after a failed start, and the next
+# --resume still treats its harness as unknown.
+tq_reset
+if [ "$HARNESS" = auto ]; then tq_set "$name" "$KEY_AGENT" claude; tq_set "$name" "$KEY_AGENT_PROVISIONAL" 1
+else tq_set "$name" "$KEY_AGENT" "$HARNESS"; tq_unset "$name" "$KEY_AGENT_PROVISIONAL"; fi
+tq_run "$ORCH_SOCK" && session_publish_version "$ORCH_SOCK" "$name" ||
   echo "spawn.sh: could not record the agent on $name" >&2
 t set-option -t "$tt" status off
 t set-option -t "$tt" remain-on-exit on

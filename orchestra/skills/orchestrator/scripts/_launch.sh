@@ -58,7 +58,10 @@ buf="$(prompt_buffer_name "$session")"
 # spawn.sh adds (tmux never creates an empty buffer, and an empty body is allowed).
 body="$(tmux -S "$sock" show-buffer -b "$buf" 2>/dev/null)" || fail "no task buffer $buf on $sock (rerun spawn.sh)"
 tmux -S "$sock" delete-buffer -b "$buf" 2>/dev/null
-remember() { tag_set "$sock" "$session" "$KEY_AGENT" "$1" 2>/dev/null && session_publish_version "$sock" "$session" 2>/dev/null; true; }
+remember() {
+  tq_reset; tq_set "$session" "$KEY_AGENT" "$1"; tq_unset "$session" "$KEY_AGENT_PROVISIONAL"
+  tq_run "$sock" 2>/dev/null && session_publish_version "$sock" "$session" 2>/dev/null; true
+}
 # <invocation> [restart note] <body>
 preamble() {
   local inv; case "$1" in codex) inv='$player';; *) inv="${ORCHESTRA_CLAUDE_SKILL:-/orchestra:player}";; esac
