@@ -35,6 +35,9 @@ T="$T"
 cp "\$T/last-$cli" "\$T/last-call"
 if [ -f "\$T/fake-$cli-noconv" ]; then echo 'No conversation found to continue'; exit 1; fi
 if [ -f "\$T/fake-$cli-exit" ]; then exit "\$(cat "\$T/fake-$cli-exit")"; fi
+echo \$\$ > "\$T/pid-$cli"
+# Raw mode like the real TUI: ^D is then a plain byte, not an EOF that would end cat by itself.
+if [ -f "\$T/fake-$cli-raw" ]; then stty raw -echo 2>/dev/null; fi
 exec cat >> "\$T/received-$cli"
 FAKE
 chmod +x "$T/bin/$cli"; done
@@ -489,5 +492,22 @@ echo "# relay.sh refuses to run with no default target and no --allow"
 env -u TMUX bash "$O/relay.sh" --topic orchestra >"$T/noallow.out" 2>"$T/noallow.err"; noallow_rc=$?
 check "relay.sh needs --allow outside a tmux pane" \
   "[ $noallow_rc = 2 ] && grep -q 'pass --allow' '$T/noallow.err'"
+
+echo "# a resumed worktree player's Claude ends with its session"
+# A worktree resume runs Claude under script(1), a child of the pane's launcher. When the pane goes
+# (kill.sh, kill-server, a crashed server) only the launcher gets SIGHUP; script(1) must not keep
+# Claude running with no terminal.
+bash "$O/kill.sh" feature/x --repo "$T/repo" >/dev/null 2>&1
+touch "$T/fake-claude-raw"; rm -f "$T/pid-claude"
+bash "$O/spawn.sh" --repo "$T/repo" --branch feature/x --resume --agent claude >"$T/orphan.out" 2>&1
+SO="$(sed -nE 's/^started +//p' "$T/orphan.out")"
+for _ in $(seq 50); do [ -s "$T/pid-claude" ] && break; sleep 0.1; done
+cpid="$(cat "$T/pid-claude" 2>/dev/null)"
+check "resumed claude runs under script(1)" "[ -n '$SO' ] && [ -n '$cpid' ] && [ \"\$(ps -o comm= -p \"\$(ps -o ppid= -p '$cpid')\")\" = script ]"
+bash "$O/kill.sh" "$SO" >/dev/null
+for _ in $(seq 50); do kill -0 "$cpid" 2>/dev/null || break; sleep 0.1; done
+check "kill.sh leaves no orphaned claude behind" "[ -n '$cpid' ] && ! kill -0 '$cpid' 2>/dev/null"
+[ -n "$cpid" ] && kill -9 "$cpid" 2>/dev/null
+rm -f "$T/fake-claude-raw"
 
 echo; echo "passed $pass, failed $fail"; [ $fail = 0 ]

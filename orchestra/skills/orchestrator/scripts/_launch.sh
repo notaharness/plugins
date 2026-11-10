@@ -154,15 +154,31 @@ resume_codex() {
 }
 # claude_continue_probed: `claude --continue` under script(1), so its output can be checked for the
 # exact NO_CONVERSATION diagnostic. Returns Claude's exit status; NOCONV=1 when it printed that.
+#
+# Claude must end with the pane. When the pane goes (kill.sh, kill-server, a tmux server that dies)
+# the kernel sends SIGHUP only to the pane's session leader, this shell; script(1) is its child,
+# never sees the hangup and would keep Claude running with no terminal, unreachable. So script(1)
+# runs in the background and the trap turns the shell's HUP or TERM into a SIGTERM for script(1),
+# which forwards it to Claude. A background command reads /dev/null unless stdin is redirected
+# explicitly, hence the <&0 that keeps the pane as script's input.
 claude_continue_probed() {
-  local log rc
+  local log rc pid="" hup=""
   log="$(mktemp /tmp/orchestra-resume-probe.XXXXXX)" || fail "cannot create a probe log in /tmp"
+  # Set before the launch so no hangup slips in between; one arriving before $pid is known is
+  # caught by the check after wait.
+  trap 'hup=1; [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null' HUP TERM
   # The prompt and options travel in the environment; the sh -c string contains no user text.
   # script(1) runs the command through $SHELL: pin /bin/sh so a login shell's rc files cannot
   # reorder PATH or otherwise change which claude binary starts.
   PROMPT="$(preamble claude)" SHELL=/bin/sh script -qefc \
-    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} "$PROMPT"' "$log"
-  rc=$?; NOCONV=0
+    'exec claude --continue ${ORCHESTRA_PERMISSION_MODE:+--permission-mode "$ORCHESTRA_PERMISSION_MODE"} ${ORCHESTRA_MODEL:+--model "$ORCHESTRA_MODEL"} ${ORCHESTRA_EFFORT:+--effort "$ORCHESTRA_EFFORT"} "$PROMPT"' "$log" <&0 &
+  pid=$!
+  [ -n "$hup" ] && kill -TERM "$pid" 2>/dev/null
+  wait "$pid"; rc=$?
+  # A trapped signal ends wait early (status 128+n); wait again for script's own exit status.
+  while kill -0 "$pid" 2>/dev/null; do wait "$pid"; rc=$?; done
+  trap - HUP TERM
+  NOCONV=0
   [ $rc -ne 0 ] && grep -aq "$NO_CONVERSATION" "$log" && NOCONV=1
   rm -f "$log"; return $rc
 }
